@@ -1,0 +1,196 @@
+# v1 plan
+
+What the first version contains, what waits for v2, and the order to build it in. Terms are defined in [CONTEXT.md](../CONTEXT.md). The reasoning behind the big decisions is in [docs/adr/](adr/).
+
+## What v1 is
+
+One **Author** can write a novel or short story on Windows, Debian and Android from a single Syncthing-synced **Vault**. Every **Change** is kept in a **History** that follows text through **Moves**. **Reviewer** **Comments** survive editing. Typst typesets the **Work** with a live **Page preview**, and there are PDF and plain `.docx` **Exports**.
+
+## Scope
+
+### In v1
+
+**History engine (Rust core)**
+
+- Every character knows which Change wrote it ([ADR 0003](adr/0003-character-level-history-with-moves.md)).
+- Kinds of Change: typing burst, deletion, replaced selection, paste, Move, Revert, External edit, Comment actions, Preamble edits, Style and Story element definitions recorded, image inserted or replaced.
+- A typing burst closes when you pause (about 5 s), the cursor leaves, you start a different kind of action, or after about 60 s of nonstop typing. These numbers are for tuning and don't affect correctness. Typos fixed inside an open burst are never recorded.
+- Moves work on any selection, and edits made elsewhere to moved text follow it.
+- Revert also reverts dependent later Changes by default. A Revert can itself be reverted. Returning to a Milestone reverts everything after it.
+- One `.db` per Work. Every Device writes to it, and Conflict copies are merged back and deleted ([ADR 0002](adr/0002-one-self-healing-database-per-work.md)).
+- Changes are stored as readable rows. A `.db` opened in DB Browser for SQLite makes sense to a person.
+- The app never holds a `.db` open between writes. Unsaved Changes stay in a recovery file outside the Vault until the app has seen them in the `.db`.
+- The Text file is regenerated on save. External edits are detected and recorded. The app recognises Text file contents it wrote itself, including in Conflict copies of the Text file.
+- Images are stored in the `.db` once per unique content, and written out next to the Text file only when the Work has any ([ADR 0007](adr/0007-images-live-inside-the-work.md)).
+- `vault.db` holds Reviewers and shared settings, and merges the same way.
+
+**Typst**
+
+- Compiling runs in the Rust core. The Page preview supports clicking to jump to that spot in the text.
+- On desktop, compile shortly after each typing burst. On Android, compile only while the Page preview is open.
+- The Style library ships with default Styles, Looks and built-in Story elements. The Author can add Styles, Looks and their own Story elements.
+- A Story element definition has a name, how it's written, a default look, how it appears in the Formatted view (chip or block), and what the `.docx` Export does with it.
+- Built-in Story elements: Chapter, Part, scene break (typing `***` on an empty line converts it), emphasis, epigraph, block text (letters and in-world documents), dedication.
+- The Preamble panel, collapsed by default, holds Looks, extra Styles, title, author name, language and raw Typst.
+- Works record the Styles and Story element definitions they use, so Milestones re-render exactly as they were ([ADR 0004](adr/0004-works-record-styles-but-only-reference-fonts.md)).
+- Fonts are looked up in the Vault's `fonts/` folder, then the Device's fonts, and otherwise the app warns and uses a default.
+
+**Editor**
+
+- CodeMirror 6 with a Formatted view (markup hidden except at the cursor, with hover tooltips on desktop) and a Raw view toggle.
+- Story element chips, Reviewer-coloured Comment highlights, and optional "who/when" colouring by Session.
+- The platform's built-in spellcheck can be switched on or off.
+
+**Comments**
+
+- Right-click to add a Comment, and pick the sender (the Author or a Reviewer).
+- Reviewers belong to the Vault, each with a name, role label and colour.
+- Comments are open or resolved. Resolved ones are hidden by default. Short replies are supported.
+- Detached comments go to a side list with a quote of their original text, and reattach when the deletion is reverted.
+
+**History view**
+
+- Sessions with word-level highlights and the number of words added.
+- Named Milestones. Any two can be compared.
+- "History of this text" from a selection, and Revert with a preview that lists dependent Changes.
+
+**App**
+
+- On desktop: Vault browser and Chapter list on the left (dragging a Chapter is a Move), the editor with tabs in the middle, and a Page preview / Comments / History panel on the right.
+- Quick switcher (Ctrl+O), focus mode, and word counts per Work and per Chapter.
+- On the phone: one screen at a time, with a bottom bar to switch screens.
+- Themes: light, dark or follow the system, plus CSS themes in the Vault's `themes/` folder. Which theme is used and the editor font size are Device settings.
+- Device settings (theme, layout, Device ID, cursor positions) are never stored in the Vault.
+
+**Exports**
+
+- PDF in a chosen Look.
+- Plain `.docx` in standard manuscript formatting, keeping only structure and emphasis. Story elements are handled as their definitions say.
+
+**Platforms**
+
+- Windows, Debian and Android.
+- Android is a self-installed APK with "All files access" ([ADR 0006](adr/0006-android-uses-all-files-access.md)). All file access goes through one Rust module.
+
+### Not in v1
+
+Planned for v2:
+
+- Collections
+- Own spellchecker (Hunspell dictionaries through `spellbook`, plus a Vault-wide word list)
+- AI comments over MCP: comments only, anchored by quote, run as a `writer mcp` mode
+- Reading a second Work side by side
+- Importing Word comments as Comments
+- EPUB Export
+- Play Store build using the folder picker
+
+Out of scope entirely: notes and worldbuilding, grammar checking, Reviewers using the app themselves, and suggested edits.
+
+## Build order
+
+Riskiest first. Each phase ends with a "done when" check.
+
+### Phase 0: Experiments (go/no-go)
+
+Throwaway code, written to find showstoppers before investing in the real thing.
+
+- **0a, typing on Android.** A Tauri 2 Android app with a CodeMirror 6 editor.
+  *Done when:* typing, autocorrect, swipe typing and backspace work with Gboard and SwiftKey on a real phone, without lost or doubled characters.
+- **0b, Typst on Android.** Compile a sample novel of about 300 pages from Rust inside the app, using fonts from a Vault folder.
+  *Done when:* recompiling after a small edit feels instant (well under a second) on a mid-range phone.
+- **0c, files on Android.** With "All files access", open, write and close a SQLite file in the Syncthing folder while Syncthing syncs it from another Device.
+  *Done when:* there's no corruption, and the app notices when the file was replaced underneath it.
+
+If 0a fails, revisit [ADR 0005](adr/0005-tauri-with-rust-core-and-codemirror.md) before going further.
+
+### Phase 1: History engine
+
+A standalone Rust library with no UI. Everything else is built on it.
+
+- Data model: Changes as rows, character identity, Moves, Reverts, Sessions, Milestones.
+- Merging: take every Change from both copies, and absorb Conflict copies.
+- Text file generation, and importing External edits (compare the file with the current text and record the difference as Changes).
+- The burst interface the editor will call: open a burst, extend it, close it.
+- A terminal harness to try it out by hand (the `/prototype` skill fits here).
+
+*Done when:*
+
+- Three simulated Devices making random offline edits, Moves and Reverts, merged in any order, always end with identical text (property tests).
+- A Work's `.db` opened in DB Browser for SQLite reads as plain, understandable rows.
+- A generated novel-sized History (about 30,000 Changes) loads in under a second on desktop.
+
+Reading: Weidner & Kleppmann, *The Art of the Fugue: Minimizing Interleaving in Collaborative Text Editing* (2023); Kleppmann, *Moving Elements in List CRDTs* (2020).
+
+### Phase 2: Desktop editor
+
+- A Tauri 2 app: Vault browser, opening a Work, and CodeMirror connected to the History. Typing bursts become Changes, and Changes merged from Conflict copies or External edits appear in the editor.
+- Raw view first, then the Formatted view.
+- Tabs, quick switcher, Device settings, recovery file.
+
+*Done when:* you can write a short story on Windows and Debian, edit its Text file in vim, sync both machines through Syncthing with offline edits on each, and nothing is lost.
+
+### Phase 3: Typst
+
+- Compiling from the History, the Page preview, and click-to-jump.
+- The Style library, default Looks, built-in and Author-defined Story elements, and the Preamble panel.
+- Styles and Story element definitions recorded in the History, and font lookup.
+- PDF and `.docx` Exports.
+
+*Done when:* the same Work produces an identical PDF on Windows and Debian with the same Vault fonts, an old Milestone re-renders unchanged after a Style is edited, and the `.docx` opens cleanly in Word and LibreOffice.
+
+### Phase 4: Comments
+
+- Reviewers in `vault.db`, plus adding, replying to and resolving Comments, coloured highlights, and Detached comments.
+
+*Done when:* a Comment survives a Move, a partial deletion, a full deletion (it detaches) and a Revert (it reattaches).
+
+### Phase 5: History view
+
+- Sessions with word-level highlights, Milestones and comparing them, "History of this text", Revert with preview, and returning to a Milestone.
+
+*Done when:* in the "The rain had stopped." → "eased" scenario, reverting the first Change removes the sentence cleanly by default, and leaves "eased" behind only when you ask for that.
+
+### Phase 6: Polish and Android
+
+- The Chapter list with drag-to-reorder, focus mode, word counts, themes, and the spellcheck switch.
+- The Android layout (one screen at a time), the "All files access" flow, and compiling only while the Page preview is open.
+- Testing: Playwright on Chromium and WebKit, plus hand testing on a real phone with real keyboards.
+
+*Done when:* a full novel goes back and forth between Android, Windows and Debian through Syncthing, with offline edits on all three, and ends with identical text and Comments everywhere.
+
+## Open design questions for Phase 1
+
+Settle these while building the History engine, and write an ADR for any answer that's hard to reverse.
+
+- Two Devices Move the same text to different places while offline. Which one wins, and how is that decided the same way on every Device?
+- One Device Moves some text while another deletes part of it, or Moves part of it somewhere else.
+- How a Change ID is formed (Device ID + counter?) and how a Device gets its ID.
+- How long a gap ends a Session.
+- How the editor shows Changes merged in from elsewhere without making your cursor jump.
+- A Style file in `styles/` edited on two Devices. Style files are plain files with no History, so their Conflict copies can't merge automatically. Proposal: show both versions and let the Author pick.
+- An External edit on one Device while the app edits the same Work on another.
+
+## Main risks
+
+| Risk | Mitigation |
+|---|---|
+| Custom merge logic with Moves is hard to get right | Build it alone in Phase 1, with property tests, before any UI |
+| Android keyboards and web editors don't mix well | Phase 0a go/no-go; hand testing on real devices |
+| WebKitGTK on Debian (speed, graphics glitches) | Use only well-established web features; test on WebKit with Playwright; known workaround flag for graphics issues |
+| Syncthing replacing a `.db` while it's being written | Never hold it open; keep Changes until they're seen in the file (Phase 0c) |
+
+## Reference: Vault layout
+
+```
+Writing/                        ← the Vault (Syncthing folder)
+├── The Long Night.db           ← a Work's History
+├── The Long Night.typ          ← its Text file (regenerated)
+├── The Long Night.images/      ← regenerated image copies, only if the Work has images
+├── Short stories/              ← ordinary folders, any arrangement
+│   ├── Rain.db
+│   └── Rain.typ
+├── styles/                     ← Style library: Styles, Looks, Story elements
+├── themes/                     ← app themes (CSS)
+├── fonts/
+└── vault.db                    ← Reviewers and shared settings
+```

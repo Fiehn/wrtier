@@ -1,0 +1,3 @@
+# Android uses "All files access", not the folder picker
+
+On Android the app asks for "All files access" (MANAGE_EXTERNAL_STORAGE) so it can read and write the Vault in shared storage with normal file paths, using the same code as desktop. The app is a private tool installed from an APK, so Google Play's review of that permission doesn't apply. The folder picker (Storage Access Framework) was rejected for now: it gives no real file paths, so SQLite can't open a `.db` in place, and it would need a second, slower Android-only code path. All file access goes through one Rust module, so switching to the folder picker for a Play Store release would be contained work.
