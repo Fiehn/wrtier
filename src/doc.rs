@@ -2,6 +2,7 @@ use crate::change::{Change, ChangeKind, InsertRun, CharRange};
 use crate::fugue::Tree;
 use crate::ids::{ChangeId, DeviceId, Hlc, CharId};
 use std::collections::HashSet;
+use std::collections::HashMap;
 
 pub struct Doc {
     tree: Tree,
@@ -9,6 +10,7 @@ pub struct Doc {
     next_counter: u32,
     clock: Hlc,
     applied: HashSet<ChangeId>, // to avoid applying the same change twice
+    reverted_by: HashMap<ChangeId, Vec<ChangeId>>, // to track which changes have been reverted by which other changes
 }
 
 impl Doc {
@@ -19,11 +21,40 @@ impl Doc {
             next_counter: 1,
             clock: Hlc(0),
             applied: HashSet::new(),
+            reverted_by: HashMap::new(),
         }
     }
 
     pub fn text(&self) -> String {
         self.tree.text()
+    }
+
+    pub fn is_in_effect(&self, id:ChangeId) -> bool {
+        match self.reverted_by.get(&id) {
+            Some(reverters) => reverters.iter().all(|&r| !self.is_in_effect(r)),
+            None => true,
+        }
+    }
+    fn refresh_undone(&mut self) {
+        // Only changes that have been reverted can be undone, so chekc just those.
+        let undone: HashSet<ChangeId> = self.reverted_by.keys().copied()
+            .filter(|&id| !self.is_in_effect(id))
+            .collect();
+        self.tree.set_undone(undone);
+    }
+    pub fn revert_local(&mut self, target: ChangeId, with_dependents: bool, now_ms: u64) -> Change {
+        let mut targets = vec![target];
+        if with_dependents { targets.extend(self.depends_on(target)); }
+        self.commit_local(ChangeKind::Revert { targets }, now_ms)
+    }
+    pub fn restore_local(&mut self, target: ChangeId, now_ms: u64) -> Option<Change> {
+        let reverters = self.reverted_by.get(&target).cloned().unwrap_or_default();
+        let in_effect: Vec<ChangeId> = reverters.into_iter().filter(|&r| self.is_in_effect(r)).collect();
+        if in_effect.is_empty() {
+            None
+        } else {
+            Some(self.commit_local(ChangeKind::Revert { targets: in_effect }, now_ms))
+        }
     }
 
     pub fn text_of(&self, range: &CharRange) -> String {
@@ -52,14 +83,22 @@ impl Doc {
             }
             ChangeKind::Delete(ranges) => {
                 for range in ranges {
-                    self.tree.delete_range(range.first, range.len);
+                    self.tree.delete_range(range.first, range.len, change.id);
                 }
             }
             ChangeKind::Replace { deleted, inserted } => {
                 for range in deleted {
-                    self.tree.delete_range(range.first, range.len);
+                    self.tree.delete_range(range.first, range.len, change.id);
                 }
                 self.tree.insert_run(change.id, &inserted.text, inserted.parent, inserted.side, inserted.right_origin);
+            }
+            ChangeKind::Revert { targets } => {
+                // The Revert change itself doesn't modify the tree, but it affects which changes are considered undone.
+                // We need to update the reverted_by map and refresh the undone set.
+                for target in targets {
+                    self.reverted_by.entry(*target).or_default().push(change.id);
+                }
+                self.refresh_undone();
             }
         }
     }
@@ -105,6 +144,8 @@ impl Doc {
         self.apply(&change);
         change
     }
+
+    pub fn depends_on(&self, target: ChangeId) -> Vec<ChangeId> { self.tree.inside(target) }
 }
 
 #[cfg(test)]
@@ -192,5 +233,70 @@ mod test {
 
         assert_ne!(next.id, first.id);
     }
+
+    #[test]
+        fn revert_insert_hides_it() {
+            let mut doc = Doc::new(DeviceId(1));
+            doc.insert_local(0, "cat", 1000);
+            let sat = doc.insert_local(3, " sat", 2000);
+            doc.revert_local(sat.id, false, 3000);
+            assert_eq!(doc.text(), "cat");
+            assert!(!doc.is_in_effect(sat.id));
+        }
+        #[test]
+    fn revert_delete_brings_it_back() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "cat", 1000);
+        let del = doc.delete_local(1, 1, 2000); // "ct"
+        doc.revert_local(del.id, false, 3000);
+        assert_eq!(doc.text(), "cat");
+    }
+
+    #[test]
+    fn deleted_twice_stays_deleted_after_one_revert() {
+        let mut a = Doc::new(DeviceId(1));
+        let mut b = Doc::new(DeviceId(2));
+        let cat = a.insert_local(0, "cat", 1000);
+        b.apply(&cat);
+        let del_a = a.delete_local(1, 1, 2000); // both delete the "a" offline
+        let del_b = b.delete_local(1, 1, 2000);
+        a.apply(&del_b);
+        a.revert_local(del_a.id, false, 3000);
+        assert_eq!(a.text(), "ct"); // b's deletion still holds
+    }
+
+    #[test]
+    fn reverting_a_revert_restores() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "cat", 1000);
+        let sat = doc.insert_local(3, " sat", 2000);
+        let r = doc.revert_local(sat.id, false, 3000);
+        doc.revert_local(r.id, false, 4000);
+        assert_eq!(doc.text(), "cat sat");
+    }
+
+    #[test]
+    fn restore_undoes_reverts_from_two_devices() {
+        let mut a = Doc::new(DeviceId(1));
+        let mut b = Doc::new(DeviceId(2));
+        let cat = a.insert_local(0, "cat", 1000);
+        b.apply(&cat);
+        a.revert_local(cat.id, false, 2000); // both revert it offline
+        let rb = b.revert_local(cat.id, false, 2000);
+        a.apply(&rb);
+        assert_eq!(a.text(), "");
+        a.restore_local(cat.id, 3000).expect("cat had Reverts to undo");
+        assert_eq!(a.text(), "cat");
+    }
+
+    #[test]
+    fn reverting_one_character_with_dependents() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "cat", 1000);
+        let s = doc.insert_local(3, "s", 2000);   // a one-character Change
+        doc.revert_local(s.id, true, 3000);
+        assert_eq!(doc.text(), "cat");
+    }
+
 
 }

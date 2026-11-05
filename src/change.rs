@@ -19,6 +19,7 @@ pub enum ChangeKind {
     Insert(InsertRun),
     Delete(Vec<CharRange>),
     Replace {deleted: Vec<CharRange>, inserted: InsertRun},
+    Revert {targets: Vec<ChangeId>},
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

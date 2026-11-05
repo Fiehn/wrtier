@@ -39,6 +39,18 @@ fn migrate(conn: &Connection) -> Result<()> {
     if version < 1 {
         conn.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = 1; COMMIT;"))?;
     }
+    if version < 2 {
+        conn.execute_batch("
+        BEGIN;
+        CREATE TABLE revert_targets (
+            change TEXT NOT NULL REFERENCES changes(id),
+            target TEXT NOT NULL REFERENCES changes(id),
+            PRIMARY KEY (change, target)
+        );
+        PRAGMA user_version = 2;
+        COMMIT;
+        ")?;
+    }
     Ok(())
 }
 fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
@@ -53,6 +65,7 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                 ChangeKind::Insert(_) => "insert",
                 ChangeKind::Delete(_) => "delete",
                 ChangeKind::Replace { .. } => "replace",
+                ChangeKind::Revert { .. } => "revert",
             },
         ],
     )?;
@@ -113,6 +126,18 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                 ],
             )?;
         }
+        ChangeKind::Revert { targets } => {
+            // One row per target
+            for target in targets {
+                conn.execute(
+                    "INSERT OR IGNORE INTO revert_targets (change, target) VALUES (?1, ?2)",
+                    params![
+                        change.id.to_string(),
+                        target.to_string(),
+                    ],
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -132,8 +157,20 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
         let first: CharId = first.parse()?;
         ranges.entry(change).or_default().push(CharRange { first, len });
     }
+    // Pass 2: read every row of revert_targets into a HashMap<ChangeId, Vec<ChangeId>>
+    let mut revert_targets: HashMap<ChangeId, Vec<ChangeId>> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT change, target FROM revert_targets ORDER BY rowid")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (change, target) = row?;
+        let change: ChangeId = change.parse()?;
+        let target: ChangeId = target.parse()?;
+        revert_targets.entry(change).or_default().push(target);
+    }
 
-    // Pass 2: read every change
+    // Pass 3: read every change
     let mut stmt = conn.prepare(
         "SELECT c.id, c.hlc, c.kind, i.text, i.parent, i.side, i.right_origin
         FROM changes c LEFT JOIN insertions i ON i.change = c.id
@@ -185,6 +222,10 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
                 let right_origin = right_origin.map(|ro| ro.parse()).transpose()?;
                 ChangeKind::Replace { deleted: ranges, inserted: InsertRun { text, parent, side, right_origin } }
             }
+            "revert" => {
+                let targets = revert_targets.remove(&id).ok_or(format!("Missing revert targets for change {}", id))?;
+                ChangeKind::Revert { targets }
+            }
             other => return Err(format!("Unknown change kind: {}", other).into()),
         };
         changes.push(Change { id, hlc: Hlc(hlc as u64), kind });
@@ -216,12 +257,14 @@ pub fn load(path: &Path, device: DeviceId) -> Result<(Vec<Change>, Doc)> {
 }
 pub fn merge(main: &Path, other: &Path) -> Result<()> {
     // ATTACH the other file and run INSERT OR IGNORE INTO main.changes SELECT * FROM other.changes
+    migrate(&Connection::open(other)?)?;   // bring the other file up to date first
     let conn = Connection::open(main)?;
     migrate(&conn)?;
     conn.execute("ATTACH DATABASE ?1 AS other", [other.to_string_lossy()])?;
     conn.execute("INSERT OR IGNORE INTO changes SELECT * FROM other.changes", [])?;
     conn.execute("INSERT OR IGNORE INTO insertions SELECT * FROM other.insertions", [])?;
     conn.execute("INSERT OR IGNORE INTO deletions SELECT * FROM other.deletions", [])?;
+    conn.execute("INSERT OR IGNORE INTO revert_targets SELECT * FROM other.revert_targets", [])?;
     Ok(())
     // TODO: Checks of same id different content.
 }
@@ -236,7 +279,7 @@ mod test {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -291,6 +334,25 @@ mod test {
 
         assert_eq!(loaded_changes, changes);
         assert_eq!(loaded_doc.text(), doc.text());
+    }
+
+    #[test]
+    fn revert_with_dependents_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work.db");
+        let mut doc = Doc::new(DeviceId(1));
+        let rain = doc.insert_local(0, "The rain had stopped.", 1000);
+        let del = doc.delete_local(13, 7, 2000);
+        let eased = doc.insert_local(13, "eased", 3000);
+        let revert = doc.revert_local(rain.id, true, 4000);
+        assert_eq!(doc.text(), "");
+
+        let changes = vec![rain, del, eased, revert];
+        save(&path, &changes, &doc).unwrap();
+        let (loaded, loaded_doc) = load(&path, DeviceId(1)).unwrap();
+
+        assert_eq!(loaded, changes);
+        assert_eq!(loaded_doc.text(), "");
     }
 
     #[test]

@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use crate::ids::{CharId, Side, ChangeId};
+use std::collections::HashSet;
 
 struct Node {
     ch: char,
     parent: Option<CharId>, // None = root
     side: Side,
     right_origin: Option<CharId>,
-    deleted: bool,
+    deleted_by: Vec<ChangeId>, 
     left_children: Vec<CharId>, // Always kept sorted
     right_children: Vec<CharId>, // Always kept sorted
 }
@@ -14,6 +15,7 @@ struct Node {
 pub struct Tree {
     nodes: HashMap<CharId, Node>,
     root_children: Vec<CharId>, // The root only ever has right children
+    undone: HashSet<ChangeId> 
 }
 
 enum Visit { Expand(CharId), Output(CharId) }
@@ -24,7 +26,26 @@ impl Tree {
         Tree {
             nodes: HashMap::new(),
             root_children: Vec::new(),
+            undone: HashSet::new(),
         }
+    }
+
+    fn is_visible(&self, id: CharId) -> bool { 
+        // A node is visible if it has not been deleted by any change that is not undone.
+        if self.undone.contains(&id.change) { return false; }
+        if let Some(node) = self.nodes.get(&id) {
+            for del in &node.deleted_by {
+                if !self.undone.contains(del) {
+                    return false;
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+    pub fn set_undone(&mut self, undone: HashSet<ChangeId>) {
+        self.undone = undone;
     }
 
     pub fn insert_node(&mut self, id: CharId, ch: char, parent: Option<CharId>, side: Side, right_origin: Option<CharId>) {
@@ -34,7 +55,7 @@ impl Tree {
             parent,
             side,
             right_origin,
-            deleted: false,
+            deleted_by: Vec::new(),
             left_children: Vec::new(),
             right_children: Vec::new(),
         };
@@ -62,14 +83,15 @@ impl Tree {
         self.nodes.get(&id).map(|n| n.ch)
     }
 
-    pub fn delete(&mut self, id: CharId) {
+    pub fn delete(&mut self, id: CharId, by: ChangeId) {
         if let Some(node) = self.nodes.get_mut(&id) {
-            node.deleted = true;
+            node.deleted_by.push(by);
         }
     }
-    pub fn delete_range(&mut self, first: CharId, len: u32) {
+    pub fn delete_range(&mut self, first: CharId, len: u32, by: ChangeId) {
         for offset in first.offset..first.offset + len {
-            self.delete(CharId { change: first.change, offset });
+            let id = CharId { change: first.change, offset };
+            self.delete(id, by);
         }
     }
 
@@ -98,7 +120,7 @@ impl Tree {
         let mut result = String::new();
         for id in self.all_in_order() {
             if let Some(node) = self.nodes.get(&id) {
-                if node.deleted { continue; }
+                if !self.is_visible(id) { continue; }
                 result.push(node.ch);
             }
         }
@@ -106,10 +128,45 @@ impl Tree {
     }
 
     pub fn visible_id(&self, index: usize) -> Option<CharId> {
-        self.all_in_order().into_iter().filter(|id| !self.nodes[id].deleted).nth(index)
+        let mut count = 0;
+        for id in self.all_in_order() {
+            if let Some(node) = self.nodes.get(&id) {
+                if !self.is_visible(id) { continue; }
+                if count == index {
+                    return Some(id);
+                }
+                count += 1;
+            }
+        }
+        None
     }
     pub fn visible_ids(&self) -> Vec<CharId> {
-        self.all_in_order().into_iter().filter(|id| !self.nodes[id].deleted).collect()
+        let mut result = Vec::new();
+        for id in self.all_in_order() {
+            if self.is_visible(id) {
+                result.push(id);
+            }
+        }
+        result
+    }
+
+    pub fn inside(&self, change: ChangeId) -> Vec<ChangeId> {
+        let order = self.all_in_order();
+        let lo = order.iter().position(|&id| id.change == change);
+        let hi = order.iter().rposition(|&id| id.change == change);
+        if lo.is_none() || hi.is_none() || lo == hi {
+            return Vec::new();
+        }
+        let lo = lo.unwrap();
+        let hi = hi.unwrap();
+        let mut result: Vec<ChangeId> = order[lo + 1..hi]
+            .iter()
+            .map(|&id| id.change)
+            .filter(|&c| c != change)
+            .collect();
+        result.sort_unstable();
+        result.dedup();
+        result
     }
 
     // Decides where to place new text typed at a given visual index.
@@ -227,14 +284,15 @@ mod tests {
     }
 
     #[test]
-    fn delete() {
+    fn delete_test() {
         // Delete the "a", and check that the text is "ct".
         // Call place(1) and insert an "o". The text should be "cot".
         let mut t = cat();
-        t.delete(id(1, 1));
+        t.delete(id(1, 1), change(1, 2));
         assert_eq!(t.text(), "ct");
         let (p, s, ro) = t.place(1);
         t.insert_run(change(1, 2), "o", p, s, ro);
         assert_eq!(t.text(), "cot");
     }
+    
 }
