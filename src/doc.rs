@@ -1,6 +1,6 @@
 use crate::change::{Change, ChangeKind, InsertRun, CharRange};
 use crate::fugue::Tree;
-use crate::ids::{ChangeId, DeviceId, Hlc};
+use crate::ids::{ChangeId, DeviceId, Hlc, CharId};
 use std::collections::HashSet;
 
 pub struct Doc {
@@ -26,11 +26,26 @@ impl Doc {
         self.tree.text()
     }
 
+    pub fn text_of(&self, range: &CharRange) -> String {
+        let mut result = String::new();
+        for offset in range.first.offset..range.first.offset + range.len {
+            let id = CharId { change: range.first.change, offset };
+            if let Some(ch) = self.tree.char_of(id) {
+                result.push(ch);
+            }
+        }
+        result
+    }
+
     pub fn apply(&mut self, change: &Change) {
         if !self.applied.insert(change.id) {
             return; // already applied
         }
         self.clock.observe(change.hlc);
+        if change.id.device == self.device {
+            // raise the counter if this change is from us, so we don't reuse the same counter using Max()
+            self.next_counter = self.next_counter.max(change.id.counter + 1);
+        }
         match &change.kind {
             ChangeKind::Insert(run) => {
                 self.tree.insert_run(change.id, &run.text, run.parent, run.side, run.right_origin);
@@ -164,6 +179,18 @@ mod test {
         doc2.apply(&change1);
 
         assert_eq!(doc1.text(), doc2.text());
+    }
+
+    #[test]
+    fn loading_continues_the_counter() {
+        let mut doc = Doc::new(DeviceId(1));
+        let first = doc.insert_local(0, "cat", 1000);
+
+        let mut reloaded = Doc::new(DeviceId(1)); // the app restarted
+        reloaded.apply(&first);                   // loaded from the .db
+        let next = reloaded.insert_local(3, "s", 2000);
+
+        assert_ne!(next.id, first.id);
     }
 
 }

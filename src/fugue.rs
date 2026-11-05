@@ -58,6 +58,10 @@ impl Tree {
     
     }
 
+    pub fn char_of(&self, id: CharId) -> Option<char> {
+        self.nodes.get(&id).map(|n| n.ch)
+    }
+
     pub fn delete(&mut self, id: CharId) {
         if let Some(node) = self.nodes.get_mut(&id) {
             node.deleted = true;
