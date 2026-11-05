@@ -96,10 +96,20 @@ Throwaway code, written to find showstoppers before investing in the real thing.
 
 - **0a, typing on Android.** A Tauri 2 Android app with a CodeMirror 6 editor.
   *Done when:* typing, autocorrect, swipe typing and backspace work with Gboard and SwiftKey on a real phone, without lost or doubled characters.
+  *Result (2026-11-04):* passed with Gboard on a Pixel 7. SwiftKey not tested; the app is private and Gboard is the keyboard in use.
 - **0b, Typst on Android.** Compile a sample novel of about 300 pages from Rust inside the app, using fonts from a Vault folder.
   *Done when:* recompiling after a small edit feels instant (well under a second) on a mid-range phone.
+  *Result (2026-11-05):* passed with Typst 0.15.1 on a generated 315-page novel. On the Pixel 7, setup and first compile took about 690 ms and recompiles 70–80 ms. On desktop, about 600 ms and 25–40 ms, with PDF export about 100 ms. Lessons for the real app:
+  - **Evict Typst's cache after every compile** (`comemo::evict(1)`). Without it, memory grows by about 70 MB per edit on a novel this size, until Android kills the app for running out of memory. With `evict(1)` it stays around 200 MB, and recompiles get no slower.
+  - Keep one `World` alive between compiles and only update its text. That's what makes recompiles incremental.
+  - Build libraries optimised even in dev builds (`[profile.dev.package."*"] opt-level = 3`), or Typst runs 10–50 times slower and timings are meaningless.
+  - Only one compile should run at a time. Take the lock before compiling, not after.
 - **0c, files on Android.** With "All files access", open, write and close a SQLite file in the Syncthing folder while Syncthing syncs it from another Device.
   *Done when:* there's no corruption, and the app notices when the file was replaced underneath it.
+  *Result (2026-11-05):* passed on a Pixel 7 and Windows, syncing through Syncthing: normal sync both ways, offline writes on both sides (clean Conflict copy), rapid simultaneous writes, closed app, and connection lost mid-sync. Every file reported `integrity: ok`, and the app noticed every change made underneath it. Lessons for the real app:
+  - Syncthing must ignore `*-journal` on every Device, so SQLite's temporary journal file never syncs. Ignore patterns aren't synced themselves, so the app should set this up when a Vault is opened.
+  - Android never shows a pop-up for "All files access", and can lock the switch for apps that weren't installed from a store. The app has to detect the missing permission and open the settings page itself.
+  - App IDs must contain no underscores or hyphens (Windows rejects underscores, and Android package names can't contain hyphens).
 
 If 0a fails, revisit [ADR 0005](adr/0005-tauri-with-rust-core-and-codemirror.md) before going further.
 
@@ -153,7 +163,7 @@ Reading: Weidner & Kleppmann, *The Art of the Fugue: Minimizing Interleaving in 
 ### Phase 6: Polish and Android
 
 - The Chapter list with drag-to-reorder, focus mode, word counts, themes, and the spellcheck switch.
-- The Android layout (one screen at a time), the "All files access" flow, and compiling only while the Page preview is open.
+- The Android layout (one screen at a time), the "All files access" flow (detect the missing permission and open its settings page; see the 0c lessons), and compiling only while the Page preview is open.
 - Testing: Playwright on Chromium and WebKit, plus hand testing on a real phone with real keyboards.
 
 *Done when:* a full novel goes back and forth between Android, Windows and Debian through Syncthing, with offline edits on all three, and ends with identical text and Comments everywhere.

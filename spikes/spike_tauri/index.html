@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tauri App</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <body>
+    <div style="padding: 8px">
+      <input id="db-path" style="width: 100%" placeholder="Full path to test.db in your writer-spike folder" />
+      <button id="write">Write row</button>
+      <button id="check">Check</button>
+      <pre id="output" style="white-space: pre-wrap"></pre>
+       <hr />
+      <input id="fonts-dir" style="width: 100%" placeholder="Optional: path to a fonts folder" />
+      <button id="t-setup">Set up + compile</button>
+      <button id="t-edit">Edit + recompile</button>
+      <button id="t-pdf">PDF export</button>
+      <pre id="t-output" style="white-space: pre-wrap"></pre>
+    </div>
+    <div id="editor"></div>
+  </body>
+  </body>
+</html>
