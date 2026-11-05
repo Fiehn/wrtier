@@ -15,12 +15,21 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 - Every character knows which Change wrote it ([ADR 0003](adr/0003-character-level-history-with-moves.md)).
 - Kinds of Change: typing burst, deletion, replaced selection, paste, Move, Revert, External edit, Comment actions, Preamble edits, Style and Story element definitions recorded, image inserted or replaced.
 - A typing burst closes when you pause (about 5 s), the cursor leaves, you start a different kind of action, or after about 60 s of nonstop typing. These numbers are for tuning and don't affect correctness. Typos fixed inside an open burst are never recorded.
-- Moves work on any selection, and edits made elsewhere to moved text follow it.
+- A typing burst is one stretch of new text at one spot, anchored to the characters on either side, not to an index. While open it's a draft that can grow and shrink, kept in memory and the recovery file but never in the `.db`. Backspacing past its start or deleting past its end closes it and starts a deletion. A burst that ends up empty records nothing. Merges don't close a burst. Its Change ID is reserved when it opens, and its timestamp is set when it closes.
+- Moves work on any selection, and edits made elsewhere to moved text follow it. Only text added strictly inside the moved range follows; text added at either edge stays where it was.
 - Revert also reverts dependent later Changes by default. A Revert can itself be reverted. Returning to a Milestone reverts everything after it.
+- Everything that isn't the Work's text (Preamble settings, Style and Story element definitions, Comment state, Reviewer and Device names, image slots) is stored as records with fields. Each field keeps its latest value in the fixed Change order, and older values stay in the History. Free text the Author edits outside the Work's text (the Preamble's raw Typst, and Comment bodies if they can be edited) is its own text sequence in the same engine, so concurrent edits to it merge instead of one being lost.
+- A Milestone is exactly the set of Changes the naming Device had seen, stored as the highest counter seen from each Device. Returning to it reverts everything else, and the Revert preview calls out Changes made before the Milestone on another Device but not part of it, so the Author can keep them.
+- A later Change depends on an earlier one only if it inserted text strictly inside text the earlier Change wrote (with that Change's characters on both sides), and so on transitively. Deletions and Moves are never dependents.
+- A Change is in effect unless a Revert that is itself in effect targets it. "Restore this Change" reverts every in-effect Revert of it at once, so a Change reverted on two Devices offline comes back with one action.
+- How Moves, positions and Change order work: [ADR 0008](adr/0008-moves-are-ranges-over-a-fugue-position-tree.md).
 - One `.db` per Work. Every Device writes to it, and Conflict copies are merged back and deleted ([ADR 0002](adr/0002-one-self-healing-database-per-work.md)).
-- Changes are stored as readable rows. A `.db` opened in DB Browser for SQLite makes sense to a person.
+- Changes are stored as readable rows. A `.db` opened in DB Browser for SQLite makes sense to a person. Each Change row reads like a sentence: readable time, Device name, kind, and the text it inserted or deleted (deletions keep a copy of the deleted text, even though the engine could work it out). The engine's own columns sit next to these.
+- Caches (the built tree, the current text, Session summaries) live in a cache folder on the Device, outside the Vault. They never sync and can always be rebuilt from the `.db`.
 - The app never holds a `.db` open between writes. Unsaved Changes stay in a recovery file outside the Vault until the app has seen them in the `.db`.
 - The Text file is regenerated on save. External edits are detected and recorded. The app recognises Text file contents it wrote itself, including in Conflict copies of the Text file.
+- Each time the app writes a Text file, it records the file's hash and the version (the set of Changes) it was built from. A Text file with an unknown hash is compared against the text of the last version written there, and the differences become Changes anchored to that version, so they merge like Changes from an offline Device. If no written version can be found, the file is compared against the current text and the Author gets a Merge notice.
+- In an External edit, a block of deleted text that reappears exactly somewhere else (at least a whole line, or about 40 characters) is recorded as a Move, so its History and Comments go with it. Everything else is recorded as deletions and insertions.
 - Images are stored in the `.db` once per unique content, and written out next to the Text file only when the Work has any ([ADR 0007](adr/0007-images-live-inside-the-work.md)).
 - `vault.db` holds Reviewers and shared settings, and merges the same way.
 
@@ -47,12 +56,14 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 - Reviewers belong to the Vault, each with a name, role label and colour.
 - Comments are open or resolved. Resolved ones are hidden by default. Short replies are supported.
 - Detached comments go to a side list with a quote of their original text, and reattach when the deletion is reverted.
+- A Comment covers characters: the ones it was attached to, plus text later added strictly inside them (the same rule as Move ranges and Revert dependencies). If its text is split by a Move, the highlight shows in every part and "show me" steps through them. The Comments panel always keeps the original quote.
 
 **History view**
 
 - Sessions with word-level highlights and the number of words added.
 - Named Milestones. Any two can be compared.
 - "History of this text" from a selection, and Revert with a preview that lists dependent Changes.
+- Merge notices, attached to the affected text, with a "show me" that jumps to each part. Every Device works them out from the History; only dismissing one is recorded, as a Change.
 
 **App**
 
@@ -83,6 +94,9 @@ Planned for v2:
 - Importing Word comments as Comments
 - EPUB Export
 - Play Store build using the folder picker
+- Maybe: detect text that was both moved and edited in an External edit as a Move (fuzzy matching), if exact matching turns out not to be enough.
+- Revisit which Changes count as dependent when reverting, based on how the v1 rule feels in real use.
+- Smarter Move edges: text added at the edge of a moved range on another Device follows the Move when it clearly belongs to it. Example: if the range starts just after a ".", a word added after that "." (such as "Quietly, ") goes with the Move, and the same at the end. The rule must give the same answer on every Device even when the punctuation itself was edited concurrently.
 
 Out of scope entirely: notes and worldbuilding, grammar checking, Reviewers using the app themselves, and suggested edits.
 
@@ -172,13 +186,13 @@ Reading: Weidner & Kleppmann, *The Art of the Fugue: Minimizing Interleaving in 
 
 Settle these while building the History engine, and write an ADR for any answer that's hard to reverse.
 
-- Two Devices Move the same text to different places while offline. Which one wins, and how is that decided the same way on every Device?
-- One Device Moves some text while another deletes part of it, or Moves part of it somewhere else.
-- How a Change ID is formed (Device ID + counter?) and how a Device gets its ID.
-- How long a gap ends a Session.
-- How the editor shows Changes merged in from elsewhere without making your cursor jump.
+- ~~Two Devices Move the same text to different places while offline.~~ Settled: the later Move in the fixed Change order wins (so it depends on how Change IDs are formed).
+- ~~One Device Moves some text while another deletes part of it, or Moves part of it somewhere else.~~ Settled: a deletion wins wherever the text went. With overlapping Moves, only the overlap goes with the winning Move, the rest of each Move still happens, and the Author gets a Merge notice.
+- ~~How a Change ID is formed and how a Device gets its ID.~~ Settled: the ID is Device ID + counter. Changes are ordered by a hybrid logical clock (wall-clock time that never goes below anything already seen), then by Device ID. A Device ID is random and short, made on first launch, kept as a Device setting and left out of Android backups. The History records a readable name for each Device. A merge that finds the same ID with different content refuses loudly.
+- ~~How long a gap ends a Session.~~ Settled: each Change stores its Session ID. A new Session starts when the Work is opened on a Device, or after about 30 minutes without a Change (to be tuned in use). A Session never spans Devices or Works.
+- How the editor shows Changes merged in from elsewhere without making your cursor jump. Partly settled: an open typing burst is anchored to characters, so merges don't move it. Cursors and selections outside a burst are still open (Phase 2).
 - A Style file in `styles/` edited on two Devices. Style files are plain files with no History, so their Conflict copies can't merge automatically. Proposal: show both versions and let the Author pick.
-- An External edit on one Device while the app edits the same Work on another.
+- ~~An External edit on one Device while the app edits the same Work on another.~~ Settled: the External edit is compared against the version the app last wrote to that Text file, not against the current text, and then merges as normal.
 
 ## Main risks
 

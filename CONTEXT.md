@@ -119,6 +119,10 @@ A difference found in a **Text file** that the app did not make itself.
 Any installation of the app that opens the **Vault**; all **Devices** are equal and none is in charge.
 _Avoid_: master, home device, primary
 
+**Merge notice**:
+A message shown to the **Author** after a merge, pointing at text the merge had to decide about on its own, such as a passage split by two overlapping **Moves**; it asks for nothing and changes nothing.
+_Avoid_: conflict, merge error, warning
+
 **Conflict copy**:
 A duplicate of a **History** file made by the sync tool when two **Devices** changed it before syncing; it is expected, not an error.
 _Avoid_: corruption, sync error
@@ -140,19 +144,31 @@ _Avoid_: corruption, sync error
 - A **Work**'s **History** records the content of every **Style** it uses each time that **Style** changes, so every **Milestone** renders exactly as it did.
 - Fonts are only referenced by name: the app looks in the **Vault**'s fonts folder first, then the **Device**'s fonts, and otherwise warns and uses a default.
 - A **Comment** has exactly one sender: the **Author** or one **Reviewer**.
+- Replying to a resolved **Comment** doesn't reopen it.
+- When two **Devices** set the same setting differently, the later one wins; the other value stays in the **History**. Raw Typst in the **Preamble** is merged like the **Work**'s text, so neither **Device**'s edit is lost.
 - **Reviewers** only comment; only the **Author** changes the text.
 - An AI is always a **Reviewer**, never an **Author**: it can add **Comments** but can never change the text.
 - A **Comment** follows its text through **Moves**. If all its text is deleted it becomes a **Detached comment**; restoring the text reattaches it.
+- A **Comment** covers the characters it was attached to, plus any text later added strictly inside them; text added at either edge isn't covered. If part of its text is **Moved** away, the **Comment** covers both parts and stays one **Comment**.
+- Text added inside a passage on one **Device** while another **Device** **Moves** that passage ends up inside the passage at its new place.
+- When two **Devices** **Move** overlapping text, the text both moved goes with one of the two **Moves**, chosen the same way on every **Device**; the rest of each **Move** still happens, and the **Author** gets a **Merge notice**.
+- Text deleted on one **Device** stays deleted even if another **Device** **Moved** it.
 - A **Work**'s **History** records the name of every **Reviewer** who commented on it, so the file can be read on its own outside the **Vault**.
 - Every character in a **Work** knows which **Change** wrote it.
 - A **Session** groups many **Changes**; each **Change** belongs to exactly one **Session**.
-- Reverting a **Change** also reverts, by default, every later **Change** that edited the text it wrote.
+- A **Session** belongs to one **Device** and one **Work**. A new one starts when the **Work** is opened, or after a long pause in writing.
+- Reverting a **Change** also reverts, by default, every later **Change** that added text inside the text it wrote (and anything added inside that, in turn). Later deletions and **Moves** of that text are not reverted with it.
 - A **Revert** can itself be reverted.
-- Returning to a **Milestone** reverts every **Change** made after it; nothing is removed.
+- A **Change** stays undone while any **Revert** of it is in effect; restoring a **Change** cancels every **Revert** of it.
+- Returning to a **Milestone** reverts every **Change** that isn't part of it; nothing is removed.
+- A **Milestone** holds exactly the **Changes** the **Device** that named it had seen. A **Change** made earlier on another **Device** that hadn't synced yet is not part of it.
 - A **Work**'s images are stored in its **History**; inserting or replacing an image is a **Change**.
 - A **Text file** is always derived from its **History**, never the other way round.
 - An **External edit** is recorded into the **History** as a new **Change**; it never replaces the **History**.
+- An **External edit** is compared against the text the app last wrote to that **Text file**, so it merges as if it came from a **Device** that had been offline since then.
 - A **Conflict copy** is merged back into its **History** by whichever **Device** sees it first, then deleted.
+- Every **Change** records which **Device** made it and when. **Changes** are ordered by when they were made, and a **Device** never places a new **Change** before one it has already seen.
+- A **Work**'s **History** records a readable name for every **Device** that changed it.
 - Settings that belong to one **Device** (app theme, window layout) are never stored in the **Vault**.
 - Merging two copies of a **History** keeps every **Change** from both; nothing is ever lost or chosen between.
 
