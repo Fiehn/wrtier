@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3ed7c5bd92699dd24dcff95b5a497ca7a0234d6205fd5ccf99b01443d710140e # shrinks to actions = [Insert { device: 0, at: 0, text: "aa" }, Sync { from: 0, to: 1 }, Delete { device: 0, at: 3, len: 1 }]

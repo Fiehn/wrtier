@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rusqlite = "0.41.1"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+
+[dev-dependencies]
+proptest = "1"
