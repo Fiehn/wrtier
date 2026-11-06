@@ -10,6 +10,9 @@
   --warn-text: #6b4a10;
   --error-bg: #f8dfdc;
   --error-text: #7a221a;
+  --chip: #e6e2d9;
+  --chip-hover: #dcd7cc;
+  --chip-open: #d3dbe6;
   --editor-font-size: 17px;
   color-scheme: light;
 }
@@ -26,6 +29,9 @@
     --warn-text: #f1d49a;
     --error-bg: #3d1f1b;
     --error-text: #f2b8b0;
+    --chip: #2f2d28;
+    --chip-hover: #383530;
+    --chip-open: #2c3a4a;
     color-scheme: dark;
   }
 }
@@ -41,6 +47,9 @@
   --warn-text: #f1d49a;
   --error-bg: #3d1f1b;
   --error-text: #f2b8b0;
+  --chip: #2f2d28;
+  --chip-hover: #383530;
+  --chip-open: #2c3a4a;
   color-scheme: dark;
 }
 
@@ -62,6 +71,15 @@ body {
   display: grid;
   grid-template-columns: 280px 1fr;
   height: 100%;
+}
+
+/* The Vault browser hidden (☰ or Ctrl+\): only the writing. */
+#app.sidebar-hidden {
+  grid-template-columns: 1fr;
+}
+
+#app.sidebar-hidden #sidebar {
+  display: none;
 }
 
 .row {
@@ -96,28 +114,48 @@ kbd {
 }
 
 #works,
+#works ul,
 #trash-list {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
+/* What's in a folder is indented under it, with a faint line down the side. */
+#works ul {
+  margin-left: 9px;
+  padding-left: 9px;
+  border-left: 1px solid var(--line);
+}
+
 #works li {
   padding: 2px 0;
-  position: relative;
+}
+
+/* A Work: a shaded pill, as wide as its name. Rename and Trash take no room until it's
+   hovered (or reached with the keyboard); then the pill grows to show them. */
+.entry {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  background: var(--chip);
+  border-radius: 6px;
+}
+
+.entry:hover {
+  background: var(--chip-hover);
 }
 
 .entry-name {
   all: unset;
   cursor: pointer;
-  display: block;
-  padding: 4px 6px;
-  border-radius: 4px;
+  padding: 3px 9px;
   overflow-wrap: anywhere;
 }
 
-.entry-name:hover:not(:disabled) {
-  background: var(--line);
+.entry-name:focus-visible {
+  outline: 2px solid var(--accent);
+  border-radius: 6px;
 }
 
 .entry-name:disabled {
@@ -125,34 +163,99 @@ kbd {
   color: var(--muted);
 }
 
-#works li.open > .entry-name {
-  background: var(--line);
+.entry-actions {
+  display: none;
+  padding-right: 4px;
+  white-space: nowrap;
+}
+
+#works li.work-entry:hover .entry-actions,
+#works li.work-entry:focus-within .entry-actions {
+  display: inline-flex;
+}
+
+#works li.open > .entry {
+  background: var(--chip-open);
   font-weight: 600;
 }
 
 #works small {
   display: block;
-  padding: 0 6px;
+  padding: 1px 9px 0;
   color: var(--muted);
   font-size: 12px;
 }
 
-/* Rename and Trash show when the pointer is on the entry (always on touch screens). */
-.entry-actions {
+/* A folder: an arrow that turns when it's open, and its name. */
+.folder-toggle {
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  border-radius: 5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.folder-toggle:hover {
+  background: var(--chip);
+}
+
+.folder-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
+.chevron {
+  display: inline-block;
+  width: 1em;
+  color: var(--muted);
+  transition: transform 0.1s;
+}
+
+.folder.expanded > .folder-toggle .chevron {
+  transform: rotate(90deg);
+}
+
+.folder-empty {
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+/* ---- The right-click menu ---- */
+
+#menu {
+  position: fixed;
+  z-index: 10;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.18);
+}
+
+#menu button {
+  all: unset;
   display: block;
-  padding: 0 0 2px;
-  visibility: hidden;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
 }
 
-#works li:hover .entry-actions,
-#works li:focus-within .entry-actions {
-  visibility: visible;
+#menu button:hover,
+#menu button:focus {
+  background: var(--chip);
 }
 
-@media (hover: none) {
-  .entry-actions {
-    visibility: visible;
-  }
+#menu hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 4px 0;
 }
 
 #trash {
@@ -171,9 +274,32 @@ kbd {
 
 /* ---- Tabs and the editor ---- */
 
+/* The writing side: messages and tabs on top, then the editor filling the rest of the window
+   and scrolling by itself (so a click anywhere in it reaches the text). */
 main {
-  overflow-y: auto;
-  padding: 12px 40px 24px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  padding-top: 12px;
+}
+
+main > :not(#panes) {
+  margin-left: 24px;
+  margin-right: 24px;
+}
+
+#panes {
+  flex: 1;
+  min-height: 0;
+}
+
+.pane {
+  height: 100%;
+}
+
+.pane .editor {
+  height: 100%;
 }
 
 #tabrow {
@@ -184,8 +310,23 @@ main {
   margin-bottom: 14px;
 }
 
-#tabrow:has(#tabbar:empty) {
+#tabbar:empty + #view-mode {
   display: none;
+}
+
+#sidebar-toggle {
+  border: none;
+  background: none;
+  font-size: 17px;
+  line-height: 1;
+  padding: 6px 8px;
+  margin-bottom: 2px;
+  color: var(--muted);
+}
+
+#sidebar-toggle:hover {
+  color: var(--text);
+  background: var(--chip);
 }
 
 #tabbar {
@@ -278,14 +419,44 @@ main {
 }
 
 .editor .cm-editor {
+  height: 100%;
   font-family: Georgia, "Iowan Old Style", serif;
   font-size: var(--editor-font-size);
   line-height: 1.6;
-  max-width: 44em;
 }
 
 .editor .cm-editor.cm-focused {
   outline: none;
+}
+
+.editor .cm-scroller {
+  padding: 0 24px;
+}
+
+/* A comfortable column of text in the middle, at least as tall as the window, with room
+   below the last line so it can be scrolled up to the middle. */
+.editor .cm-content {
+  max-width: 44em;
+  margin: 0 auto;
+  min-height: 100%;
+  padding-bottom: 40vh;
+}
+
+.editor .cm-gutters {
+  background: var(--bg);
+  color: var(--muted);
+  border: none;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 0.75em;
+}
+
+.editor .cm-activeLine {
+  background: var(--chip);
+}
+
+.editor .cm-activeLineGutter {
+  background: var(--chip);
+  color: var(--text);
 }
 
 #notice {
@@ -423,6 +594,10 @@ dialog h2 {
   margin-top: 4px;
   font-size: 13px;
   color: var(--muted);
+}
+
+#settings label.check {
+  margin-top: 14px;
 }
 
 #switcher {

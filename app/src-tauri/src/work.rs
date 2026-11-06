@@ -9,7 +9,7 @@ use crate::patch::{self, Patch};
 use crate::positions::{byte_at_utf16, replace_utf16, Positions};
 use crate::recovery::Recovery;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use wrtier::change::{Change, ChangeKind};
 use wrtier::conflicts::conflict_copies;
@@ -117,6 +117,9 @@ pub enum Whereabouts {
     Trashed { db: PathBuf },
     /// Nowhere in the Vault: saving pauses.
     Gone,
+    /// The History in its file went its own way (another copy of it was edited separately):
+    /// saving pauses, since mixing the two would break it. What's here can go to a new Work.
+    Diverged,
 }
 
 /// When a file was last modified, and its size: if either changes, someone else wrote it.
@@ -166,8 +169,9 @@ pub struct OpenWork {
     copies_tried: HashSet<PathBuf>,
     took_in: Option<String>,
     sync_problem: Option<String>,
-    /// The Work's first Change: how it's found again if it's renamed elsewhere.
-    identity: Option<ChangeId>,
+    /// What tells this Work from every other (see `storage::identity`): how it's found again
+    /// if it's moved or renamed elsewhere.
+    identity: Option<String>,
     pub whereabouts: Option<Whereabouts>,
 }
 
@@ -187,7 +191,7 @@ impl OpenWork {
         let positions = Positions::new(&doc.text());
         let (db_stamp, typ_stamp) = (stamp(&db), stamp(&typ));
         OpenWork {
-            identity: storage::first_change(&db).ok().flatten(),
+            identity: storage::identity(&db).ok().flatten(),
             whereabouts: None,
             mine,
             db_stamp,
@@ -232,15 +236,28 @@ impl OpenWork {
         }
     }
 
-    /// The Work's first Change (see `storage::first_change`).
-    pub fn identity(&self) -> Option<ChangeId> {
-        self.identity
+    /// What tells this Work from every other (see `storage::identity`).
+    pub fn identity(&self) -> Option<&str> {
+        self.identity.as_deref()
     }
 
     /// Has its History disappeared from where this tab has it (renamed, trashed or deleted
-    /// elsewhere)? Then nothing is saved: saving would create a new, broken History there.
+    /// elsewhere), or gone its own way? Then nothing is saved: saving would create a new,
+    /// broken History there, or mix two.
     pub fn is_lost(&self) -> bool {
-        !self.db.exists()
+        self.whereabouts == Some(Whereabouts::Diverged) || !self.db.exists()
+    }
+
+    /// Does the History in `db` agree with every Change this Device made in this Work? (If
+    /// not, it's a copy that went its own way, and this tab must not move onto it.)
+    pub fn agrees_with(&self, db: &Path) -> bool {
+        storage::agrees_with(db, &self.mine).unwrap_or(false)
+    }
+
+    /// The History's file has the same IDs as this Work's own Changes for different ones.
+    fn diverged(&mut self) {
+        self.whereabouts = Some(Whereabouts::Diverged);
+        self.save_error = None;
     }
 
     /// Drops the open Work without saving (its History is gone and the Author chose to close
@@ -508,16 +525,18 @@ impl OpenWork {
         if self.unsaved.is_empty() || self.is_lost() {
             return; // (lost: the recovery file keeps them until the History is found again)
         }
-        if self.identity.is_none() {
-            self.identity = self.unsaved.first().map(|c| c.id); // a Work's very first Change
-        }
         match storage::save(&self.db, &self.unsaved, &self.doc) {
             Ok(()) => {
+                if self.identity.is_none() {
+                    // An old Work with no Changes until now: known by its first one from now on.
+                    self.identity = storage::identity(&self.db).ok().flatten();
+                }
                 self.mine.append(&mut self.unsaved);
                 self.save_error = None;
                 self.text_file_behind = true;
                 self.db_stamp = stamp(&self.db); // our own write: not a change from outside
             }
+            Err(e) if e.downcast_ref::<storage::SameIdDifferentContent>().is_some() => self.diverged(),
             Err(e) => self.save_error = Some(format!("Couldn't save to {}: {e}. Your writing is kept and saving is tried again.", file_name(&self.db))),
         }
     }
@@ -567,8 +586,15 @@ impl OpenWork {
                 Err(e) => problems.push(format!("{} was kept: {e}", file_name(&copy))),
             }
         }
-        // Then the History itself: whatever it has that this Work doesn't yet.
+        // Then the History itself: whatever it has that this Work doesn't yet. Unless it has
+        // this Device's own IDs for different Changes: then it's a copy that went its own way,
+        // and taking anything from it would mix the two.
         let in_file = storage::read_all(&self.db).map_err(err)?;
+        let mine: HashMap<ChangeId, wrtier::ids::Hlc> = self.mine.iter().map(|c| (c.id, c.hlc)).collect();
+        if in_file.iter().any(|c| mine.get(&c.id).is_some_and(|&hlc| hlc != c.hlc)) {
+            self.diverged();
+            return Ok(());
+        }
         let ids: HashSet<ChangeId> = in_file.iter().map(|c| c.id).collect();
         let new: Vec<Change> = in_file.into_iter().filter(|c| !self.doc.has(c.id)).collect();
         from.extend(new.iter().map(|c| c.id.device).filter(|&d| d != self.doc.device()));
@@ -576,7 +602,14 @@ impl OpenWork {
         // Changes this Device saved must stay saved, even if the `.db` that arrived lacks them.
         let missing: Vec<Change> = self.mine.iter().filter(|c| !ids.contains(&c.id)).cloned().collect();
         if !missing.is_empty() {
-            storage::save(&self.db, &missing, &self.doc).map_err(err)?;
+            match storage::save(&self.db, &missing, &self.doc) {
+                Ok(()) => {}
+                Err(e) if e.downcast_ref::<storage::SameIdDifferentContent>().is_some() => {
+                    self.diverged();
+                    return Ok(());
+                }
+                Err(e) => return Err(e.to_string()),
+            }
         }
         if !new.is_empty() {
             self.text_file_behind = true;

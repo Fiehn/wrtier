@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { type WorkState } from "./sync";
 import { Tabs, type Layout, type OpenedWork } from "./tabs";
+import { buildTree, foldersOf, type Folder } from "./tree";
+import { showMenu, type MenuItem } from "./menu";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -18,9 +20,18 @@ type EntryKind =
 
 type Entry = { id: string; name: string } & EntryKind;
 type SyncProblem = { path: string; reason: string };
-type Listing = { entries: Entry[]; problems: SyncProblem[] };
+type Listing = { entries: Entry[]; problems: SyncProblem[]; folders: string[] };
 type TrashedWork = { id: string; name: string };
-type Settings = { theme: "system" | "light" | "dark"; fontSize: number; themeHere: boolean; fontSizeHere: boolean };
+type Settings = {
+  theme: "system" | "light" | "dark";
+  fontSize: number;
+  themeHere: boolean;
+  fontSizeHere: boolean;
+  lineNumbers: boolean;
+  lineNumbersHere: boolean;
+  highlightLine: boolean;
+  highlightLineHere: boolean;
+};
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -67,14 +78,23 @@ function ask(dialog: HTMLDialogElement): Promise<string> {
   });
 }
 
-/** Asks for a name (of a Work); null if cancelled. */
-async function askText(question: string, initial = "", ok = "OK"): Promise<string | null> {
+const FOLDER_HINT = "Put it in a folder with a slash, e.g. Short stories/Rain.";
+
+/**
+ * Asks for a name (of a Work or folder); null if cancelled. An `initial` ending with a slash
+ * (a folder to put it in) leaves the cursor after it; otherwise it's all selected, to replace.
+ */
+async function askText(question: string, initial = "", ok = "OK", hint = FOLDER_HINT): Promise<string | null> {
   $("ask-text-question").textContent = question;
   $("ask-text-ok").textContent = ok;
+  $("ask-text-hint").textContent = hint;
   const input = $<HTMLInputElement>("ask-text-input");
   input.value = initial;
-  input.select();
-  return (await ask($<HTMLDialogElement>("ask-text"))) === "ok" ? input.value : null;
+  const dialog = $<HTMLDialogElement>("ask-text");
+  const answer = ask(dialog);
+  if (initial.endsWith("/")) input.setSelectionRange(initial.length, initial.length);
+  else input.select();
+  return (await answer) === "ok" ? input.value : null;
 }
 
 async function confirmAsk(text: string, yes: string): Promise<boolean> {
@@ -128,6 +148,7 @@ void listen<{ id: string; state: WorkState }>("work-status", (event) => tabs.sta
 
 let vaultOpen = false;
 let entries: Entry[] = [];
+let folders: string[] = [];
 
 async function askDeviceName(suggested: string) {
   const input = $<HTMLInputElement>("name-input");
@@ -156,6 +177,8 @@ async function openVault(path: string) {
   }
   if (opened.status !== "opened") return;
   $("vault-root").textContent = opened.root;
+  vaultRoot = opened.root;
+  loadOpenFolders();
   $("vault-actions").hidden = false;
   $("open-settings").hidden = false;
   if (opened.deviceName === null) await askDeviceName(opened.suggestedName);
@@ -199,60 +222,223 @@ function actionButton(label: string, title: string, run: () => Promise<unknown>)
   return b;
 }
 
+// The Vault browser: folders fold in and out (which are open is remembered on this Device,
+// per Vault), Works are shaded pills whose Rename and Trash show on hover, and a right-click
+// gives everything else.
+
+let vaultRoot = "";
+let openFolders = new Set<string>();
+const foldersKey = () => `open-folders:${vaultRoot}`;
+
+function loadOpenFolders() {
+  try {
+    openFolders = new Set(JSON.parse(localStorage.getItem(foldersKey()) ?? "[]"));
+  } catch {
+    openFolders = new Set();
+  }
+}
+
+function saveOpenFolders() {
+  try {
+    localStorage.setItem(foldersKey(), JSON.stringify([...openFolders]));
+  } catch {
+    // not remembered, then: no harm done
+  }
+}
+
+const disabled = (entry: Entry) => entry.kind === "newer" || entry.kind === "unreadable" || entry.kind === "leftover" || entry.kind === "blocked";
+
+/** One Work (or Text file) in the list. */
+function workItem(entry: Entry): HTMLElement {
+  const item = document.createElement("li");
+  item.className = `work-entry ${entry.kind}`;
+  item.dataset.id = entry.id;
+  const pill = document.createElement("div");
+  pill.className = "entry";
+  const name = document.createElement("button");
+  name.type = "button";
+  name.className = "entry-name";
+  name.textContent = entry.name;
+  name.title = entry.id;
+  name.disabled = disabled(entry);
+  name.addEventListener("click", () => act(() => openWork(entry.id)));
+  pill.append(name);
+  const actions = document.createElement("span");
+  actions.className = "entry-actions";
+  if (entry.kind === "work") {
+    actions.append(
+      actionButton("Rename", `Rename ${entry.id}`, () => renameWork(entry.id)),
+      actionButton("Trash", `Move ${entry.id} to the trash`, () => trashWork(entry.id)),
+    );
+  } else if (entry.kind === "leftover") {
+    actions.append(actionButton("Delete it", "Delete the leftover Text file", () => deleteLeftover(entry.id)));
+  }
+  if (actions.childElementCount > 0) pill.append(actions);
+  item.append(pill);
+  const note =
+    entry.kind === "leftover" ? `Text file left over from ${entry.of}`
+    : entry.kind === "blocked" ? entry.reason
+    : labels[entry.kind];
+  if (note) item.append(small(note));
+  return item;
+}
+
+/** A folder, with what's in it (shown if it's open). */
+function folderItem(folder: Folder<Entry>): HTMLElement {
+  const item = document.createElement("li");
+  item.className = "folder";
+  item.dataset.path = folder.path;
+  const isOpen = openFolders.has(folder.path);
+  item.classList.toggle("expanded", isOpen);
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "folder-toggle";
+  toggle.setAttribute("aria-expanded", String(isOpen));
+  const chevron = document.createElement("span");
+  chevron.className = "chevron";
+  chevron.textContent = "▸";
+  toggle.append(chevron, document.createTextNode(folder.name));
+  toggle.addEventListener("click", () => {
+    if (openFolders.has(folder.path)) openFolders.delete(folder.path);
+    else openFolders.add(folder.path);
+    saveOpenFolders();
+    const open = openFolders.has(folder.path);
+    item.classList.toggle("expanded", open);
+    toggle.setAttribute("aria-expanded", String(open));
+    children.hidden = !open;
+  });
+  const children = document.createElement("ul");
+  children.hidden = !isOpen;
+  fillList(children, folder);
+  item.append(toggle, children);
+  return item;
+}
+
+function fillList(list: HTMLElement, folder: Folder<Entry>) {
+  for (const sub of folder.folders) list.append(folderItem(sub));
+  for (const entry of folder.items) list.append(workItem(entry));
+  if (folder.path && folder.folders.length === 0 && folder.items.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "folder-empty muted";
+    empty.textContent = "Empty";
+    list.append(empty);
+  }
+}
+
 async function refreshList() {
   const listing = await invoke<Listing>("list_works");
   entries = listing.entries;
+  folders = listing.folders;
   showProblems(listing.problems);
   const list = $("works");
   list.replaceChildren();
-  for (const entry of entries) {
-    const item = document.createElement("li");
-    item.className = entry.kind;
-    item.dataset.id = entry.id;
-    const name = document.createElement("button");
-    name.type = "button";
-    name.className = "entry-name";
-    name.textContent = entry.id;
-    name.disabled = entry.kind === "newer" || entry.kind === "unreadable" || entry.kind === "leftover" || entry.kind === "blocked";
-    name.addEventListener("click", () => act(() => openWork(entry.id)));
-    item.append(name);
-    const note =
-      entry.kind === "leftover" ? `Text file left over from ${entry.of}`
-      : entry.kind === "blocked" ? entry.reason
-      : labels[entry.kind];
-    if (note) item.append(small(note));
-    const actions = document.createElement("span");
-    actions.className = "entry-actions";
-    if (entry.kind === "work") {
-      actions.append(
-        actionButton("Rename", `Rename ${entry.id}`, () => renameWork(entry.id)),
-        actionButton("Trash", `Move ${entry.id} to the trash`, () => trashWork(entry.id)),
-      );
-    } else if (entry.kind === "leftover") {
-      actions.append(actionButton("Delete it", "Delete the leftover Text file", async () => {
-        await invoke("delete_leftover", { id: entry.id });
-        await refreshList();
-      }));
-    }
-    item.append(actions);
-    list.append(item);
-  }
+  fillList(list, buildTree(entries, folders));
   highlightOpen();
   await refreshTrash();
 }
 
+/** Marks the Work in front, and opens the folders it's in so it can be seen. */
 function highlightOpen() {
-  for (const item of $("works").querySelectorAll<HTMLElement>("li")) {
-    item.classList.toggle("open", item.dataset.id === tabs.active);
+  const active = tabs.active;
+  if (active) {
+    const hidden = foldersOf(active).filter((f) => !openFolders.has(f));
+    if (hidden.length > 0) {
+      hidden.forEach((f) => openFolders.add(f));
+      saveOpenFolders();
+      void refreshList();
+      return;
+    }
+  }
+  for (const item of $("works").querySelectorAll<HTMLElement>("li.work-entry")) {
+    item.classList.toggle("open", item.dataset.id === active);
   }
 }
 
-async function newWork(name?: string) {
-  const id = name ?? (await askText("What's the new Work called?", "", "Create"));
+async function newWork(name?: string, folder?: string) {
+  const id = name ?? (await askText("What's the new Work called?", folder ? `${folder}/` : "", "Create"));
   if (id === null) return;
   await tabs.add(await invoke<OpenedWork>("create_work", { id }));
   await refreshList();
 }
+
+async function newFolder(parent?: string) {
+  const path = await askText("What's the new folder called?", parent ? `${parent}/` : "", "Create",
+    "Put it inside another folder with a slash, e.g. Short stories/Old.");
+  if (path === null) return;
+  const made = await invoke<string>("create_folder", { path });
+  foldersOf(`${made}/x`).forEach((f) => openFolders.add(f)); // it and the folders it's in
+  saveOpenFolders();
+  await refreshList();
+}
+
+async function renameFolder(path: string) {
+  const name = await askText(`Rename the folder ${path} to:`, path, "Rename",
+    "Everything in it goes along. Move it into another folder with a slash.");
+  if (name === null || name === path) return;
+  const moved = await invoke<[string, string][]>("rename_folder", { path, name });
+  for (const [from, to] of moved) tabs.renamed(from, to);
+  // Folders that were open stay open under their new name.
+  const renamed = name.split("/").map((p) => p.trim()).join("/");
+  openFolders = new Set([...openFolders].map((f) => (f === path || f.startsWith(`${path}/`) ? renamed + f.slice(path.length) : f)));
+  saveOpenFolders();
+  await refreshList();
+}
+
+async function trashFolder(path: string) {
+  for (const id of tabs.layout().tabs) {
+    if (id.startsWith(`${path}/`)) await tabs.close(id); // saved first
+  }
+  await invoke("trash_folder", { path });
+  await refreshList();
+}
+
+async function deleteLeftover(id: string) {
+  await invoke("delete_leftover", { id });
+  await refreshList();
+}
+
+// Right-click: what can be done with a Work, a folder, or the Vault.
+$("sidebar").addEventListener("contextmenu", (e) => {
+  if (!vaultOpen) return;
+  e.preventDefault();
+  const target = e.target as HTMLElement;
+  const workEl = target.closest<HTMLElement>("li.work-entry");
+  const folderEl = target.closest<HTMLElement>("li.folder");
+  const run = (f: () => Promise<unknown>) => () => act(f);
+  let items: MenuItem[];
+  if (workEl) {
+    const entry = entries.find((x) => x.id === workEl.dataset.id);
+    if (!entry) return;
+    const folder = foldersOf(entry.id).pop();
+    items =
+      entry.kind === "work" ? [
+        { label: "Open", run: run(() => openWork(entry.id)) },
+        "separator",
+        { label: "Rename…", run: run(() => renameWork(entry.id)) },
+        { label: "Move to trash", run: run(() => trashWork(entry.id)) },
+        "separator",
+        { label: folder ? "New Work in this folder…" : "New Work…", run: run(() => newWork(undefined, folder)) },
+      ]
+      : entry.kind === "newWork" ? [{ label: "Open (starts its History)", run: run(() => openWork(entry.id)) }]
+      : entry.kind === "leftover" ? [{ label: "Delete the leftover Text file", run: run(() => deleteLeftover(entry.id)) }]
+      : [];
+  } else if (folderEl) {
+    const path = folderEl.dataset.path!;
+    items = [
+      { label: "New Work here…", run: run(() => newWork(undefined, path)) },
+      { label: "New folder here…", run: run(() => newFolder(path)) },
+      "separator",
+      { label: "Rename folder…", run: run(() => renameFolder(path)) },
+      { label: "Move folder to trash", run: run(() => trashFolder(path)) },
+    ];
+  } else {
+    items = [
+      { label: "New Work…", run: run(() => newWork()) },
+      { label: "New folder…", run: run(() => newFolder()) },
+    ];
+  }
+  showMenu(e.clientX, e.clientY, items);
+});
 
 async function renameWork(id: string) {
   const name = await askText(`Rename ${id} to:`, id, "Rename");
@@ -295,7 +481,6 @@ $("choose-vault").addEventListener("click", () => act(async () => {
   if (path) await openVault(path);
 }));
 
-$("new-work").addEventListener("click", () => act(() => newWork()));
 
 // The Vault list follows what Syncthing brings (new Works, Conflict copies of Works that
 // aren't open): every 10 seconds, and whenever the window gets focus. The tabs and cursors are
@@ -386,10 +571,33 @@ $("switcher-input").addEventListener("keydown", (e) => {
 });
 $("open-switcher").addEventListener("click", () => void openSwitcher());
 
-// App-wide keys: Ctrl+O finds a Work, Ctrl+W closes the tab in front.
+// ---- Hiding the Vault browser, for writing with nothing else on screen (remembered here) ----
+
+function setSidebar(shown: boolean) {
+  $("app").classList.toggle("sidebar-hidden", !shown);
+  $("sidebar-toggle").title = shown ? "Hide the Works (Ctrl+\\)" : "Show the Works (Ctrl+\\)";
+  $("sidebar-toggle").setAttribute("aria-expanded", String(shown));
+  try {
+    localStorage.setItem("sidebar", shown ? "shown" : "hidden");
+  } catch {
+    // not remembered, then: no harm done
+  }
+}
+
+try {
+  setSidebar(localStorage.getItem("sidebar") !== "hidden");
+} catch {
+  setSidebar(true);
+}
+$("sidebar-toggle").addEventListener("click", () => setSidebar($("app").classList.contains("sidebar-hidden")));
+
+// App-wide keys: Ctrl+O finds a Work, Ctrl+W closes the tab in front, Ctrl+\ hides or shows the Works.
 window.addEventListener("keydown", (e) => {
   const mod = e.ctrlKey || e.metaKey;
-  if (mod && !e.shiftKey && e.key.toLowerCase() === "o") {
+  if (mod && !e.shiftKey && e.key === "\\") {
+    e.preventDefault();
+    setSidebar($("app").classList.contains("sidebar-hidden"));
+  } else if (mod && !e.shiftKey && e.key.toLowerCase() === "o") {
     e.preventDefault();
     void openSwitcher();
   } else if (mod && !e.shiftKey && e.key.toLowerCase() === "w" && tabs.active) {
@@ -434,7 +642,21 @@ function applySettings(settings: Settings) {
   $<HTMLInputElement>("theme-here").checked = settings.themeHere;
   $<HTMLInputElement>("font-size").value = String(settings.fontSize);
   $<HTMLInputElement>("font-size-here").checked = settings.fontSizeHere;
+  $<HTMLInputElement>("line-numbers").checked = settings.lineNumbers;
+  $<HTMLInputElement>("line-numbers-here").checked = settings.lineNumbersHere;
+  $<HTMLInputElement>("highlight-line").checked = settings.highlightLine;
+  $<HTMLInputElement>("highlight-line-here").checked = settings.highlightLineHere;
+  tabs.setOptions({ lineNumbers: settings.lineNumbers, highlightLine: settings.highlightLine });
 }
+
+/** An on/off setting's two checkboxes: the setting itself, and "only on this device". */
+function onOff(name: string, box: string, here: string) {
+  const send = () => setting(name, $<HTMLInputElement>(box).checked ? "on" : "off", $<HTMLInputElement>(here).checked);
+  $(box).addEventListener("change", send);
+  $(here).addEventListener("change", send);
+}
+onOff("lineNumbers", "line-numbers", "line-numbers-here");
+onOff("highlightLine", "highlight-line", "highlight-line-here");
 
 function setting(name: string, value: string, here: boolean) {
   act(async () => applySettings(await invoke<Settings>("set_setting", { name, value, here })));

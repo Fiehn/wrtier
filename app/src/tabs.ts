@@ -3,11 +3,12 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { Compartment, EditorState } from "@codemirror/state";
-import { EditorView, dropCursor, keymap } from "@codemirror/view";
+import { EditorView, dropCursor, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from "@codemirror/view";
 import { history, standardKeymap } from "@codemirror/commands";
 import { WorkSync, type WorkState } from "./sync";
 import { formattedView } from "./formatted";
 import { toggleMarkup } from "./shortcuts";
+import { dragToMove } from "./dragging";
 
 export type OpenedWork = { id: string; name: string; text: string; problems: { path: string; reason: string }[]; notice: string | null };
 
@@ -25,6 +26,17 @@ export type TabEvents = {
 const historyCompartment = new Compartment();
 /** The Formatted view, or nothing (the Raw view). */
 const viewCompartment = new Compartment();
+/** Line numbers and the shaded cursor line (settings). */
+const linesCompartment = new Compartment();
+
+export type EditorOptions = { lineNumbers: boolean; highlightLine: boolean };
+
+function lineExtensions(options: EditorOptions) {
+  return [
+    options.lineNumbers ? [lineNumbers(), options.highlightLine ? highlightActiveLineGutter() : []] : [],
+    options.highlightLine ? highlightActiveLine() : [],
+  ];
+}
 
 /** One open Work. */
 class Tab {
@@ -80,7 +92,9 @@ class Tab {
           // Only the basics: no shortcuts that move lines, which would bypass Moves.
           keymap.of(standardKeymap),
           dropCursor(),
+          dragToMove(),
           viewCompartment.of(tabs.formatted ? formattedView() : []),
+          linesCompartment.of(lineExtensions(tabs.options)),
           EditorView.updateListener.of((update) => {
             for (const tr of update.transactions) this.sync.track(tr);
           }),
@@ -100,6 +114,18 @@ class Tab {
       error: (message) => tabs.events.error(message),
     });
     this.rename(work.id, work.name);
+
+    // A click anywhere in the writing area (the margins beside the text, the space below it)
+    // puts the cursor in the text, at the nearest place.
+    this.pane.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || (e.target as Element).closest(".cm-content, .cm-gutters")) return;
+      e.preventDefault();
+      const box = this.view.contentDOM.getBoundingClientRect();
+      const x = Math.min(Math.max(e.clientX, box.left + 1), box.right - 1);
+      const pos = this.view.posAtCoords({ x, y: e.clientY }, false);
+      this.view.focus();
+      this.view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
+    });
   }
 
   rename(id: string, name: string) {
@@ -125,6 +151,16 @@ export class Tabs {
   private front: Tab | null = null;
   /** The Formatted view (markup hidden except at the cursor), or the Raw view. */
   formatted = true;
+
+  /** Line numbers and the shaded cursor line, for every tab. */
+  options: EditorOptions = { lineNumbers: false, highlightLine: false };
+
+  setOptions(options: EditorOptions) {
+    this.options = options;
+    for (const tab of this.open) {
+      tab.view.dispatch({ effects: linesCompartment.reconfigure(lineExtensions(options)) });
+    }
+  }
 
   /** Switches every tab between the Formatted and the Raw view. */
   setFormatted(on: boolean) {
@@ -276,7 +312,7 @@ export class Tabs {
     const el = this.lines.moved;
     el.replaceChildren();
     const kind = tab?.state?.moved?.kind;
-    el.hidden = !tab || (kind !== "trashed" && kind !== "gone");
+    el.hidden = !tab || (kind !== "trashed" && kind !== "gone" && kind !== "diverged");
     if (!tab || el.hidden) return;
     const text = document.createElement("p");
     const button = (label: string, run: () => Promise<void>) => {
@@ -298,7 +334,9 @@ export class Tabs {
         }),
         button("Close (saved in the trash)", () => this.close(id)));
     } else {
-      text.textContent = `${tab.name} is no longer in the Vault (deleted outside the app). Nothing is saved until you choose.`;
+      text.textContent = kind === "diverged"
+        ? `${tab.name}'s History file was replaced by another copy of it that was edited separately. Mixing the two would break it, so nothing more is saved there. Keep what's here as a new Work.`
+        : `${tab.name} is no longer in the Vault (deleted outside the app). Nothing is saved until you choose.`;
       el.append(text,
         button("Save as a new Work…", async () => {
           const name = await this.events.askName("What should the new Work be called?", `${tab.name} (saved)`);

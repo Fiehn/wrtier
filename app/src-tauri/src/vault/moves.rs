@@ -51,9 +51,115 @@ fn free_id(base: &Path, id: &str) -> Result<String, String> {
     unreachable!("some number is free")
 }
 
+/// A folder's path under `base` from its ID ("Short stories/Old"), staying inside `base`.
+fn folder_under(base: &Path, path: &str) -> Result<PathBuf, String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.iter().any(|p| p.is_empty() || *p == "." || *p == ".." || p.contains(['\\', ':'])) {
+        return Err(format!("not a folder in this Vault: {path:?}"));
+    }
+    Ok(parts.iter().fold(base.to_path_buf(), |dir, part| dir.join(part)))
+}
+
+/// `path`, or `path (2)`, `path (3)`… : the first that isn't a folder under `base` yet.
+fn free_folder(base: &Path, path: &str) -> Result<String, String> {
+    for n in 1.. {
+        let candidate = if n == 1 { path.to_string() } else { format!("{path} ({n})") };
+        if !folder_under(base, &candidate)?.exists() {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("some number is free")
+}
+
 impl Vault {
     fn trash_root(&self) -> PathBuf {
         self.root.join(TRASH)
+    }
+
+    /// Checks a folder name the Author typed (each part must be a valid folder name everywhere,
+    /// and not one the Vault browser skips). Returns it tidied.
+    fn checked_folder(&self, path: &str) -> Result<String, String> {
+        let parts: Vec<&str> = path.split('/').map(str::trim).collect();
+        for (i, part) in parts.iter().enumerate() {
+            check_name(part, i == 0, false).map_err(|e| e.replace("A Work needs", "A folder needs"))?;
+        }
+        Ok(parts.join("/"))
+    }
+
+    /// Makes a new, empty folder for Works. Returns its path.
+    pub fn create_folder(&mut self, path: &str) -> Result<String, String> {
+        let path = self.checked_folder(path)?;
+        let dir = folder_under(&self.root, &path)?;
+        if dir.exists() {
+            return Err(format!("There's already a folder called {path}."));
+        }
+        std::fs::create_dir_all(&dir).map_err(err)?;
+        Ok(path)
+    }
+
+    /// The open Works inside a folder.
+    fn open_inside(&self, folder: &str) -> Vec<String> {
+        let prefix = format!("{folder}/");
+        self.works.keys().filter(|id| id.starts_with(&prefix)).cloned().collect()
+    }
+
+    /// Renames (or moves) a folder with everything in it. Works open in it keep their tabs.
+    /// Returns, for each of those, its old and new ID.
+    pub fn rename_folder(&mut self, path: &str, new_path: &str) -> Result<Vec<(String, String)>, String> {
+        let from = folder_under(&self.root, path)?;
+        if !from.is_dir() {
+            return Err(format!("{path} isn't a folder in the Vault anymore."));
+        }
+        let new_path = self.checked_folder(new_path)?;
+        if new_path == path {
+            return Ok(Vec::new());
+        }
+        let to = folder_under(&self.root, &new_path)?;
+        if to.exists() {
+            return Err(format!("There's already a folder called {new_path}."));
+        }
+        if to.starts_with(&from) {
+            return Err("A folder can't go inside itself.".into());
+        }
+        let open = self.open_inside(path);
+        for id in &open {
+            if let Some(work) = self.works.get_mut(id) {
+                work.save();
+            }
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(err)?;
+        }
+        std::fs::rename(&from, &to).map_err(err)?;
+        let mut moved = Vec::new();
+        for id in open {
+            let new_id = format!("{new_path}/{}", &id[path.len() + 1..]);
+            let (db, typ) = self.paths(&new_id)?;
+            let mut work = self.works.remove(&id).expect("listed above");
+            work.relocate(db, typ, Recovery::for_work(&self.recovery_dir, &self.root, &new_id));
+            self.works.insert(new_id.clone(), work);
+            self.aliases.insert(id.clone(), new_id.clone());
+            moved.push((id, new_id));
+        }
+        Ok(moved)
+    }
+
+    /// Moves a folder with everything in it to the trash (closing any Works open in it first).
+    /// Its Works can then be restored one by one.
+    pub fn trash_folder(&mut self, path: &str, now_ms: u64) -> Result<(), String> {
+        let from = folder_under(&self.root, path)?;
+        if !from.is_dir() {
+            return Err(format!("{path} isn't a folder in the Vault anymore."));
+        }
+        for id in self.open_inside(path) {
+            self.close_work(&id, now_ms);
+        }
+        let trash_path = free_folder(&self.trash_root(), path)?;
+        let to = folder_under(&self.trash_root(), &trash_path)?;
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(err)?;
+        }
+        std::fs::rename(&from, &to).map_err(err)
     }
 
     /// Renames a Work (possibly into another folder). An open Work keeps its tab, its undo and
@@ -156,16 +262,29 @@ impl Vault {
         if lost.is_empty() {
             return;
         }
-        // Every History in the Vault and in its trash, by first Change (the Vault's own win).
+        // Every History in the Vault and in its trash, by what tells each Work apart (the
+        // Vault's own win over the trash's).
         let trash = self.trash_root();
-        let mut found: HashMap<ChangeId, PathBuf> = HashMap::new();
+        let mut found: HashMap<String, PathBuf> = HashMap::new();
         for db in walk_works(&trash).dbs.into_iter().chain(self.walk().dbs) {
-            if let Ok(Some(first)) = storage::first_change(&db) {
-                found.insert(first, db);
+            if let Ok(Some(identity)) = storage::identity(&db) {
+                found.insert(identity, db);
             }
         }
         for id in lost {
-            let place = self.works[&id].identity().and_then(|first| found.get(&first)).cloned();
+            if self.works[&id].whereabouts == Some(Whereabouts::Diverged) {
+                continue; // stays paused until the Author chooses
+            }
+            let place = self.works[&id].identity().and_then(|identity| found.get(identity)).cloned();
+            // Only onto a History that has everything this tab saved: one that went its own
+            // way (a copy edited separately) would be broken by mixing.
+            let place = match place {
+                Some(db) if !self.works[&id].agrees_with(&db) => {
+                    self.works.get_mut(&id).expect("listed above").whereabouts = Some(Whereabouts::Diverged);
+                    continue;
+                }
+                place => place,
+            };
             match place {
                 Some(db) if db.starts_with(&trash) => {
                     self.works.get_mut(&id).expect("listed above").whereabouts = Some(Whereabouts::Trashed { db });
@@ -228,6 +347,48 @@ mod tests {
 
     fn typing(from: usize, text: &str) -> Op {
         Op::Type { from, to: from, text: text.into(), origin: Origin::Input }
+    }
+
+    #[test]
+    fn folders_are_listed_even_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open(dir.path());
+        assert_eq!(vault.create_folder(" Short stories / Old ").unwrap(), "Short stories/Old");
+        assert!(vault.create_folder("Short stories").is_err(), "already there");
+        assert!(vault.create_folder("styles").is_err(), "the app's own folder");
+        assert!(vault.create_folder(".hidden").is_err());
+        assert_eq!(vault.list(1000).folders, vec!["Short stories".to_string(), "Short stories/Old".to_string()]);
+    }
+
+    #[test]
+    fn renaming_a_folder_keeps_the_tabs_of_works_open_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Short stories/Rain", 1000).unwrap();
+        vault.edit("Short stories/Rain", vec![typing(0, "abc")], 2000).unwrap(); // a burst is open
+        let moved = vault.rename_folder("Short stories", "Stories").unwrap();
+        assert_eq!(moved, vec![("Short stories/Rain".to_string(), "Stories/Rain".to_string())]);
+        vault.edit("Short stories/Rain", vec![typing(3, "d")], 2100).unwrap(); // still on its way under the old ID
+        vault.close_work("Stories/Rain", 3000);
+        assert_eq!(storage::load(&root.join("Stories/Rain.db"), ME).unwrap().1.text(), "abcd");
+        assert!(!root.join("Short stories").exists(), "never recreated at the old place");
+        assert!(vault.rename_folder("Stories", "Stories/Inside").is_err(), "not inside itself");
+    }
+
+    #[test]
+    fn a_trashed_folder_takes_its_works_along() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Short stories/Rain", 1000).unwrap();
+        vault.edit("Short stories/Rain", vec![typing(0, "abc")], 2000).unwrap();
+        vault.trash_folder("Short stories", 3000).unwrap();
+        assert!(!vault.works.contains_key("Short stories/Rain"), "closed (and saved) first");
+        assert!(vault.list(4000).entries.is_empty());
+        assert_eq!(vault.list_trash(), vec![TrashedWork { id: "Short stories/Rain".into(), name: "Rain".into() }]);
+        assert_eq!(vault.restore_work("Short stories/Rain").unwrap(), "Short stories/Rain");
+        assert_eq!(vault.open_work("Short stories/Rain", 5000).unwrap().text, "abc");
     }
 
     #[test]
@@ -319,6 +480,61 @@ mod tests {
         vault.edit("Rain", vec![typing(0, "late")], 4000).unwrap();
         vault.close_work("Rain", 5000);
         assert_eq!(storage::load(&root.join(".trash/Rain.db"), ME).unwrap().1.text(), "late");
+    }
+
+    #[test]
+    fn a_tab_follows_its_own_work_not_another_one_from_this_device() {
+        // What happened to test4: several Works made on this Device (each starting with Change
+        // 1 of its own), and one moved into a folder in Explorer while its tab was open.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        for name in ["test", "test2", "test3"] {
+            vault.create_work(name, 1000).unwrap();
+            vault.edit(name, vec![typing(0, name)], 2000).unwrap();
+        }
+        vault.tick(9000); // all saved
+        std::fs::create_dir_all(root.join("New folder")).unwrap();
+        std::fs::rename(root.join("test2.db"), root.join("New folder/test2.db")).unwrap();
+        std::fs::rename(root.join("test2.typ"), root.join("New folder/test2.typ")).unwrap();
+        vault.tick(10_000);
+        assert!(vault.works.contains_key("New folder/test2"), "followed into the folder");
+        vault.edit("test2", vec![typing(5, "!")], 11_000).unwrap();
+        vault.close_all(12_000);
+        for (path, text) in [("test.db", "test"), ("New folder/test2.db", "test2!"), ("test3.db", "test3")] {
+            assert_eq!(storage::load(&root.join(path), ME).unwrap().1.text(), text, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_tab_never_mixes_its_history_with_a_copy_that_went_its_own_way() {
+        // The situation test4 got into: a copy of the History, from before this tab's latest
+        // Changes, edited on its own, then put where the tab's History was.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "abc")], 2000).unwrap();
+        vault.tick(9000); // saved
+        let older = root.join("older.db");
+        std::fs::copy(root.join("Rain.db"), &older).unwrap();
+        vault.edit("Rain", vec![typing(3, "def")], 10_000).unwrap();
+        vault.tick(20_000); // saved: Change N is "def"
+        // The copy goes its own way from before "def": its Change N is something else.
+        let (_, mut other) = storage::load(&older, ME).unwrap();
+        storage::save(&older, &[other.insert_local(0, "XYZ", 15_000)], &other).unwrap();
+        std::fs::copy(&older, root.join("Rain.db")).unwrap();
+
+        vault.tick(30_000); // noticed
+        vault.edit("Rain", vec![Op::Sync], 30_001).unwrap(); // and looked at
+        assert_eq!(vault.works["Rain"].whereabouts, Some(Whereabouts::Diverged));
+        vault.edit("Rain", vec![typing(6, "!")], 31_000).unwrap();
+        vault.tick(40_000);
+        // Nothing was written into the other History, so it still loads.
+        assert_eq!(storage::load(&root.join("Rain.db"), ME).unwrap().1.text(), "XYZabc");
+        // And what this tab has can go to a new Work.
+        let saved = vault.save_as_new("Rain", "Rain (kept)", 41_000).unwrap();
+        assert_eq!(saved.text, "abcdef!");
     }
 
     #[test]

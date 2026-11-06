@@ -41,7 +41,7 @@ export type WorkState = {
   moved: Whereabouts | null;
 };
 
-export type Whereabouts = { kind: "renamed"; to: string } | { kind: "trashed" } | { kind: "gone" };
+export type Whereabouts = { kind: "renamed"; to: string } | { kind: "trashed" } | { kind: "gone" } | { kind: "diverged" };
 
 /** Marks the editor's own changes from Rust, so they aren't sent back. */
 export const fromHistory = Annotation.define<boolean>();

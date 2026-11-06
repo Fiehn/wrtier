@@ -18,6 +18,12 @@ pub struct Settings {
     pub font_size: u32,
     pub theme_here: bool,
     pub font_size_here: bool,
+    /// Line numbers in the editor's margin.
+    pub line_numbers: bool,
+    pub line_numbers_here: bool,
+    /// The line with the cursor shaded.
+    pub highlight_line: bool,
+    pub highlight_line_here: bool,
 }
 
 /// The settings there are, as stored, with their default and what's allowed.
@@ -28,6 +34,8 @@ fn check(name: &str, value: &str) -> Result<(&'static str, String), String> {
             Ok(size) if (10..=40).contains(&size) => Ok(("font_size", size.to_string())),
             _ => Err("The font size must be a whole number from 10 to 40.".into()),
         },
+        "lineNumbers" if ["on", "off"].contains(&value) => Ok(("line_numbers", value.to_string())),
+        "highlightLine" if ["on", "off"].contains(&value) => Ok(("highlight_line", value.to_string())),
         _ => Err(format!("Not a setting: {name} = {value:?}")),
     }
 }
@@ -46,7 +54,18 @@ impl Vault {
     pub fn settings(&self) -> Settings {
         let (theme, theme_here) = self.setting("theme", "system");
         let (font_size, font_size_here) = self.setting("font_size", "17");
-        Settings { theme, font_size: font_size.parse().unwrap_or(17), theme_here, font_size_here }
+        let (line_numbers, line_numbers_here) = self.setting("line_numbers", "off");
+        let (highlight_line, highlight_line_here) = self.setting("highlight_line", "off");
+        Settings {
+            theme,
+            font_size: font_size.parse().unwrap_or(17),
+            theme_here,
+            font_size_here,
+            line_numbers: line_numbers == "on",
+            line_numbers_here,
+            highlight_line: highlight_line == "on",
+            highlight_line_here,
+        }
     }
 
     /// Sets a setting for every Device, or (`here`) only for this one. Setting it for every
@@ -77,7 +96,13 @@ mod tests {
     fn a_setting_is_shared_unless_this_device_overrides_it() {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = open(dir.path());
-        assert_eq!(vault.settings(), Settings { theme: "system".into(), font_size: 17, theme_here: false, font_size_here: false });
+        assert_eq!(vault.settings(), Settings {
+            theme: "system".into(), font_size: 17, theme_here: false, font_size_here: false,
+            line_numbers: false, line_numbers_here: false, highlight_line: false, highlight_line_here: false,
+        });
+        vault.set_setting("lineNumbers", "on", true, 500).unwrap();
+        assert!(vault.settings().line_numbers && vault.settings().line_numbers_here);
+        assert!(vault.set_setting("highlightLine", "maybe", false, 500).is_err());
         vault.set_setting("theme", "dark", false, 1000).unwrap();
         vault.set_setting("fontSize", "20", true, 2000).unwrap();
         let settings = vault.settings();

@@ -642,16 +642,46 @@ fn parse_optional<T: std::str::FromStr<Err = String>>(s: Option<&str>) -> Result
 }
 
 // public functions open the file do one thing then close it.
+/// Saves Changes to a History. Saving one that's already there is fine (nothing happens), but a
+/// different Change under the same ID is refused, and nothing is written: the file comes from a
+/// copy of this History that went its own way, and mixing the two would break it (later Changes
+/// would build on text the file doesn't have).
 pub fn save(path: &Path, changes: &[Change], doc: &Doc) -> Result<()> {
     // Open the database, migrate if necessary, and write all changes.
     let mut conn = Connection::open(path)?;
     migrate(&conn)?;
     let tx = conn.transaction()?;
+    let differing = differing_ids(&tx, changes)?;
+    if !differing.is_empty() {
+        return Err(Box::new(SameIdDifferentContent { ids: differing }));
+    }
     for change in changes {
         write_change(&tx, change, doc)?;
     }
     tx.commit()?;
     Ok(())
+}
+
+/// The IDs of `changes` that the file already has as a different Change. (Two Changes with one
+/// ID are told apart by their time: a Device never gives two of its Changes the same one.)
+fn differing_ids(conn: &Connection, changes: &[Change]) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare_cached("SELECT hlc FROM changes WHERE id = ?1")?;
+    let mut differing = Vec::new();
+    for change in changes {
+        let id = change.id.to_string();
+        let hlc: Option<i64> = stmt.query_row([&id], |r| r.get(0)).optional()?;
+        if hlc.is_some_and(|hlc| hlc != change.hlc.0 as i64) {
+            differing.push(id);
+        }
+    }
+    Ok(differing)
+}
+
+/// Does the History in `db` agree with `changes` (known to belong to it)? False if it has any
+/// of their IDs as a different Change: then it's a copy that went its own way. Read-only.
+pub fn agrees_with(db: &Path, changes: &[Change]) -> Result<bool> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    Ok(differing_ids(&conn, changes)?.is_empty())
 }
 /// Every Change in a History file, in the fixed Change order.
 pub fn read_all(path: &Path) -> Result<Vec<Change>> {
@@ -856,13 +886,39 @@ pub fn import_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64)
     })
 }
 
-/// A History's first Change, in the fixed Change order. It never changes, so it tells which
-/// Work a `.db` is, wherever it was moved or renamed. None for a History with no Changes.
-/// Read-only.
-pub fn first_change(db: &Path) -> Result<Option<ChangeId>> {
+/// A History's first Change, in the fixed Change order, and its time. None for a History with
+/// no Changes. Read-only.
+pub fn first_change(db: &Path) -> Result<Option<(ChangeId, Hlc)>> {
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    let id: Option<String> = conn.query_row("SELECT id FROM changes ORDER BY hlc, device LIMIT 1", [], |r| r.get(0)).optional()?;
-    Ok(id.map(|id| id.parse::<ChangeId>()).transpose()?)
+    let first: Option<(String, i64)> = conn
+        .query_row("SELECT id, hlc FROM changes ORDER BY hlc, device LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    Ok(first.map(|(id, hlc)| Ok::<_, Box<dyn Error>>((id.parse::<ChangeId>()?, Hlc(hlc as u64)))).transpose()?)
+}
+
+/// The record and field holding the ID a Work is given when it's made.
+pub const WORK_RECORD: &str = "work";
+pub const WORK_ID_FIELD: &str = "id";
+
+/// What tells one Work from every other, wherever its files are moved or renamed: the ID it
+/// was given when it was made. A Work from before Works had one is known by its first Change
+/// and that Change's time (its ID alone isn't enough: Change IDs count up per Work, so every
+/// Work a Device makes starts with the same one). None for a History with no Changes. Read-only.
+pub fn identity(db: &Path) -> Result<Option<String>> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    let has_fields: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fields')", [], |r| r.get(0))?;
+    if has_fields {
+        let given: Option<String> = conn
+            .query_row("SELECT value FROM fields WHERE record = ?1 AND field = ?2 ORDER BY rowid LIMIT 1",
+                       [WORK_RECORD, WORK_ID_FIELD], |r| r.get(0))
+            .optional()?;
+        if given.is_some() {
+            return Ok(given);
+        }
+    }
+    drop(conn);
+    Ok(first_change(db)?.map(|(id, hlc)| format!("{id}@{hlc}")))
 }
 
 /// Did this History record writing a Text file with exactly `text`, on any Device?
@@ -1312,16 +1368,46 @@ mod test {
     }
 
     #[test]
-    fn a_history_is_known_by_its_first_change() {
+    fn a_different_change_under_an_id_already_saved_is_refused() {
+        // Two copies of one History, each going on from Change 1 on its own (as when a file
+        // is copied and both copies are edited), then one saving into the other's file.
         let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("work.db");
+        let (db, copy) = (dir.path().join("work.db"), dir.path().join("copy.db"));
+        let mut a = Doc::new(DeviceId(1));
+        let first = a.insert_local(0, "abc", 1000);
+        save(&db, std::slice::from_ref(&first), &a).unwrap();
+        std::fs::copy(&db, &copy).unwrap();
+        let mut b = Doc::new(DeviceId(1));
+        b.apply(&first);
+        let a2 = a.insert_local(3, "A", 2000);
+        let b2 = b.insert_local(0, "B", 3000); // the same ID, 00000001:2, for something else
+        save(&db, std::slice::from_ref(&a2), &a).unwrap();
+        save(&copy, std::slice::from_ref(&b2), &b).unwrap();
+        let refused = save(&db, std::slice::from_ref(&b2), &b).unwrap_err();
+        assert!(refused.to_string().contains("same ID"), "{refused}");
+        assert_eq!(load(&db, DeviceId(1)).unwrap().1.text(), "abcA", "nothing was written");
+        assert!(save(&db, &[a2.clone()], &a).is_ok(), "saving the same Change again is fine");
+        assert!(agrees_with(&db, &[first, a2]).unwrap());
+        assert!(!agrees_with(&db, &[b2]).unwrap());
+    }
+
+    #[test]
+    fn a_work_is_known_by_the_id_it_was_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, older) = (dir.path().join("work.db"), dir.path().join("older.db"));
         let mut doc = Doc::new(DeviceId(1));
         save(&db, &[], &doc).unwrap();
-        assert_eq!(first_change(&db).unwrap(), None);
-        let first = doc.insert_local(0, "abc", 1000);
-        save(&db, std::slice::from_ref(&first), &doc).unwrap();
-        save(&db, &[doc.insert_local(3, "d", 2000)], &doc).unwrap();
-        assert_eq!(first_change(&db).unwrap(), Some(first.id));
+        assert_eq!(identity(&db).unwrap(), None);
+        let given = doc.set_field_local(WORK_RECORD, WORK_ID_FIELD, "3f1c9a", 1000);
+        save(&db, &[given, doc.insert_local(0, "abc", 2000)], &doc).unwrap();
+        assert_eq!(identity(&db).unwrap().as_deref(), Some("3f1c9a"));
+        // From before Works had an ID: its first Change, with that Change's time. Two Works a
+        // Device made both start with Change 00000001:1, so the time is what tells them apart.
+        let mut other = Doc::new(DeviceId(1));
+        let first = other.insert_local(0, "xyz", 5000);
+        save(&older, std::slice::from_ref(&first), &other).unwrap();
+        assert_eq!(identity(&older).unwrap(), Some(format!("{}@5000", first.id)));
+        assert_eq!(first.id, ChangeId { device: DeviceId(1), counter: 1 });
     }
 
     #[test]

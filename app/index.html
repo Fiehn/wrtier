@@ -18,7 +18,6 @@
           </div>
           <div id="vault-root" class="muted"></div>
           <div id="vault-actions" class="row" hidden>
-            <button id="new-work" type="button">New Work…</button>
             <button id="open-switcher" type="button" title="Ctrl+O">Find… <kbd>Ctrl+O</kbd></button>
           </div>
         </header>
@@ -34,6 +33,7 @@
         <div id="problems" hidden></div>
         <div id="error" hidden></div>
         <div id="tabrow">
+          <button id="sidebar-toggle" type="button" title="Hide the Works (Ctrl+\)" aria-label="Show or hide the Works">☰</button>
           <nav id="tabbar"></nav>
           <button id="view-mode" type="button" class="link" title="Ctrl+E" hidden>Raw view</button>
         </div>
@@ -71,7 +71,7 @@
     <dialog id="ask-text">
       <form method="dialog">
         <p id="ask-text-question"></p>
-        <p class="muted">Put a Work in a folder with a slash, e.g. <code>Short stories/Rain</code>.</p>
+        <p class="muted" id="ask-text-hint"></p>
         <input id="ask-text-input" required maxlength="200" autocomplete="off" />
         <menu>
           <button type="button" data-close="cancel">Cancel</button>
@@ -112,6 +112,10 @@
           <input id="font-size" type="number" min="10" max="40" />
         </label>
         <label class="here"><input type="checkbox" id="font-size-here" /> Only on this device</label>
+        <label class="check"><input type="checkbox" id="line-numbers" /> Line numbers</label>
+        <label class="here"><input type="checkbox" id="line-numbers-here" /> Only on this device</label>
+        <label class="check"><input type="checkbox" id="highlight-line" /> Shade the line the cursor is on</label>
+        <label class="here"><input type="checkbox" id="highlight-line-here" /> Only on this device</label>
         <p class="muted">Settings are kept in the Vault, so every device that opens it uses them, unless it has its own.</p>
         <menu>
           <button value="done">Done</button>

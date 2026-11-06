@@ -213,6 +213,24 @@ fn restore_open(state: State<AppState>, id: String) -> Result<String, String> {
     with_app(&state, |app| open_vault_of(app)?.restore_open(&id))
 }
 
+/// Makes a new, empty folder for Works. Returns its path.
+#[tauri::command]
+fn create_folder(state: State<AppState>, path: String) -> Result<String, String> {
+    with_app(&state, |app| open_vault_of(app)?.create_folder(&path))
+}
+
+/// Renames (or moves) a folder. Returns the old and new ID of each Work open in it.
+#[tauri::command]
+fn rename_folder(state: State<AppState>, path: String, name: String) -> Result<Vec<(String, String)>, String> {
+    with_app(&state, |app| open_vault_of(app)?.rename_folder(&path, &name))
+}
+
+/// Moves a folder, with everything in it, to the Vault's trash.
+#[tauri::command]
+fn trash_folder(state: State<AppState>, path: String) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.trash_folder(&path, now_ms()))
+}
+
 #[tauri::command]
 fn empty_trash(state: State<AppState>) -> Result<(), String> {
     with_app(&state, |app| open_vault_of(app)?.empty_trash())
@@ -328,6 +346,9 @@ pub fn run() {
             restore_work,
             restore_open,
             empty_trash,
+            create_folder,
+            rename_folder,
+            trash_folder,
             discard_work,
             save_as_new,
             get_settings,

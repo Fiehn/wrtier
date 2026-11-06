@@ -114,6 +114,8 @@ pub struct Entry {
 pub struct Listing {
     pub entries: Vec<Entry>,
     pub problems: Vec<SyncProblem>,
+    /// Every folder Works can be in ("Short stories", "Short stories/Old"), empty ones too.
+    pub folders: Vec<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -138,6 +140,7 @@ struct Files {
     dbs: Vec<PathBuf>,
     typs: Vec<PathBuf>,
     copies: Vec<PathBuf>,
+    folders: Vec<PathBuf>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -366,7 +369,9 @@ impl Vault {
             entries.push(Entry { id, name, kind });
         }
         entries.sort_by_key(|e| e.id.to_lowercase());
-        Listing { entries, problems }
+        let mut folders: Vec<String> = files.folders.iter().map(|dir| self.relative(dir)).collect();
+        folders.sort_by_key(|f| f.to_lowercase());
+        Listing { entries, problems, folders }
     }
 
     /// Absorbs the Conflict copies of a Work that isn't open, into a History loaded just for
@@ -448,7 +453,9 @@ impl Vault {
         }));
         let (doc, mine) = match result {
             Ok(result) => result?,
-            Err(panic) => return Err(format!("Something went wrong opening {name}: {}", panic_message(panic.as_ref()))),
+            Err(panic) => return Err(format!(
+                "{name} can't be opened: its History looks damaged ({}). Its files are left as they are.",
+                panic_message(panic.as_ref()))),
         };
         let text = doc.text();
         let (sitting, notice) = match self.recovered.remove(id) {
@@ -539,10 +546,15 @@ impl Vault {
         if let Some(dir) = db.parent() {
             std::fs::create_dir_all(dir).map_err(err)?;
         }
-        // Its first Change, which tells this Work apart wherever it's moved (see `OpenWork::identity`).
+        // The ID that tells this Work from every other wherever it's moved (`storage::identity`),
+        // and when it was made.
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|e| format!("couldn't make an ID for the Work: {e}"))?;
+        let work_id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let mut doc = Doc::new(self.device);
-        let created = doc.set_field_local("work", "created", &now_ms.to_string(), now_ms);
-        storage::save(&db, &[created], &doc).map_err(err)?;
+        let given = doc.set_field_local(storage::WORK_RECORD, storage::WORK_ID_FIELD, &work_id, now_ms);
+        let created = doc.set_field_local(storage::WORK_RECORD, "created", &now_ms.to_string(), now_ms);
+        storage::save(&db, &[given, created], &doc).map_err(err)?;
         storage::write_text_file(&db, &typ, &doc, now_ms).map_err(err)?;
         self.open_work(&id, now_ms)
     }
@@ -745,6 +757,7 @@ fn walk_works(root: &Path) -> Files {
                 // file), the trash, a Work's images, and the Style library, themes and fonts.
                 let skip = name.starts_with('.') || name.ends_with(".images") || (top && NOT_WORKS.contains(&name.as_str()));
                 if !skip {
+                    files.folders.push(path.clone());
                     walk_dir(&path, false, files);
                 }
             } else if kind.is_file() {
