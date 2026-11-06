@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::path::Path;
 use rusqlite::{params, Connection};
-use crate::change::{Change, ChangeKind, CharRange, InsertRun, Span};
+use crate::change::{Change, ChangeKind, CharRange, InsertRun, NoticeKey, Span};
 use crate::doc::Doc;
 use crate::ids::{ChangeId, CharId, Side, DeviceId, Hlc};
 use std::collections::HashMap;
@@ -107,6 +107,20 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
+    if version < 5 {
+        // Dismissed Merge notices. The notice is named by the Moves involved.
+        conn.execute_batch("
+        BEGIN;
+        CREATE TABLE dismissals (
+            change      TEXT PRIMARY KEY REFERENCES changes(id),
+            notice      TEXT NOT NULL CHECK (notice IN ('overlap', 'loop')),
+            move        TEXT NOT NULL, -- overlap: the later Move; loop: the skipped Move
+            other_move  TEXT           -- overlap: the earlier Move; loop: NULL
+        );
+        PRAGMA user_version = 5;
+        COMMIT;
+        ")?;
+    }
     Ok(())
 }
 /// One row in `insertions`. Insert and Replace both write one.
@@ -140,6 +154,7 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                 ChangeKind::Replace { .. } => "replace",
                 ChangeKind::Revert { .. } => "revert",
                 ChangeKind::Move { .. } => "move",
+                ChangeKind::Dismiss { .. } => "dismiss",
             },
         ],
     )?;
@@ -220,6 +235,16 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                     params![change.id.to_string(), device.to_string(), counter],
                 )?;
             }
+        }
+        ChangeKind::Dismiss { notice } => {
+            let (kind, mv, other) = match notice {
+                NoticeKey::Overlap { later, earlier } => ("overlap", later, Some(earlier)),
+                NoticeKey::Loop { skipped } => ("loop", skipped, None),
+            };
+            conn.execute(
+                "INSERT OR IGNORE INTO dismissals (change, notice, move, other_move) VALUES (?1, ?2, ?3, ?4)",
+                params![change.id.to_string(), kind, mv.to_string(), other.map(|o| o.to_string())],
+            )?;
         }
     }
     Ok(())
@@ -308,6 +333,29 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
         move_pieces.entry(change).or_default().push(Span { first, last, from });
     }
 
+    // Pass 3d: which notice each Dismiss hides.
+    let mut dismissals: HashMap<ChangeId, NoticeKey> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT change, notice, move, other_move FROM dismissals")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,         // change
+            row.get::<_, String>(1)?,         // notice
+            row.get::<_, String>(2)?,         // move
+            row.get::<_, Option<String>>(3)?, // other_move
+        ))
+    })?;
+    for row in rows {
+        let (change, notice, mv, other) = row?;
+        let change: ChangeId = change.parse()?;
+        let mv: ChangeId = mv.parse()?;
+        let key = match (notice.as_str(), other) {
+            ("overlap", Some(other)) => NoticeKey::Overlap { later: mv, earlier: other.parse()? },
+            ("loop", None) => NoticeKey::Loop { skipped: mv },
+            (notice, other) => return Err(format!("Invalid dismissal: {notice} {other:?}").into()),
+        };
+        dismissals.insert(change, key);
+    }
+
     // Pass 4: read every change
     let mut stmt = conn.prepare(
         "SELECT c.id, c.hlc, c.kind, i.text, i.parent, i.side, i.right_origin, i.into_anchor
@@ -355,6 +403,10 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
                 // A Move made before its Device had seen anything has no rows here; that's not an error.
                 let seen = move_seen.remove(&id).unwrap_or_default();
                 ChangeKind::Move { pieces, parent, side, right_origin, seen, into }
+            }
+            "dismiss" => {
+                let notice = dismissals.remove(&id).ok_or(format!("Missing dismissal for change {}", id))?;
+                ChangeKind::Dismiss { notice }
             }
             other => return Err(format!("Unknown change kind: {}", other).into()),
         };
@@ -412,6 +464,7 @@ pub fn merge(main: &Path, other: &Path) -> Result<()> {
     conn.execute("INSERT OR IGNORE INTO moves SELECT * FROM other.moves", [])?;
     conn.execute("INSERT OR IGNORE INTO move_pieces SELECT * FROM other.move_pieces", [])?;
     conn.execute("INSERT OR IGNORE INTO move_seen SELECT * FROM other.move_seen", [])?;
+    conn.execute("INSERT OR IGNORE INTO dismissals SELECT * FROM other.dismissals", [])?;
     Ok(())
     // TODO: Checks of same id different content.
 }
@@ -420,13 +473,12 @@ pub fn merge(main: &Path, other: &Path) -> Result<()> {
 mod test {
     use super::*;
     
-    
     #[test]
     fn test_migrate() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     #[test]
@@ -528,6 +580,27 @@ mod test {
         assert!(merged_changes.contains(&b));
         assert!(merged_changes.contains(&c));
         assert_eq!(merged_doc.text(), "chatdog");
+    }
+
+    #[test]
+    fn dismissals_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work.db");
+        let mut laptop = Doc::new(DeviceId(1));
+        let mut phone = Doc::new(DeviceId(2));
+        let base = laptop.insert_local(0, "abcdef", 1000);
+        phone.apply(&base);
+        let a = laptop.move_local(1, 3, 6, 2000);      // overlapping Moves, made offline
+        let b = phone.move_local(2, 3, 0, 2000);
+        laptop.apply(&b);
+        let key = laptop.merge_notices()[0].key;
+        let dismiss = laptop.dismiss_local(key, 3000);
+
+        let changes = vec![base, a, b, dismiss];
+        save(&path, &changes, &laptop).unwrap();
+        let (loaded, loaded_doc) = load(&path, DeviceId(1)).unwrap();
+        assert_eq!(loaded, changes);
+        assert!(loaded_doc.merge_notices().is_empty());   // still dismissed after loading
     }
 
     #[test]

@@ -12,6 +12,7 @@ enum Action {
     Revert { device: usize, pick: u16, deps: bool },
     Restore { device: usize, pick: u16 },
     Move { device: usize, from: u16, len: u8, to: u16 },
+    Dismiss { device: usize, pick: u16 },
 }
 
 // Generate a random Action.
@@ -24,6 +25,7 @@ fn action() -> impl Strategy<Value = Action> {
         (0..3usize, any::<u16>()).prop_map(|(device, pick)| Action::Restore { device, pick }),
         (0..3usize, any::<u16>(), any::<u8>(), any::<u16>())
             .prop_map(|(device, from, len, to)| Action::Move { device, from, len, to }),
+        (0..3usize, any::<u16>()).prop_map(|(device, pick)| Action::Dismiss { device, pick }),
     ]
 }
 
@@ -131,6 +133,19 @@ fn run(actions: &[Action]) {
                 changes[*device].push(change);
                 now_ms += 1;
             }
+            Action::Dismiss { device, pick } => {
+                // Dismiss one of the notices this Device currently shows, if any.
+                let notices = docs[*device].merge_notices();
+                if notices.is_empty() {
+                    continue;
+                }
+                let key = notices[*pick as usize % notices.len()].key;
+                let change = docs[*device].dismiss_local(key, now_ms - skew[*device]);
+                assert!(!docs[*device].merge_notices().iter().any(|n| n.key == key));
+                all.push(change.clone());
+                changes[*device].push(change);
+                now_ms += 1;
+            }
         }
     }
     // sync all devices with each other
@@ -148,6 +163,9 @@ fn run(actions: &[Action]) {
     // check that all docs have the same text
     assert_eq!(docs[0].text(), docs[1].text());
     assert_eq!(docs[1].text(), docs[2].text());
+    // ...and the same Merge notices, since every Device works them out from the same History.
+    assert_eq!(docs[0].merge_notices(), docs[1].merge_notices());
+    assert_eq!(docs[1].merge_notices(), docs[2].merge_notices());
     // Compare the final text with what would be expected if all changes were applied in order of their HLC and DeviceId.
     let expected = expected_chars(&all);
     for doc in &docs {
@@ -190,7 +208,7 @@ fn expected_chars(all: &[Change]) -> Vec<char> {
             ChangeKind::Delete(r) => r,
             ChangeKind::Replace { deleted, .. } => deleted,
             ChangeKind::Insert(_) | ChangeKind::Revert { .. } => continue,
-            ChangeKind::Move { .. } => continue, // Move changes do not delete characters.
+            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } => continue, // they don't delete characters
         };
         for r in ranges {
             for offset in r.first.offset..r.first.offset + r.len {
@@ -205,7 +223,7 @@ fn expected_chars(all: &[Change]) -> Vec<char> {
             ChangeKind::Insert(run) => run,
             ChangeKind::Replace { inserted, .. } => inserted,
             ChangeKind::Delete(_) | ChangeKind::Revert { .. } => continue,
-            ChangeKind::Move { .. } => continue, // Move changes do not add characters to the text.
+            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } => continue, // they don't add characters
         };
         if !in_effect(c.id, &reverted_by) {
             continue;

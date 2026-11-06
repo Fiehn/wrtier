@@ -1,4 +1,4 @@
-use crate::change::{Change, ChangeKind, InsertRun, CharRange};
+use crate::change::{Change, ChangeKind, InsertRun, CharRange, NoticeKey};
 use crate::fugue::Tree;
 use crate::ids::{ChangeId, DeviceId, Hlc, CharId};
 use std::collections::HashSet;
@@ -16,7 +16,19 @@ pub struct Doc {
     seen: HashMap<DeviceId, u32>, // to track the highest counter seen from each device
     moves: Vec<(Hlc, MoveInfo)>, // to track the moves that have been applied, in order of their HLC
     typed_into: HashMap<CharId, Vec<CharId>>, // a piece's anchor → nodes typed or dropped into it
+    dismissals: Vec<(ChangeId, NoticeKey)>,   // every Dismiss Change, and the notice it hides
     layout: Layout,
+}
+
+/// A message for the Author about text the merge had to decide on its own.
+/// It asks for nothing and changes nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeNotice {
+    pub key: NoticeKey,
+    /// The affected characters that are visible, in reading order: where "show me" jumps to.
+    pub chars: Vec<CharId>,
+    /// The same characters as text, to quote in the History view.
+    pub text: String,
 }
 
 /// The anchor node of a piece.
@@ -36,6 +48,7 @@ impl Doc {
             seen: HashMap::new(),
             moves: Vec::new(),
             typed_into: HashMap::new(),
+            dismissals: Vec::new(),
             layout: Layout::default(),
         }
     }
@@ -69,6 +82,38 @@ impl Doc {
         if with_dependents { targets.extend(self.depends_on(target)); }
         self.commit_local(ChangeKind::Revert { targets }, now_ms)
     }
+    /// The Merge notices the Author hasn't dismissed, worked out from the History.
+    /// Every Device gets the same list, in the fixed Change order.
+    pub fn merge_notices(&self) -> Vec<MergeNotice> {
+        let overlaps = self.layout.contested_text().iter()
+            .map(|(later, earlier, chars)| (NoticeKey::Overlap { later: *later, earlier: *earlier }, chars));
+        let loops = self.layout.skipped().iter()
+            .map(|(skipped, chars)| (NoticeKey::Loop { skipped: *skipped }, chars));
+
+        let visible = self.visible();
+        overlaps.chain(loops)
+            .filter(|(key, _)| !self.is_dismissed(*key))
+            .map(|(key, involved)| {
+                // Walk the visible text so the characters come out in reading order.
+                let chars: Vec<CharId> = visible.iter()
+                    .map(|&(id, _)| id)
+                    .filter(|id| involved.contains(id))
+                    .collect();
+                let text = chars.iter().filter_map(|&id| self.tree.char_of(id)).collect();
+                MergeNotice { key, chars, text }
+            })
+            .collect()
+    }
+
+    /// Dismissed if a Dismiss of it is in effect, so reverting the Dismiss brings it back.
+    fn is_dismissed(&self, key: NoticeKey) -> bool {
+        self.dismissals.iter().any(|&(id, k)| k == key && self.is_in_effect(id))
+    }
+
+    pub fn dismiss_local(&mut self, notice: NoticeKey, now_ms: u64) -> Change {
+        self.commit_local(ChangeKind::Dismiss { notice }, now_ms)
+    }
+
     pub fn restore_local(&mut self, target: ChangeId, now_ms: u64) -> Option<Change> {
         let reverters = self.reverted_by.get(&target).cloned().unwrap_or_default();
         let in_effect: Vec<ChangeId> = reverters.into_iter().filter(|&r| self.is_in_effect(r)).collect();
@@ -132,6 +177,10 @@ impl Doc {
                 self.note_into(*into, change.id, pieces.len());
                 // push (change.hlc, MoveInfo { id: change.id, pieces: pieces.clone(), seen: seen.clone() }) onto self.moves
                 self.moves.push((change.hlc, MoveInfo { id: change.id, pieces: pieces.clone(), seen: seen.clone() }));
+            }
+            ChangeKind::Dismiss { notice } => {
+                // Changes nothing in the text; merge_notices() checks this list.
+                self.dismissals.push((change.id, *notice));
             }
         }
         self.refresh_undone();
@@ -464,6 +513,7 @@ mod test {
         doc.move_local(2, 2, 6, 2000);         // "abefcd"
         doc.move_local(5, 1, 0, 3000);         // "d" to the start
         assert_eq!(doc.text(), "dabefc");
+        assert!(doc.merge_notices().is_empty()); // one Device alone never needs a notice
     }
 
     #[test]
@@ -530,6 +580,7 @@ mod test {
         doc.move_local(2, 2, 6, 2000);         // "abefcd"
         doc.move_local(0, 4, 6, 3000);         // "abef" to the end
         assert_eq!(doc.text(), "cdabef");
+        assert!(doc.merge_notices().is_empty()); // the second Move knew about the first
     }
 
     #[test]
@@ -581,6 +632,66 @@ mod test {
         assert_eq!(laptop.text(), "cdeabf");
         assert_eq!(phone.text(), "cdeabf");
         assert!(laptop.layout.is_skipped(b.id));
+    }
+
+    #[test]
+    fn overlapping_moves_give_a_merge_notice_on_both_devices() {
+        // The laptop moves "bcd" to the end; the phone, offline, moves "cde" to the start.
+        let (mut laptop, mut phone) = laptop_and_phone();
+        let a = laptop.move_local(1, 3, 6, 2000);
+        let b = phone.move_local(2, 3, 0, 2000);
+        assert!(laptop.merge_notices().is_empty());   // nothing to say before they meet
+        laptop.apply(&b);
+        phone.apply(&a);
+        assert_eq!(laptop.text(), "cdeafb");
+
+        let notices = laptop.merge_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].key, NoticeKey::Overlap { later: b.id, earlier: a.id });
+        assert_eq!(notices[0].text, "cd");             // the text both Moves took
+        assert_eq!(phone.merge_notices(), notices);    // worked out the same way everywhere
+    }
+
+    #[test]
+    fn moves_into_each_other_give_a_merge_notice() {
+        let (mut laptop, mut phone) = laptop_and_phone();
+        let a = laptop.move_local(0, 2, 5, 2000);     // "ab" between e and f
+        let b = phone.move_local(4, 2, 1, 2000);      // "ef" between a and b
+        laptop.apply(&b);
+        phone.apply(&a);
+        let notices = laptop.merge_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].key, NoticeKey::Loop { skipped: b.id });
+        assert_eq!(notices[0].text, "ef");             // the text that stayed where it was
+    }
+
+    #[test]
+    fn dismissing_a_notice_syncs_and_can_be_undone() {
+        let (mut laptop, mut phone) = laptop_and_phone();
+        let a = laptop.move_local(1, 3, 6, 2000);
+        let b = phone.move_local(2, 3, 0, 2000);
+        laptop.apply(&b);
+        phone.apply(&a);
+        let key = laptop.merge_notices()[0].key;
+
+        let dismiss = laptop.dismiss_local(key, 3000);
+        assert!(laptop.merge_notices().is_empty());
+        phone.apply(&dismiss);                         // dismissed on the laptop = gone on the phone too
+        assert!(phone.merge_notices().is_empty());
+
+        phone.revert_local(dismiss.id, false, 4000);   // a Dismiss is a Change, so it can be reverted
+        assert_eq!(phone.merge_notices().len(), 1);
+    }
+
+    #[test]
+    fn reverting_a_move_removes_its_notice() {
+        let (mut laptop, mut phone) = laptop_and_phone();
+        laptop.move_local(1, 3, 6, 2000);
+        let b = phone.move_local(2, 3, 0, 2000);
+        laptop.apply(&b);
+        assert_eq!(laptop.merge_notices().len(), 1);
+        laptop.revert_local(b.id, false, 3000);        // nothing left to decide about
+        assert!(laptop.merge_notices().is_empty());
     }
 
 

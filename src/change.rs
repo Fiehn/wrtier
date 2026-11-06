@@ -31,6 +31,17 @@ pub enum ChangeKind {
         seen: Vec<(DeviceId, u32)>, // history of the move
         into: Option<CharId>,       // the piece the anchors were dropped into, like InsertRun::into
     },
+    /// Hides a Merge notice. Notices are worked out from the History; dismissing one is the only part recorded.
+    Dismiss { notice: NoticeKey },
+}
+
+/// Names a Merge notice the same way on every Device, by the Moves involved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NoticeKey {
+    /// Two Moves made without knowing about each other took the same text; the later one got it.
+    Overlap { later: ChangeId, earlier: ChangeId },
+    /// A Move would have put text inside itself, so it was skipped and its text stayed where it was.
+    Loop { skipped: ChangeId },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

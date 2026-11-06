@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use crate::change::Span;
 use crate::fugue::Tree;
 use crate::ids::{ChangeId, CharId, DeviceId};
@@ -27,8 +27,9 @@ impl MoveInfo {
 pub struct Layout {
     owner: HashMap<CharId, Piece>, // draw at that piece's anchor, missing = drawn where it is
     spans: HashMap<Piece, Span>, // the pieces of every move that happened
-    skipped: HashSet<ChangeId>, // moves skipped because they made a loop
-    contested: Vec<(ChangeId, ChangeId)>, // (later, earlier): took the same text without knowing about it
+    // For Merge notices. Both keep the characters involved (not anchors), in fixed Change order.
+    skipped: Vec<(ChangeId, Vec<CharId>)>, // Moves skipped because they made a loop, with the text they'd have moved
+    contested: Vec<(ChangeId, ChangeId, Vec<CharId>)>, // (later, earlier, text): both took it without knowing about each other
 }
 
 impl Layout {
@@ -52,7 +53,7 @@ impl Layout {
         // 2.
         let mut layout = Layout::default();
         for m in moves {
-            let mut contested: Vec<(ChangeId, ChangeId)> = Vec::new();
+            let mut contested: Vec<(ChangeId, ChangeId, Vec<CharId>)> = Vec::new();
             let mut taken: Vec<(CharId, Option<Piece>)> = Vec::new();
             for (k, span) in m.pieces.iter().enumerate() {
                 let lo = match pos.get(&span.first) {
@@ -69,8 +70,12 @@ impl Layout {
                         taken.push((id, prev_owner));
                         layout.owner.insert(id, (m.id, k));
                         if let Some((other, _)) = prev_owner {
-                            if !m.saw(other) && !contested.contains(&(m.id, other)) {
-                                contested.push((m.id, other));
+                            if !m.saw(other) && !tree.is_anchor(id) {
+                                // One entry per pair of Moves, collecting every character they both took.
+                                match contested.iter_mut().find(|(_, earlier, _)| *earlier == other) {
+                                    Some((_, _, chars)) => chars.push(id),
+                                    None => contested.push((m.id, other, vec![id])),
+                                }
                             }
                         }
                     }
@@ -89,13 +94,18 @@ impl Layout {
             }
             // 3.
             if layout.makes_loop(m) {
+                // Keep the text it would have moved, for the Merge notice, then undo.
+                let would_move: Vec<CharId> = taken.iter()
+                    .map(|&(id, _)| id)
+                    .filter(|&id| !tree.is_anchor(id))
+                    .collect();
                 for (id, prev_owner) in taken.into_iter().rev() {
                     match prev_owner {
                         None => { layout.owner.remove(&id); },
                         Some(piece) => { layout.owner.insert(id, piece); },
                     }
                 }
-                layout.skipped.insert(m.id);
+                layout.skipped.push((m.id, would_move));
             } else {
                 // 4.
                 for (k, span) in m.pieces.iter().enumerate() {
@@ -213,9 +223,18 @@ impl Layout {
         self.spans.get(&piece)
     }
     pub fn is_skipped(&self, id: ChangeId) -> bool {
-        self.skipped.contains(&id)
+        self.skipped.iter().any(|(m, _)| *m == id)
     }
-    pub fn contested(&self) -> &[(ChangeId, ChangeId)] {
+    /// Moves skipped because they made a loop, with the text they would have moved.
+    pub fn skipped(&self) -> &[(ChangeId, Vec<CharId>)] {
+        &self.skipped
+    }
+    /// (later Move, earlier Move) pairs that took the same text without knowing about each other.
+    pub fn contested(&self) -> Vec<(ChangeId, ChangeId)> {
+        self.contested.iter().map(|&(later, earlier, _)| (later, earlier)).collect()
+    }
+    /// The same, with the characters both took (the later Move got them).
+    pub fn contested_text(&self) -> &[(ChangeId, ChangeId, Vec<CharId>)] {
         &self.contested
     }
 }
