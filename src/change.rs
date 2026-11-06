@@ -6,6 +6,9 @@ pub struct InsertRun {
     pub parent: Option<CharId>,
     pub side: Side,
     pub right_origin: Option<CharId>,
+    /// The anchor of the moved piece the text was typed into; None = the main text.
+    /// Its place in the tree alone can't say this once Moves overlap.
+    pub into: Option<CharId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,6 +29,7 @@ pub enum ChangeKind {
         side: Side,
         right_origin: Option<CharId>,
         seen: Vec<(DeviceId, u32)>, // history of the move
+        into: Option<CharId>,       // the piece the anchors were dropped into, like InsertRun::into
     },
 }
 
@@ -40,7 +44,10 @@ pub struct Change {
 pub struct Span {
     pub first: CharId,
     pub last: CharId,
-    pub from: Option<ChangeId>, // the Move it was in when selected; None = at home
+    /// The anchor of the piece this text was drawn in when selected; None = the main text.
+    /// It names the piece, not just the Move: a Move can have several pieces, and
+    /// this piece may only take text from the one it was selected from.
+    pub from: Option<CharId>,
 }
 
 
@@ -65,6 +72,7 @@ mod test {
                 parent: None,
                 side: Side::Right,
                 right_origin: None,
+                into: None,
             }),
         };
 
@@ -76,6 +84,7 @@ mod test {
                 parent: Some(CharId { offset: 4, change: change1.id }),
                 side: Side::Right,
                 right_origin: None,
+                into: None,
             }),
         };
 

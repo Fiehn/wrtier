@@ -1,12 +1,30 @@
 use std::error::Error;
 use std::path::Path;
 use rusqlite::{params, Connection};
-use crate::change::{Change, ChangeKind, CharRange, InsertRun};
+use crate::change::{Change, ChangeKind, CharRange, InsertRun, Span};
 use crate::doc::Doc;
 use crate::ids::{ChangeId, CharId, Side, DeviceId, Hlc};
 use std::collections::HashMap;
 
+
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+/// How a Side is written in the database.
+fn side_to_str(side: Side) -> &'static str {
+    match side {
+        Side::Left => "L",
+        Side::Right => "R",
+    }
+}
+
+/// The other direction; anything else means the file is damaged.
+fn side_from_str(s: &str) -> Result<Side> {
+    match s {
+        "L" => Ok(Side::Left),
+        "R" => Ok(Side::Right),
+        other => Err(format!("Invalid side: {other:?}").into()),
+    }
+}
 
 const SCHEMA: &str = "
 CREATE TABLE changes (
@@ -51,8 +69,63 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
+    if version < 3 {
+        conn.execute_batch("
+        BEGIN;
+        CREATE TABLE moves (
+            change TEXT PRIMARY KEY REFERENCES changes(id),
+            parent TEXT,
+            side TEXT NOT NULL CHECK (side IN ('L', 'R')),
+            right_origin TEXT
+            );
+        CREATE TABLE move_pieces (
+            change TEXT NOT NULL REFERENCES changes(id),
+            piece INTEGER NOT NULL, -- index of the piece in the move
+            first_char TEXT NOT NULL,
+            last_char TEXT NOT NULL,
+            from_anchor TEXT, -- anchor of the piece it was selected from; NULL = the main text
+            moved_text TEXT NOT NULL, -- readable copy of the text in the piece
+            PRIMARY KEY (change, piece)
+            );
+        CREATE TABLE move_seen (
+            change TEXT NOT NULL REFERENCES changes(id),
+            device TEXT NOT NULL,
+            counter INTEGER NOT NULL,
+            PRIMARY KEY (change, device)
+        );
+        PRAGMA user_version = 3;
+        COMMIT;
+        ")?;
+    }
+    if version < 4 {
+        // The piece text was typed or dropped into. Existing rows get NULL: the main text.
+        conn.execute_batch("
+        BEGIN;
+        ALTER TABLE insertions ADD COLUMN into_anchor TEXT;
+        ALTER TABLE moves ADD COLUMN into_anchor TEXT;
+        PRAGMA user_version = 4;
+        COMMIT;
+        ")?;
+    }
     Ok(())
 }
+/// One row in `insertions`. Insert and Replace both write one.
+fn write_insertion(conn: &Connection, change: ChangeId, run: &InsertRun) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO insertions (change, text, parent, side, right_origin, into_anchor)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            change.to_string(),
+            run.text,
+            run.parent.map(|id| id.to_string()),
+            side_to_str(run.side),
+            run.right_origin.map(|id| id.to_string()),
+            run.into.map(|id| id.to_string()),
+        ],
+    )?;
+    Ok(())
+}
+
 fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO changes (id, device, counter, hlc, time, kind) VALUES (?1, ?2, ?3, ?4, datetime(?4 / 1000, 'unixepoch'), ?5)",
@@ -71,21 +144,7 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
         ],
     )?;
     match &change.kind {
-        ChangeKind::Insert(run) => {
-            conn.execute(
-                "INSERT OR IGNORE INTO insertions (change, text, parent, side, right_origin) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    change.id.to_string(),
-                    run.text,
-                    run.parent.map(|id| id.to_string()),
-                    match run.side {
-                        Side::Left => "L",
-                        Side::Right => "R",
-                    },
-                    run.right_origin.map(|id| id.to_string()),
-                ],
-            )?;
-        }
+        ChangeKind::Insert(run) => write_insertion(conn, change.id, run)?,
         ChangeKind::Delete(ranges) => {
             for range in ranges {
                 let text = doc.text_of(range);
@@ -113,19 +172,7 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                     ],
                 )?;
             }
-            conn.execute(
-                "INSERT OR IGNORE INTO insertions (change, text, parent, side, right_origin) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    change.id.to_string(),
-                    inserted.text,
-                    inserted.parent.map(|id| id.to_string()),
-                    match inserted.side {
-                        Side::Left => "L",
-                        Side::Right => "R",
-                    },
-                    inserted.right_origin.map(|id| id.to_string()),
-                ],
-            )?;
+            write_insertion(conn, change.id, inserted)?;
         }
         ChangeKind::Revert { targets } => {
             // One row per target
@@ -139,8 +186,40 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                 )?;
             }
         }
-        ChangeKind::Move { pieces, parent, side, right_origin, seen } => {
-            todo!("Implement saving Move changes to the database");
+        ChangeKind::Move { pieces, parent, side, right_origin, seen, into } => {
+            // Where the anchors go: the same fields an insertion has.
+            conn.execute(
+                "INSERT OR IGNORE INTO moves (change, parent, side, right_origin, into_anchor) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    change.id.to_string(),
+                    parent.map(|id| id.to_string()),
+                    side_to_str(*side),
+                    right_origin.map(|id| id.to_string()),
+                    into.map(|id| id.to_string()),
+                ],
+            )?;
+            // One row per piece; `piece` is its index, which keeps them in reading order.
+            for (k, span) in pieces.iter().enumerate() {
+                conn.execute(
+                    "INSERT OR IGNORE INTO move_pieces (change, piece, first_char, last_char, from_anchor, moved_text)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        change.id.to_string(),
+                        k as i64,
+                        span.first.to_string(),
+                        span.last.to_string(),
+                        span.from.map(|id| id.to_string()),
+                        doc.piece_text(span),
+                    ],
+                )?;
+            }
+            // What the moving Device had seen: one row per Device.
+            for (device, counter) in seen {
+                conn.execute(
+                    "INSERT OR IGNORE INTO move_seen (change, device, counter) VALUES (?1, ?2, ?3)",
+                    params![change.id.to_string(), device.to_string(), counter],
+                )?;
+            }
         }
     }
     Ok(())
@@ -174,9 +253,64 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
         revert_targets.entry(change).or_default().push(target);
     }
 
-    // Pass 3: read every change
+    // Pass 3a: read every row of move_seen into a HashMap<ChangeId, Vec<(DeviceId, u32)>>
+    let mut move_seen: HashMap<ChangeId, Vec<(DeviceId, u32)>> = HashMap::new();
+    // Device IDs are fixed-width hex, so sorting the text sorts the numbers too.
+    let mut stmt = conn.prepare("SELECT change, device, counter FROM move_seen ORDER BY change, device")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u32>(2)?))
+    })?;
+    for row in rows {
+        let (change, device, counter) = row?;
+        let change: ChangeId = change.parse()?;
+        let device: DeviceId = device.parse()?;
+        move_seen.entry(change).or_default().push((device, counter));
+    }
+    // Pass 3b: where each Move's anchors go: (parent, side, right_origin, into).
+    let mut moves: HashMap<ChangeId, (Option<CharId>, Side, Option<CharId>, Option<CharId>)> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT change, parent, side, right_origin, into_anchor FROM moves")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,         // change
+            row.get::<_, Option<String>>(1)?, // parent
+            row.get::<_, String>(2)?,         // side
+            row.get::<_, Option<String>>(3)?, // right_origin
+            row.get::<_, Option<String>>(4)?, // into_anchor
+        ))
+    })?;
+    for row in rows {
+        let (change, parent, side, right_origin, into) = row?;
+        let change: ChangeId = change.parse()?;
+        let parent: Option<CharId> = parent.map(|p| p.parse()).transpose()?;
+        let side = side_from_str(&side)?;
+        let right_origin: Option<CharId> = right_origin.map(|r| r.parse()).transpose()?;
+        let into: Option<CharId> = into.map(|a| a.parse()).transpose()?;
+        moves.insert(change, (parent, side, right_origin, into));
+    }
+    // Pass 3c: every piece, grouped by its Move, in piece order.
+    // (moved_text is only a readable copy, so it isn't read back.)
+    let mut move_pieces: HashMap<ChangeId, Vec<Span>> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT change, first_char, last_char, from_anchor FROM move_pieces ORDER BY change, piece")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,         // change
+            row.get::<_, String>(1)?,         // first_char
+            row.get::<_, String>(2)?,         // last_char
+            row.get::<_, Option<String>>(3)?, // from_anchor
+        ))
+    })?;
+    for row in rows {
+        let (change, first, last, from) = row?;
+        let change: ChangeId = change.parse()?;
+        let first: CharId = first.parse()?;
+        let last: CharId = last.parse()?;
+        let from: Option<CharId> = from.map(|f| f.parse()).transpose()?;
+        move_pieces.entry(change).or_default().push(Span { first, last, from });
+    }
+
+    // Pass 4: read every change
     let mut stmt = conn.prepare(
-        "SELECT c.id, c.hlc, c.kind, i.text, i.parent, i.side, i.right_origin
+        "SELECT c.id, c.hlc, c.kind, i.text, i.parent, i.side, i.right_origin, i.into_anchor
         FROM changes c LEFT JOIN insertions i ON i.change = c.id
         ORDER BY c.hlc, c.device",
     )?;
@@ -185,29 +319,22 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
             row.get::<_, String>(0)?, // id
             row.get::<_, i64>(1)?,    // hlc
             row.get::<_, String>(2)?, // kind
-            row.get::<_, Option<String>>(3)?, // text
-            row.get::<_, Option<String>>(4)?, // parent
-            row.get::<_, Option<String>>(5)?, // side
-            row.get::<_, Option<String>>(6)?, // right_origin            
+            (
+                row.get::<_, Option<String>>(3)?, // text
+                row.get::<_, Option<String>>(4)?, // parent
+                row.get::<_, Option<String>>(5)?, // side
+                row.get::<_, Option<String>>(6)?, // right_origin
+                row.get::<_, Option<String>>(7)?, // into_anchor
+            ),
         ))
     })?;
 
     let mut changes = Vec::new();
     for row in rows {
-        let (id, hlc, kind, text, parent, side, right_origin) = row?;
+        let (id, hlc, kind, insertion) = row?;
         let id: ChangeId = id.parse()?;
         let kind = match kind.as_str() {
-            "insert" => {
-                let text = text.ok_or("Missing text for insert")?;
-                let parent = parent.map(|p| p.parse()).transpose()?;
-                let side = match side.as_deref() {
-                    Some("L") => Side::Left,
-                    Some("R") => Side::Right,
-                    _ => return Err(format!("Invalid side: {:?}", side).into()),
-                };
-                let right_origin = right_origin.map(|ro| ro.parse()).transpose()?;
-                ChangeKind::Insert(InsertRun { text, parent, side, right_origin })
-            }
+            "insert" => ChangeKind::Insert(insert_run_from(insertion)?),
             "delete" => {
                 // ChangeKind::Delete with ranges from the HashMap
                 let ranges = ranges.remove(&id).ok_or(format!("Missing deletion ranges for change {}", id))?;
@@ -216,25 +343,38 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
             "replace" => {
                 // Both of the above
                 let ranges = ranges.remove(&id).ok_or(format!("Missing deletion ranges for change {}", id))?;
-                let text = text.ok_or("Missing text for replace")?;
-                let parent = parent.map(|p| p.parse()).transpose()?;
-                let side = match side.as_deref() {
-                    Some("L") => Side::Left,
-                    Some("R") => Side::Right,
-                    _ => return Err(format!("Invalid side: {:?}", side).into()),
-                };
-                let right_origin = right_origin.map(|ro| ro.parse()).transpose()?;
-                ChangeKind::Replace { deleted: ranges, inserted: InsertRun { text, parent, side, right_origin } }
+                ChangeKind::Replace { deleted: ranges, inserted: insert_run_from(insertion)? }
             }
             "revert" => {
                 let targets = revert_targets.remove(&id).ok_or(format!("Missing revert targets for change {}", id))?;
                 ChangeKind::Revert { targets }
+            }
+            "move" => {
+                let (parent, side, right_origin, into) = moves.remove(&id).ok_or(format!("Missing move info for change {}", id))?;
+                let pieces = move_pieces.remove(&id).ok_or(format!("Missing move pieces for change {}", id))?;
+                // A Move made before its Device had seen anything has no rows here; that's not an error.
+                let seen = move_seen.remove(&id).unwrap_or_default();
+                ChangeKind::Move { pieces, parent, side, right_origin, seen, into }
             }
             other => return Err(format!("Unknown change kind: {}", other).into()),
         };
         changes.push(Change { id, hlc: Hlc(hlc as u64), kind });
     }
     Ok(changes)
+}
+
+/// The `insertions` columns of one row: text, parent, side, right_origin, into_anchor.
+type InsertionRow = (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+
+/// Builds an InsertRun from its row. Insert and Replace both use it.
+fn insert_run_from((text, parent, side, right_origin, into): InsertionRow) -> Result<InsertRun> {
+    Ok(InsertRun {
+        text: text.ok_or("Missing text for an insertion")?,
+        parent: parent.map(|p| p.parse()).transpose()?,
+        side: side_from_str(side.as_deref().unwrap_or(""))?,
+        right_origin: right_origin.map(|r| r.parse()).transpose()?,
+        into: into.map(|a| a.parse()).transpose()?,
+    })
 }
 
 // public functions open the file do one thing then close it.
@@ -269,6 +409,9 @@ pub fn merge(main: &Path, other: &Path) -> Result<()> {
     conn.execute("INSERT OR IGNORE INTO insertions SELECT * FROM other.insertions", [])?;
     conn.execute("INSERT OR IGNORE INTO deletions SELECT * FROM other.deletions", [])?;
     conn.execute("INSERT OR IGNORE INTO revert_targets SELECT * FROM other.revert_targets", [])?;
+    conn.execute("INSERT OR IGNORE INTO moves SELECT * FROM other.moves", [])?;
+    conn.execute("INSERT OR IGNORE INTO move_pieces SELECT * FROM other.move_pieces", [])?;
+    conn.execute("INSERT OR IGNORE INTO move_seen SELECT * FROM other.move_seen", [])?;
     Ok(())
     // TODO: Checks of same id different content.
 }
@@ -283,7 +426,7 @@ mod test {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -385,5 +528,33 @@ mod test {
         assert!(merged_changes.contains(&b));
         assert!(merged_changes.contains(&c));
         assert_eq!(merged_doc.text(), "chatdog");
+    }
+
+    #[test]
+    fn moves_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work.db");
+        let mut doc = Doc::new(DeviceId(1));
+        let a = doc.insert_local(0, "abcdef", 1000);
+        let b = doc.move_local(2, 2, 6, 2000);    // "abefcd"
+        let c = doc.insert_local(6, "X", 3000);   // "abefcdX"
+        let d = doc.move_local(4, 3, 0, 4000);    // "cdX" to the start: two pieces
+        assert_eq!(doc.text(), "cdXabef");
+
+        let changes = vec![a, b, c, d];
+        save(&path, &changes, &doc).unwrap();
+        let (loaded, loaded_doc) = load(&path, DeviceId(1)).unwrap();
+
+        assert_eq!(loaded, changes);              // every field, including pieces and seen
+        assert_eq!(loaded_doc.text(), "cdXabef");
+
+        // The readable copies hold the moved text.
+        let conn = Connection::open(&path).unwrap();
+        let moved: Vec<String> = conn
+            .prepare("SELECT moved_text FROM move_pieces ORDER BY change, piece").unwrap()
+            .query_map([], |r| r.get(0)).unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(moved, vec!["cd", "cd", "X"]);
     }
 }

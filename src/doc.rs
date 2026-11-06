@@ -15,7 +15,13 @@ pub struct Doc {
     reverted_by: HashMap<ChangeId, Vec<ChangeId>>, // to track which changes have been reverted by which other changes
     seen: HashMap<DeviceId, u32>, // to track the highest counter seen from each device
     moves: Vec<(Hlc, MoveInfo)>, // to track the moves that have been applied, in order of their HLC
-    layout: Layout, 
+    typed_into: HashMap<CharId, Vec<CharId>>, // a piece's anchor → nodes typed or dropped into it
+    layout: Layout,
+}
+
+/// The anchor node of a piece.
+fn anchor_of(piece: Piece) -> CharId {
+    CharId { change: piece.0, offset: piece.1 as u32 }
 }
 
 impl Doc {
@@ -29,6 +35,7 @@ impl Doc {
             reverted_by: HashMap::new(),
             seen: HashMap::new(),
             moves: Vec::new(),
+            typed_into: HashMap::new(),
             layout: Layout::default(),
         }
     }
@@ -98,6 +105,7 @@ impl Doc {
         match &change.kind {
             ChangeKind::Insert(run) => {
                 self.tree.insert_run(change.id, &run.text, run.parent, run.side, run.right_origin);
+                self.note_into(run.into, change.id, run.text.chars().count());
             }
             ChangeKind::Delete(ranges) => {
                 for range in ranges {
@@ -109,6 +117,7 @@ impl Doc {
                     self.tree.delete_range(range.first, range.len, change.id);
                 }
                 self.tree.insert_run(change.id, &inserted.text, inserted.parent, inserted.side, inserted.right_origin);
+                self.note_into(inserted.into, change.id, inserted.text.chars().count());
             }
             ChangeKind::Revert { targets } => {
                 // The Revert change itself doesn't modify the tree, but it affects which changes are considered undone.
@@ -117,9 +126,10 @@ impl Doc {
                     self.reverted_by.entry(*target).or_default().push(change.id);
                 }
             }
-            ChangeKind::Move { pieces, parent, side, right_origin, seen } => {
+            ChangeKind::Move { pieces, parent, side, right_origin, seen, into } => {
                 // self.tree.insert_anchors(&mut self, change: ChangeId, count: usize, parent: Option<CharId>, side: Side, ro: Option<CharId>)
                 self.tree.insert_anchors(change.id, pieces.len(), *parent, *side, *right_origin);
+                self.note_into(*into, change.id, pieces.len());
                 // push (change.hlc, MoveInfo { id: change.id, pieces: pieces.clone(), seen: seen.clone() }) onto self.moves
                 self.moves.push((change.hlc, MoveInfo { id: change.id, pieces: pieces.clone(), seen: seen.clone() }));
             }
@@ -127,17 +137,26 @@ impl Doc {
         self.refresh_undone();
         self.refresh_layout();
     }
+
+    /// Remember that the `count` nodes of `change` went into the piece with anchor `into`.
+    fn note_into(&mut self, into: Option<CharId>, change: ChangeId, count: usize) {
+        if let Some(anchor) = into {
+            let nodes = (0..count as u32).map(|offset| CharId { change, offset });
+            self.typed_into.entry(anchor).or_default().extend(nodes);
+        }
+    }
     pub fn insert_local(&mut self, index: usize, text: &str, now_ms: u64) -> Change {
         // 1. Call place(index)
-        let left = self.left_of(index);
+        let (left, into) = self.left_of(index);
         let (parent, side, right_origin) = self.tree.place_after(left);
-        
+
         // 2. build InsertRun
         let run = InsertRun {
             text: text.to_string(),
             parent,
             side,
             right_origin,
+            into,
         };
 
         self.commit_local(ChangeKind::Insert(run), now_ms)
@@ -153,7 +172,7 @@ impl Doc {
             .collect();
         in_effect.sort_by_key(|(hlc, info)| (*hlc, info.id.device));
         let infos: Vec<MoveInfo> = in_effect.into_iter().map(|(_, info)| info).collect();
-        self.layout = Layout::compute(&self.tree, &infos);
+        self.layout = Layout::compute(&self.tree, &infos, &self.typed_into);
 
 
     }
@@ -163,6 +182,22 @@ impl Doc {
             .collect()
     }
 
+    /// Readable copy of a moved piece: the visible text from its first to its last character.
+    /// A piece can hold text from many Changes, so walk the visible text rather than offsets.
+    /// Only used for the readable column in storage, so an empty string is fine if it's gone.
+    pub fn piece_text(&self, span: &Span) -> String {
+        let visible = self.visible();
+        let start = visible.iter().position(|&(id, _)| id == span.first);
+        let end = visible.iter().position(|&(id, _)| id == span.last);
+        match (start, end) {
+            (Some(s), Some(e)) if s <= e => visible[s..=e]
+                .iter()
+                .filter_map(|&(id, _)| self.tree.char_of(id))
+                .collect(),
+            _ => String::new(),
+        }
+    }
+    
     pub fn delete_local(&mut self, index: usize, len: usize, now_ms: u64) -> Change {
         // Take ids from visible
         let ids = self.visible().into_iter().skip(index).take(len).map(|(id, _)| id).collect::<Vec<_>>();
@@ -181,12 +216,13 @@ impl Doc {
 
         self.commit_local(ChangeKind::Delete(ranges), now_ms)
     }
-    fn left_of(&self, index: usize) -> Option<CharId> {
-        // The node new text at "index" goes after (None = the very start).
-        // Applies the edge rule: right after the last character of a piece,
-        // the text goes after that piece's anchor instead.
+    /// Where new text at `index` goes: the node it goes after (None = the very start),
+    /// and the anchor of the piece it goes into (None = the main text).
+    /// Applies the edge rule: right after the last character of a piece,
+    /// the text goes after that piece's anchor instead.
+    fn left_of(&self, index: usize) -> (Option<CharId>, Option<CharId>) {
         if index == 0 {
-            return None;
+            return (None, None);
         }
         let (mut node, mut level) = self.visible()[index - 1];
         while let Some(piece) = level {
@@ -194,10 +230,10 @@ impl Doc {
             if node != span.last {
                 break;
             }
-            node = CharId { change: piece.0, offset: piece.1 as u32 };
+            node = anchor_of(piece);
             level = self.layout.owner(node);
         }
-        Some(node)
+        (Some(node), level.map(anchor_of))
     }
     pub fn move_local(&mut self, from: usize, len: usize, to: usize, now_ms: u64) -> Change {
         assert!(len > 0, "len must be greater than 0");
@@ -215,16 +251,18 @@ impl Doc {
                     continue;
                 }
             }
-            groups.push((level, Span { first: id, last: id, from: level.map(|p| p.0) }));
+            // `from` is the anchor of the piece this text is drawn in (None = the main text).
+            groups.push((level, Span { first: id, last: id, from: level.map(anchor_of) }));
         }
         let pieces: Vec<Span> = groups.into_iter().map(|(_, span)| span).collect();
 
-        let (parent, side, right_origin) = self.tree.place_after(self.left_of(to));
+        let (left, into) = self.left_of(to);
+        let (parent, side, right_origin) = self.tree.place_after(left);
 
         let mut seen: Vec<(DeviceId, u32)> = self.seen.iter().map(|(&device, &counter)| (device, counter)).collect();
         seen.sort_by(|a, b| a.0.cmp(&b.0));
 
-        self.commit_local(ChangeKind::Move { pieces, parent, side, right_origin, seen }, now_ms)
+        self.commit_local(ChangeKind::Move { pieces, parent, side, right_origin, seen, into }, now_ms)
     }
 
     fn commit_local(&mut self, kind: ChangeKind, now_ms: u64) -> Change {
@@ -426,6 +464,51 @@ mod test {
         doc.move_local(2, 2, 6, 2000);         // "abefcd"
         doc.move_local(5, 1, 0, 3000);         // "d" to the start
         assert_eq!(doc.text(), "dabefc");
+    }
+
+    #[test]
+    fn a_later_piece_does_not_take_an_earlier_piece_s_text() {
+        // Found by the property test. After "c" moves to the start, the tree order is still
+        // a b c d. Selecting "cabd" makes two pieces: [c] and [a..d]. The second piece's range
+        // covers c in the tree, but c already belongs to the first piece of the same Move.
+        let mut doc = abcdef();
+        doc.move_local(2, 1, 0, 2000);         // "cabdef"
+        doc.move_local(0, 4, 6, 3000);         // "cabd" to the end
+        assert_eq!(doc.text(), "efcabd");
+    }
+
+    #[test]
+    fn a_piece_only_takes_from_the_piece_it_was_selected_from() {
+        // Also found by the property test. The Move of "cabd" has two pieces: [c] and [a..d].
+        // Moving "abd" (the second piece's text) must not take c, which sits inside a..d in
+        // the tree but belongs to the first piece.
+        let mut doc = abcdef();
+        doc.move_local(2, 1, 0, 2000);         // "cabdef"
+        doc.move_local(0, 4, 6, 3000);         // "efcabd"
+        doc.move_local(3, 3, 0, 4000);         // "abd" to the start
+        assert_eq!(doc.text(), "abdefc");
+    }
+
+    #[test]
+    fn text_typed_into_a_piece_stays_in_that_piece() {
+        // Found by the property test: three overlapping Moves, then typing. The "b" lands in
+        // the tree right after a space that the oldest Move's range also covers, so without
+        // `into` that Move would take the "b" and draw it somewhere else.
+        let mut phone = Doc::new(DeviceId(2));
+        let mut laptop = Doc::new(DeviceId(0));
+        let mut tablet = Doc::new(DeviceId(1));
+        let base = phone.insert_local(0, "aa  a", 1000);
+        let first = phone.move_local(2, 2, 5, 2000);   // "aaa  "
+        for doc in [&mut laptop, &mut tablet] {
+            doc.apply(&base);
+            doc.apply(&first);
+        }
+        laptop.move_local(1, 3, 4, 3000);              // laptop and tablet both move, offline
+        let other = tablet.move_local(0, 3, 3, 3000);
+        laptop.apply(&other);
+        assert_eq!(laptop.text(), "aa a ");
+        laptop.insert_local(3, "b", 4000);
+        assert_eq!(laptop.text(), "aa ba ");
     }
 
     #[test]

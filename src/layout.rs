@@ -32,7 +32,8 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn compute(tree: &Tree, moves: &[MoveInfo]) -> Layout {
+    /// `typed_into`: for a piece's anchor, the nodes that were typed or dropped into that piece.
+    pub fn compute(tree: &Tree, moves: &[MoveInfo], typed_into: &HashMap<CharId, Vec<CharId>>) -> Layout {
         // 1. let order = tree.all_in_order();, plus a pos: HashMap<CharId, usize> giving each node's index in order.
         // 2. For each Move m, keep a taken: Vec<(CharId, Option<Piece>)> that records each node it takes, with its previous owner. Then for each (k, span) in m.pieces.iter().enumerate():
             //look up lo and hi in pos, and skip the span if either is missing;
@@ -74,6 +75,17 @@ impl Layout {
                         }
                     }
                 }
+                // Text typed (or Moves dropped) into this piece belongs to it, even if an
+                // earlier Move's range also covers its place in the tree. A later Move can
+                // still take it under the normal rules.
+                let anchor = CharId { change: m.id, offset: k as u32 };
+                for &id in typed_into.get(&anchor).into_iter().flatten() {
+                    let prev_owner = layout.owner(id);
+                    if pos.contains_key(&id) && prev_owner != Some((m.id, k)) {
+                        taken.push((id, prev_owner));
+                        layout.owner.insert(id, (m.id, k));
+                    }
+                }
             }
             // 3.
             if layout.makes_loop(m) {
@@ -101,7 +113,11 @@ impl Layout {
         // we tae out own (none) and take if its where we moved it from or !m.saw(other)
         match current {
             None => true,
-            Some((other, _)) => Some(other) == span.from || !m.saw(other),
+            // The pieces of one Move never take from each other: an earlier piece already claimed it.
+            // (Without this, `!m.saw(other)` is true, because a Move hasn't "seen" itself.)
+            Some((other, _)) if other == m.id => false,
+            // Take it from the exact piece we selected it from, or from a Move we didn't know about.
+            Some((other, k)) => span.from == Some(CharId { change: other, offset: k as u32 }) || !m.saw(other),
         }
     }
     fn makes_loop(&self, m: &MoveInfo) -> bool {
@@ -208,6 +224,11 @@ impl Layout {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// These hand-built cases never type into a piece, so `typed_into` is empty.
+    fn compute(t: &Tree, moves: &[MoveInfo]) -> Layout {
+        Layout::compute(t, moves, &HashMap::new())
+    }
     use crate::ids::Side;
 
     fn ch(device: u32, counter: u32) -> ChangeId { ChangeId { device: DeviceId(device), counter } }
@@ -243,7 +264,7 @@ mod test {
     fn move_cd_to_the_end() {
         let mut t = abcdef();
         anchor(&mut t, ch(1, 2), Some(at(5)));
-        let l = Layout::compute(&t, &[one_piece(ch(1, 2), at(2), at(3), &[(1, 1)])]);
+        let l = compute(&t, &[one_piece(ch(1, 2), at(2), at(3), &[(1, 1)])]);
         assert_eq!(shown(&t, &l), "abefcd");
     }
 
@@ -253,7 +274,7 @@ mod test {
         let (p, s, ro) = t.place(3);                 // the phone types "X" between c and d...
         t.insert_run(ch(2, 1), "X", p, s, ro);
         anchor(&mut t, ch(1, 2), Some(at(5)));       // ...while the laptop moves "cd" to the end
-        let l = Layout::compute(&t, &[one_piece(ch(1, 2), at(2), at(3), &[(1, 1)])]);
+        let l = compute(&t, &[one_piece(ch(1, 2), at(2), at(3), &[(1, 1)])]);
         assert_eq!(shown(&t, &l), "abefcXd");
     }
 
@@ -263,7 +284,7 @@ mod test {
         let (p, s, ro) = t.place(4);                 // "X" right after d
         t.insert_run(ch(2, 1), "X", p, s, ro);
         anchor(&mut t, ch(1, 2), Some(at(5)));
-        let l = Layout::compute(&t, &[one_piece(ch(1, 2), at(2), at(3), &[(1, 1)])]);
+        let l = compute(&t, &[one_piece(ch(1, 2), at(2), at(3), &[(1, 1)])]);
         assert_eq!(shown(&t, &l), "abXefcd");
     }
 
@@ -274,7 +295,7 @@ mod test {
         let (m1, m2) = (ch(1, 2), ch(1, 3));
         anchor(&mut t, m1, Some(at(5)));
         anchor(&mut t, m2, Some(CharId { change: m1, offset: 0 }));
-        let l = Layout::compute(&t, &[
+        let l = compute(&t, &[
             one_piece(m1, at(2), at(3), &[(1, 1)]),
             one_piece(m2, at(0), at(5), &[(1, 2)]), // had seen m1
         ]);
@@ -288,7 +309,7 @@ mod test {
         let (laptop, phone) = (ch(1, 2), ch(2, 1));
         anchor(&mut t, laptop, Some(at(5)));
         anchor(&mut t, phone, None);
-        let l = Layout::compute(&t, &[
+        let l = compute(&t, &[
             one_piece(laptop, at(1), at(3), &[(1, 1)]),
             one_piece(phone, at(2), at(4), &[(1, 1)]), // hadn't seen the laptop's Move
         ]);
@@ -303,7 +324,7 @@ mod test {
         let (laptop, phone) = (ch(1, 2), ch(2, 1));
         anchor(&mut t, laptop, Some(at(4)));
         anchor(&mut t, phone, Some(at(0)));
-        let l = Layout::compute(&t, &[
+        let l = compute(&t, &[
             one_piece(laptop, at(0), at(1), &[(1, 1)]),
             one_piece(phone, at(4), at(5), &[(1, 1)]),
         ]);

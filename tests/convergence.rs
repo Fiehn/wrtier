@@ -11,7 +11,7 @@ enum Action {
     Sync { from: usize, to: usize },
     Revert { device: usize, pick: u16, deps: bool },
     Restore { device: usize, pick: u16 },
-    Move { device: usize, pieces: Vec<(u16, u16)>, parent: Option<u16>, side: bool, right_origin: Option<u16> },
+    Move { device: usize, from: u16, len: u8, to: u16 },
 }
 
 // Generate a random Action.
@@ -22,8 +22,8 @@ fn action() -> impl Strategy<Value = Action> {
         (0..3usize, 0..3usize).prop_map(|(from, to)| Action::Sync { from, to }),
         (0..3usize, any::<u16>(), any::<bool>()).prop_map(|(device, pick, deps)| Action::Revert { device, pick, deps }),
         (0..3usize, any::<u16>()).prop_map(|(device, pick)| Action::Restore { device, pick }),
-        (0..3usize, prop::collection::vec((any::<u16>(), any::<u16>()), 1..4), prop::option::of(any::<u16>()), any::<bool>(), prop::option::of(any::<u16>()))
-            .prop_map(|(device, pieces, parent, side, right_origin)| Action::Move { device, pieces, parent, side, right_origin }),
+        (0..3usize, any::<u16>(), any::<u8>(), any::<u16>())
+            .prop_map(|(device, from, len, to)| Action::Move { device, from, len, to }),
     ]
 }
 
@@ -102,8 +102,34 @@ fn run(actions: &[Action]) {
                     now_ms += 1;
                 }
             }
-            Action::Move { device, pieces, parent, side, right_origin } => {
-                continue;
+            Action::Move { device, from, len, to } => {
+                let before: Vec<char> = docs[*device].text().chars().collect();
+                let n = before.len();
+                if n == 0 {
+                    continue;
+                }
+                // Turn the random numbers into a valid Move: 1..=rest characters from `from`,
+                // to anywhere that isn't strictly inside the selection.
+                let from = *from as usize % n;
+                let len = 1 + *len as usize % (n - from);
+                let to = *to as usize % (n + 1);
+                if to > from && to < from + len {
+                    continue;
+                }
+
+                // What the Author expects to see: cut the selection out, put it back at `to`
+                // (which shifts left by `len` if it was after the selection).
+                let moved: Vec<char> = before[from..from + len].to_vec();
+                let mut expected: Vec<char> = before[..from].iter().chain(&before[from + len..]).copied().collect();
+                let at = if to <= from { to } else { to - len };
+                expected.splice(at..at, moved);
+                let expected: String = expected.into_iter().collect();
+
+                let change = docs[*device].move_local(from, len, to, now_ms - skew[*device]);
+                assert_eq!(docs[*device].text(), expected, "move {from}+{len} to {to}");
+                all.push(change.clone());
+                changes[*device].push(change);
+                now_ms += 1;
             }
         }
     }
