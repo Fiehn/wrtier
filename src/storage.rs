@@ -1,10 +1,11 @@
-use std::error::Error;
+﻿use std::error::Error;
 use std::path::Path;
 use rusqlite::{params, Connection};
 use crate::change::{Change, ChangeKind, CharRange, InsertRun, NoticeKey, Span};
 use crate::doc::Doc;
 use crate::ids::{ChangeId, CharId, Side, DeviceId, Hlc};
 use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -254,16 +255,14 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
     // Read every row of deletions into a HashMap<ChangeId, Vec<CharRange>> 
 
     // Pass 1: every deletion range, grouped by the change it belongs to.
-    let mut ranges: HashMap<ChangeId, Vec<CharRange>> = HashMap::new();
+    // (The two big passes read text straight from SQLite's buffer instead of copying it into a String first.)
+    let mut ranges: FxHashMap<ChangeId, Vec<CharRange>> = FxHashMap::default();
     let mut stmt = conn.prepare("SELECT change, first_char, len FROM deletions ORDER BY rowid")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u32>(2)?))
-    })?;
-    for row in rows {
-        let (change, first, len) = row?;
-        let change: ChangeId = change.parse()?;
-        let first: CharId = first.parse()?;
-        ranges.entry(change).or_default().push(CharRange { first, len });
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let change: ChangeId = column(row, 0)?.parse()?;
+        let first: CharId = column(row, 1)?.parse()?;
+        ranges.entry(change).or_default().push(CharRange { first, len: row.get(2)? });
     }
     // Pass 2: read every row of revert_targets into a HashMap<ChangeId, Vec<ChangeId>>
     let mut revert_targets: HashMap<ChangeId, Vec<ChangeId>> = HashMap::new();
@@ -362,27 +361,13 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
         FROM changes c LEFT JOIN insertions i ON i.change = c.id
         ORDER BY c.hlc, c.device",
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?, // id
-            row.get::<_, i64>(1)?,    // hlc
-            row.get::<_, String>(2)?, // kind
-            (
-                row.get::<_, Option<String>>(3)?, // text
-                row.get::<_, Option<String>>(4)?, // parent
-                row.get::<_, Option<String>>(5)?, // side
-                row.get::<_, Option<String>>(6)?, // right_origin
-                row.get::<_, Option<String>>(7)?, // into_anchor
-            ),
-        ))
-    })?;
-
     let mut changes = Vec::new();
-    for row in rows {
-        let (id, hlc, kind, insertion) = row?;
-        let id: ChangeId = id.parse()?;
-        let kind = match kind.as_str() {
-            "insert" => ChangeKind::Insert(insert_run_from(insertion)?),
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: ChangeId = column(row, 0)?.parse()?;
+        let hlc: i64 = row.get(1)?;
+        let kind = match column(row, 2)? {
+            "insert" => ChangeKind::Insert(insert_run_from(row)?),
             "delete" => {
                 // ChangeKind::Delete with ranges from the HashMap
                 let ranges = ranges.remove(&id).ok_or(format!("Missing deletion ranges for change {}", id))?;
@@ -391,7 +376,7 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
             "replace" => {
                 // Both of the above
                 let ranges = ranges.remove(&id).ok_or(format!("Missing deletion ranges for change {}", id))?;
-                ChangeKind::Replace { deleted: ranges, inserted: insert_run_from(insertion)? }
+                ChangeKind::Replace { deleted: ranges, inserted: insert_run_from(row)? }
             }
             "revert" => {
                 let targets = revert_targets.remove(&id).ok_or(format!("Missing revert targets for change {}", id))?;
@@ -415,18 +400,31 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
     Ok(changes)
 }
 
-/// The `insertions` columns of one row: text, parent, side, right_origin, into_anchor.
-type InsertionRow = (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
-
-/// Builds an InsertRun from its row. Insert and Replace both use it.
-fn insert_run_from((text, parent, side, right_origin, into): InsertionRow) -> Result<InsertRun> {
+/// Builds an InsertRun from columns 3..=7 of a Change row (text, parent, side, right_origin,
+/// into_anchor). Insert and Replace both use it.
+fn insert_run_from(row: &rusqlite::Row) -> Result<InsertRun> {
     Ok(InsertRun {
-        text: text.ok_or("Missing text for an insertion")?,
-        parent: parent.map(|p| p.parse()).transpose()?,
-        side: side_from_str(side.as_deref().unwrap_or(""))?,
-        right_origin: right_origin.map(|r| r.parse()).transpose()?,
-        into: into.map(|a| a.parse()).transpose()?,
+        text: optional_column(row, 3)?.ok_or("Missing text for an insertion")?.to_string(),
+        parent: parse_optional(optional_column(row, 4)?)?,
+        side: side_from_str(optional_column(row, 5)?.unwrap_or(""))?,
+        right_origin: parse_optional(optional_column(row, 6)?)?,
+        into: parse_optional(optional_column(row, 7)?)?,
     })
+}
+
+/// A text column, borrowed from SQLite's buffer (no copy).
+fn column<'row>(row: &'row rusqlite::Row, i: usize) -> Result<&'row str> {
+    Ok(row.get_ref(i)?.as_str()?)
+}
+
+/// A text column that may be NULL, borrowed from SQLite's buffer.
+fn optional_column<'row>(row: &'row rusqlite::Row, i: usize) -> Result<Option<&'row str>> {
+    Ok(row.get_ref(i)?.as_str_or_null()?)
+}
+
+/// Parses an optional ID; a damaged one is an error, never silently None.
+fn parse_optional<T: std::str::FromStr<Err = String>>(s: Option<&str>) -> Result<Option<T>> {
+    Ok(s.map(|s| s.parse::<T>()).transpose()?)
 }
 
 // public functions open the file do one thing then close it.
@@ -446,9 +444,7 @@ pub fn load(path: &Path, device: DeviceId) -> Result<(Vec<Change>, Doc)> {
     migrate(&conn)?;
     let changes = read_changes(&conn)?;
     let mut doc = Doc::new(device);
-    for change in &changes {
-        doc.apply(change);
-    }
+    doc.apply_all(&changes); // works out the text once, not after every Change
     Ok((changes, doc))
 }
 pub fn merge(main: &Path, other: &Path) -> Result<()> {

@@ -1,217 +1,215 @@
-use std::collections::HashMap;
+//! The Fugue position tree (plain Fugue, ADR 0009).
+//!
+//! Every character, and every Move's anchor, is a node that never moves. Reading order of a node:
+//! its left children, itself, its right children; siblings are kept in ID order.
+//!
+//! All nodes live in one array and point at each other by index, so the tree needs no memory
+//! allocation per character, and a typed run (a chain of right children) sits side by side in
+//! memory. A Change's nodes are always consecutive in the array, so finding a node by its ID
+//! takes one table lookup per Change, not per character.
+//!
+//! `crate::reference::fugue` is the first, simple version; this one must behave identically.
+
+use rustc_hash::{FxHashMap, FxHashSet};
 use crate::ids::{CharId, Side, ChangeId};
-use std::collections::HashSet;
+
+/// "No node": the root as a parent, or the end of a list.
+pub const NONE: u32 = u32::MAX;
 
 struct Node {
-    ch: Option<char>, // None = Move Anchor
-    parent: Option<CharId>, // None = root
+    ch: Option<char>, // None = a Move's anchor
+    change: u32,      // index into `Tree::changes`
+    offset: u32,      // position within its Change
+    parent: u32,      // NONE = the root
     side: Side,
-    right_origin: Option<CharId>,
-    deleted_by: Vec<ChangeId>, 
-    left_children: Vec<CharId>, // Always kept sorted
-    right_children: Vec<CharId>, // Always kept sorted
+    deleted: bool,    // someone deleted it (who: `Tree::deleted_by`)
+    first_left: u32,  // first left child; siblings follow through `next`, in ID order
+    first_right: u32, // first right child
+    next: u32,        // next sibling on the same side of the same parent
+}
+
+/// Where a Change's nodes are in the array.
+struct ChangeEntry {
+    index: u32, // index into `Tree::changes`
+    first: u32, // its first node
+    count: u32, // how many nodes it has
 }
 
 pub struct Tree {
-    nodes: HashMap<CharId, Node>,
-    root_children: Vec<CharId>, // The root only ever has right children
-    undone: HashSet<ChangeId> 
+    nodes: Vec<Node>,
+    changes: Vec<ChangeId>,
+    by_change: FxHashMap<ChangeId, ChangeEntry>,
+    first_root: u32, // the root's first child (the root only has right children)
+    deleted_by: FxHashMap<u32, Vec<ChangeId>>,
+    undone: FxHashSet<ChangeId>,
+    change_undone: Vec<bool>, // per Change index: the hot path of `is_visible_at`
 }
 
-enum Visit { Expand(CharId), Output(CharId) }
-
+enum Visit {
+    List(u32),   // visit a sibling list, starting here
+    Output(u32), // output this node
+}
 
 impl Tree {
     pub fn new() -> Self {
         Tree {
-            nodes: HashMap::new(),
-            root_children: Vec::new(),
-            undone: HashSet::new(),
+            nodes: Vec::new(),
+            changes: Vec::new(),
+            by_change: FxHashMap::default(),
+            first_root: NONE,
+            deleted_by: FxHashMap::default(),
+            undone: FxHashSet::default(),
+            change_undone: Vec::new(),
         }
     }
 
-    pub fn is_visible(&self, id: CharId) -> bool { 
-        // A node is visible if it has not been deleted by any change that is not undone.
-        if self.undone.contains(&id.change) { return false; }
-        // if a node's char is None, it is a Move Anchor and is not visible.
-        if let Some(node) = self.nodes.get(&id) {
-            if node.ch.is_none() { return false; }
-            for del in &node.deleted_by {
-                if !self.undone.contains(del) {
-                    return false;
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
-    pub fn is_anchor(&self, id: CharId) -> bool {
-        if let Some(node) = self.nodes.get(&id) {
-            node.ch.is_none()
-        } else {
-            false
-        }
+    // ---- Finding nodes ----
+
+    /// The array index of a node, if the tree has it.
+    pub fn index_of(&self, id: CharId) -> Option<u32> {
+        let entry = self.by_change.get(&id.change)?;
+        (id.offset < entry.count).then_some(entry.first + id.offset)
     }
 
-    pub fn set_undone(&mut self, undone: HashSet<ChangeId>) {
-        self.undone = undone;
+    /// The ID of the node at an array index.
+    pub fn id_of(&self, index: u32) -> CharId {
+        let node = &self.nodes[index as usize];
+        CharId { change: self.changes[node.change as usize], offset: node.offset }
     }
 
-    pub fn insert_node(&mut self, id: CharId, ch: Option<char>, parent: Option<CharId>, side: Side, right_origin: Option<CharId>) {
-        assert!(!self.nodes.contains_key(&id), "node {id} inserted twice");
-        let node = Node {
-            ch,
-            parent,
-            side,
-            right_origin,
-            deleted_by: Vec::new(),
-            left_children: Vec::new(),
-            right_children: Vec::new(),
-        };
-        self.nodes.insert(id, node);
+    /// How many nodes the tree has (characters and anchors, deleted or not).
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
 
-        
-        if let Some(parent_id) = parent {
-            let parent_node = self.nodes.get_mut(&parent_id)
-                .expect("a parent must be inserted before its children");
-            let list = match side {
-                Side::Left => &mut parent_node.left_children,
-                Side::Right => &mut parent_node.right_children,
-            };
-            let pos = list.binary_search(&id).unwrap_or_else(|p| p);
-            list.insert(pos, id);
-        } else {
-            // A child of the root
-            let pos = self.root_children.binary_search(&id).unwrap_or_else(|p| p);
-            self.root_children.insert(pos, id);
-        }
-    
+    /// Whether the tree has this node.
+    pub fn contains(&self, id: CharId) -> bool {
+        self.index_of(id).is_some()
     }
 
     pub fn char_of(&self, id: CharId) -> Option<char> {
-        self.nodes.get(&id).and_then(|n| n.ch)
+        self.index_of(id).and_then(|i| self.char_at(i))
+    }
+
+    pub fn char_at(&self, index: u32) -> Option<char> {
+        self.nodes[index as usize].ch
+    }
+
+    pub fn is_anchor(&self, id: CharId) -> bool {
+        self.index_of(id).is_some_and(|i| self.is_anchor_at(i))
+    }
+
+    pub fn is_anchor_at(&self, index: u32) -> bool {
+        self.nodes[index as usize].ch.is_none()
+    }
+
+    // ---- Visibility ----
+
+    /// Visible: a character (not an anchor) whose Change isn't undone, and every Change that
+    /// deleted it is undone.
+    pub fn is_visible(&self, id: CharId) -> bool {
+        self.index_of(id).is_some_and(|i| self.is_visible_at(i))
+    }
+
+    pub fn is_visible_at(&self, index: u32) -> bool {
+        let node = &self.nodes[index as usize];
+        if node.ch.is_none() || self.change_undone[node.change as usize] {
+            return false;
+        }
+        !node.deleted || self.deleted_by[&index].iter().all(|d| self.undone.contains(d))
+    }
+
+    pub fn set_undone(&mut self, undone: impl IntoIterator<Item = ChangeId>) {
+        self.undone = undone.into_iter().collect();
+        self.change_undone.iter_mut().for_each(|u| *u = false);
+        for change in &self.undone {
+            if let Some(entry) = self.by_change.get(change) {
+                self.change_undone[entry.index as usize] = true;
+            }
+        }
+    }
+
+    // ---- Changing the tree ----
+
+    pub fn insert_node(&mut self, id: CharId, ch: Option<char>, parent: Option<CharId>, side: Side, _right_origin: Option<CharId>) {
+        let at = self.nodes.len() as u32;
+        // A Change's nodes sit side by side: this must be its next node, right at the end.
+        let change = match self.by_change.get_mut(&id.change) {
+            Some(entry) => {
+                assert!(
+                    id.offset == entry.count && entry.first + entry.count == at,
+                    "node {id} inserted twice, or not right after the rest of its Change"
+                );
+                entry.count += 1;
+                entry.index
+            }
+            None => {
+                assert!(id.offset == 0, "node {id}: a Change's nodes must start at offset 0");
+                let index = self.changes.len() as u32;
+                self.changes.push(id.change);
+                self.change_undone.push(false);
+                self.by_change.insert(id.change, ChangeEntry { index, first: at, count: 1 });
+                index
+            }
+        };
+        let parent = match parent {
+            Some(p) => self.index_of(p).expect("a parent must be inserted before its children"),
+            None => NONE,
+        };
+        self.nodes.push(Node {
+            ch,
+            change,
+            offset: id.offset,
+            parent,
+            side,
+            deleted: false,
+            first_left: NONE,
+            first_right: NONE,
+            next: NONE,
+        });
+
+        // Link it into its parent's list of children on that side, keeping ID order.
+        let head = self.head(parent, side);
+        let (mut prev, mut current) = (NONE, head);
+        while current != NONE && self.id_of(current) < id {
+            prev = current;
+            current = self.nodes[current as usize].next;
+        }
+        self.nodes[at as usize].next = current;
+        if prev == NONE {
+            self.set_head(parent, side, at);
+        } else {
+            self.nodes[prev as usize].next = at;
+        }
+    }
+
+    /// The first child on one side of a node (or of the root).
+    fn head(&self, parent: u32, side: Side) -> u32 {
+        match (parent, side) {
+            (NONE, _) => self.first_root,
+            (p, Side::Left) => self.nodes[p as usize].first_left,
+            (p, Side::Right) => self.nodes[p as usize].first_right,
+        }
+    }
+
+    fn set_head(&mut self, parent: u32, side: Side, child: u32) {
+        match (parent, side) {
+            (NONE, _) => self.first_root = child,
+            (p, Side::Left) => self.nodes[p as usize].first_left = child,
+            (p, Side::Right) => self.nodes[p as usize].first_right = child,
+        }
     }
 
     pub fn delete(&mut self, id: CharId, by: ChangeId) {
-        if let Some(node) = self.nodes.get_mut(&id) {
-            node.deleted_by.push(by);
+        if let Some(i) = self.index_of(id) {
+            self.nodes[i as usize].deleted = true;
+            self.deleted_by.entry(i).or_default().push(by);
         }
     }
+
     pub fn delete_range(&mut self, first: CharId, len: u32, by: ChangeId) {
         for offset in first.offset..first.offset + len {
-            let id = CharId { change: first.change, offset };
-            self.delete(id, by);
-        }
-    }
-
-    pub fn all_in_order(&self) -> Vec<CharId> {
-        let mut result = Vec::with_capacity(self.nodes.len());
-        let mut stack: Vec<Visit> =
-            self.root_children.iter().rev().map(|&id| Visit::Expand(id)).collect();
-        while let Some(visit) = stack.pop() {
-            match visit {
-                Visit::Output(id) => result.push(id),
-                Visit::Expand(id) => {
-                    let node = &self.nodes[&id];
-                    // A stack pops the last item first, so push in reverse reading order:
-                    // right children, then the node itself, then left children.
-                    for &c in node.right_children.iter().rev() { stack.push(Visit::Expand(c)); }
-                    stack.push(Visit::Output(id));
-                    for &c in node.left_children.iter().rev() { stack.push(Visit::Expand(c)); }
-                }
-            }
-        }
-        result
-    }
-    
-
-    pub fn text(&self) -> String {
-        let mut result = String::new();
-        for id in self.all_in_order() {
-            if let Some(node) = self.nodes.get(&id) {
-                if !self.is_visible(id) { continue; }
-                // make ch not an Option<char> because we already checked that it is visible
-                result.push( node.ch.expect("visible nodes must have a char"));
-            }
-        }
-        result
-    }
-
-    pub fn visible_id(&self, index: usize) -> Option<CharId> {
-        let mut count = 0;
-        for id in self.all_in_order() {
-            if let Some(node) = self.nodes.get(&id) {
-                if !self.is_visible(id) { continue; }
-                if count == index {
-                    return Some(id);
-                }
-                count += 1;
-            }
-        }
-        None
-    }
-    pub fn visible_ids(&self) -> Vec<CharId> {
-        let mut result = Vec::new();
-        for id in self.all_in_order() {
-            if self.is_visible(id) {
-                result.push(id);
-            }
-        }
-        result
-    }
-
-    pub fn inside(&self, change: ChangeId) -> Vec<ChangeId> {
-        let order = self.all_in_order();
-        let lo = order.iter().position(|&id| id.change == change);
-        let hi = order.iter().rposition(|&id| id.change == change);
-        if lo.is_none() || hi.is_none() || lo == hi {
-            return Vec::new();
-        }
-        let lo = lo.unwrap();
-        let hi = hi.unwrap();
-        // Skip anchors and the change itself, and return the unique ChangeIds of all other nodes in between.
-        let mut result: Vec<ChangeId> = order[lo + 1..hi]
-            .iter()
-            .map(|&id| id.change)
-            .filter(|&c| c != change && self.char_of(CharId { change: c, offset: 0 }).is_some())
-            .collect();
-        result.sort_unstable();
-        result.dedup();
-        result
-    }
-
-    // Decides where to place new text typed at a given visual index.
-    // returns (parent, side, right_origin) for the new node to be inserted.
-    pub fn place(&self, index: usize) -> (Option<CharId>, Side, Option<CharId>) {
-        // place(index) just becomes self.place_after(<the visible id before index>)
-        let left = if index == 0 {
-            None
-        } else {
-            self.visible_id(index - 1)
-        };
-
-        self.place_after(left)
-    }
-
-    pub fn place_after(&self, left: Option<CharId>) -> (Option<CharId>, Side, Option<CharId>) {
-        // place_after(left: Option<CharId>) contains the current logic from rightOrigin onwards, and place(index) just becomes self.place_after(<the visible id before index>). The Doc will need to choose left itself because of rule 4, and left can be an anchor.
-        let order = self.all_in_order();
-        let right_origin = match left {
-            None => order.first().copied(),
-            Some(l) => {
-                let pos = order.iter().position(|&id| id == l).unwrap();
-                order.get(pos + 1).copied()
-            }
-        };
-        let has_right_children = match left {
-            None => !self.root_children.is_empty(),
-            Some(l) => !self.nodes[&l].right_children.is_empty(),
-        };
-        if !has_right_children {
-            (left, Side::Right, right_origin)
-        } else {
-            (right_origin, Side::Left, right_origin)
+            self.delete(CharId { change: first.change, offset }, by);
         }
     }
 
@@ -230,16 +228,155 @@ impl Tree {
     }
 
     pub fn insert_run(&mut self, change: ChangeId, text: &str, parent: Option<CharId>, side: Side, ro: Option<CharId>) {
-        let items: Vec<Option<char>> = text.chars().map(Some).collect();
-        self.insert_chain(change, items, parent, side, ro);
+        self.insert_chain(change, text.chars().map(Some).collect(), parent, side, ro);
     }
+
     pub fn insert_anchors(&mut self, change: ChangeId, count: usize, parent: Option<CharId>, side: Side, ro: Option<CharId>) {
-        let items: Vec<Option<char>> = vec![None; count];
-        self.insert_chain(change, items, parent, side, ro);
+        self.insert_chain(change, vec![None; count], parent, side, ro);
+    }
+
+    // ---- The fixed order ----
+
+    /// Every node's array index in the fixed order. One walk, no lookups by ID.
+    pub fn order(&self) -> Vec<u32> {
+        let mut out = Vec::with_capacity(self.nodes.len());
+        let mut stack: Vec<Visit> = Vec::new();
+        if self.first_root != NONE {
+            stack.push(Visit::List(self.first_root));
+        }
+        while let Some(visit) = stack.pop() {
+            match visit {
+                Visit::Output(i) => out.push(i),
+                Visit::List(i) => {
+                    // A stack pops the last item first, so push in reverse reading order:
+                    // the later siblings, this node's right children, the node, its left children.
+                    let node = &self.nodes[i as usize];
+                    if node.next != NONE { stack.push(Visit::List(node.next)); }
+                    if node.first_right != NONE { stack.push(Visit::List(node.first_right)); }
+                    stack.push(Visit::Output(i));
+                    if node.first_left != NONE { stack.push(Visit::List(node.first_left)); }
+                }
+            }
+        }
+        out
+    }
+
+    /// Every node's ID in the fixed order.
+    pub fn all_in_order(&self) -> Vec<CharId> {
+        self.order().into_iter().map(|i| self.id_of(i)).collect()
+    }
+
+    /// The first node of the subtree under `i` in the fixed order: keep taking the first left child.
+    fn first_in(&self, mut i: u32) -> u32 {
+        while self.nodes[i as usize].first_left != NONE {
+            i = self.nodes[i as usize].first_left;
+        }
+        i
+    }
+
+    /// The node right after `i` in the fixed order, found from the tree's links.
+    fn successor(&self, i: u32) -> Option<u32> {
+        // Something after it in its own subtree: the start of its first right child.
+        let node = &self.nodes[i as usize];
+        if node.first_right != NONE {
+            return Some(self.first_in(node.first_right));
+        }
+        // Otherwise climb until there's a sibling after us, or we were a left child.
+        let mut current = i;
+        loop {
+            let node = &self.nodes[current as usize];
+            if node.next != NONE {
+                return Some(self.first_in(node.next));
+            }
+            match (node.parent, node.side) {
+                (NONE, _) => return None,                 // the last root child: nothing after
+                (p, Side::Left) => return Some(p),        // after the left children comes the parent
+                (p, Side::Right) => current = p,          // after the right children: keep climbing
+            }
+        }
+    }
+
+    // ---- Placing new text ----
+
+    /// Decides where to place new text typed at a visible index, ignoring Moves.
+    pub fn place(&self, index: usize) -> (Option<CharId>, Side, Option<CharId>) {
+        let left = if index == 0 { None } else { self.visible_id(index - 1) };
+        self.place_after(left)
+    }
+
+    /// Where new text goes so that it comes right after `left` in the fixed order:
+    /// returns (parent, side, right_origin).
+    pub fn place_after(&self, left: Option<CharId>) -> (Option<CharId>, Side, Option<CharId>) {
+        let left_index = left.map(|l| self.index_of(l).expect("left is in the tree"));
+        // rightOrigin: the node right after `left` in the fixed order (deleted ones included).
+        let right_origin = match left_index {
+            None => (self.first_root != NONE).then(|| self.first_in(self.first_root)),
+            Some(l) => self.successor(l),
+        }
+        .map(|i| self.id_of(i));
+        // In debug builds (the tests), check against the plain way: walk the whole tree.
+        debug_assert_eq!(right_origin, {
+            let order = self.all_in_order();
+            match left {
+                None => order.first().copied(),
+                Some(l) => order.get(order.iter().position(|&id| id == l).unwrap() + 1).copied(),
+            }
+        });
+        let has_right_children = match left_index {
+            None => self.first_root != NONE,
+            Some(l) => self.nodes[l as usize].first_right != NONE,
+        };
+        if !has_right_children {
+            (left, Side::Right, right_origin)
+        } else {
+            (right_origin, Side::Left, right_origin)
+        }
+    }
+
+    // ---- Whole-tree helpers (they ignore Moves; the Doc's layout handles those) ----
+
+    pub fn text(&self) -> String {
+        self.order().into_iter()
+            .filter(|&i| self.is_visible_at(i))
+            .filter_map(|i| self.char_at(i))
+            .collect()
+    }
+
+    pub fn visible_ids(&self) -> Vec<CharId> {
+        self.order().into_iter()
+            .filter(|&i| self.is_visible_at(i))
+            .map(|i| self.id_of(i))
+            .collect()
+    }
+
+    pub fn visible_id(&self, index: usize) -> Option<CharId> {
+        self.visible_ids().get(index).copied()
     }
 
     pub fn visible_id_ranges(&self, index: usize, len: usize) -> Vec<CharId> {
         self.visible_ids().into_iter().skip(index).take(len).collect()
+    }
+
+    /// Every other Change with a character strictly between this Change's first and last node
+    /// in the fixed order: the Changes that depend on it when it's reverted.
+    pub fn inside(&self, change: ChangeId) -> Vec<ChangeId> {
+        let Some(entry) = self.by_change.get(&change) else { return Vec::new() };
+        let order = self.order();
+        let of_change = |i: &u32| self.nodes[*i as usize].change == entry.index;
+        let (Some(lo), Some(hi)) = (order.iter().position(of_change), order.iter().rposition(of_change)) else {
+            return Vec::new();
+        };
+        if hi <= lo + 1 {
+            return Vec::new();
+        }
+        let mut result: Vec<ChangeId> = order[lo + 1..hi].iter()
+            .map(|&i| &self.nodes[i as usize])
+            .filter(|n| n.change != entry.index && n.ch.is_some()) // a Move's anchor is never a dependent
+            .map(|n| self.changes[n.change as usize])
+            .collect();
+        result.sort_unstable();
+        result.dedup();
+        result
     }
 }
 
@@ -314,6 +451,7 @@ mod tests {
         t.insert_run(change(1, 2), "o", p, s, ro);
         assert_eq!(t.text(), "cot");
     }
+
     #[test]
     fn anchors_are_invisible() {
         let mut t = cat();
@@ -344,4 +482,25 @@ mod tests {
         assert_eq!(t.all_in_order().last().unwrap().change, change(1, 3)); // after the anchor
     }
 
+    #[test]
+    #[should_panic(expected = "inserted twice")]
+    fn a_node_cannot_be_inserted_twice() {
+        let mut t = cat();
+        t.insert_node(id(1, 1), Some('x'), None, Side::Right, None);
+    }
+
+    #[test]
+    fn siblings_stay_in_id_order_whatever_order_they_arrive_in() {
+        // Three Devices type at the very start of "cat" at once; every arrival order agrees.
+        let runs = [(change(3, 1), "z"), (change(2, 1), "y"), (change(4, 1), "w")];
+        let (p, s, ro) = cat().place(0);
+        let texts: Vec<String> = [[0, 1, 2], [2, 1, 0], [1, 2, 0]].iter().map(|arrival| {
+            let mut t = cat();
+            for &k in arrival {
+                t.insert_run(runs[k].0, runs[k].1, p, s, ro);
+            }
+            t.text()
+        }).collect();
+        assert!(texts.iter().all(|t| *t == texts[0]), "{texts:?}");
+    }
 }

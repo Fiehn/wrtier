@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cf470b302d324a3b8355cbc59f20eac5fd0c7e687b27e04936ef4c3e701a02b1 # shrinks to actions = [Insert { device: 2, at: 0, text: "aa" }, Move { device: 2, from: 25639, len: 0, to: 3964 }, Insert { device: 1, at: 0, text: "a" }, Insert { device: 2, at: 0, text: "a " }, Insert { device: 1, at: 0, text: " " }, Delete { device: 2, at: 41050, len: 1 }, Insert { device: 2, at: 3532, text: "aa" }, Delete { device: 0, at: 0, len: 1 }, Insert { device: 2, at: 0, text: "aa aa" }, Insert { device: 2, at: 0, text: " aa" }, Insert { device: 1, at: 0, text: "a aa" }, Delete { device: 0, at: 0, len: 1 }, Sync { from: 2, to: 1 }, Sync { from: 2, to: 0 }, Insert { device: 0, at: 1456, text: "a " }, Move { device: 1, from: 10741, len: 7, to: 13517 }, Delete { device: 0, at: 5232, len: 1 }, Insert { device: 1, at: 48600, text: "   a" }, Move { device: 0, from: 7814, len: 187, to: 45866 }, Insert { device: 0, at: 0, text: "a  " }, Delete { device: 0, at: 0, len: 1 }, Sync { from: 1, to: 0 }, Insert { device: 0, at: 41595, text: "a" }]

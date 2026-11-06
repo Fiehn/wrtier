@@ -1,23 +1,32 @@
-use crate::change::{Change, ChangeKind, InsertRun, CharRange, NoticeKey};
+﻿//! A Work's text as one Device sees it: the History's Changes applied to a Fugue tree,
+//! laid out with the Moves in effect.
+//!
+//! Everything shown is derived from the set of Changes. `refresh` recomputes it all; typing,
+//! backspacing and dismissing update it directly instead, and in debug builds (the tests) every
+//! such shortcut is checked against a full recompute. `crate::reference::doc` is the first,
+//! simple version; this one must behave identically (`tests/against_reference.rs`).
+
+use crate::change::{Change, ChangeKind, InsertRun, CharRange, NoticeKey, Span};
 use crate::fugue::Tree;
 use crate::ids::{ChangeId, DeviceId, Hlc, CharId};
-use std::collections::HashSet;
-use std::collections::HashMap;
 use crate::layout::{Layout, MoveInfo, Piece};
-use crate::change::Span;
+use rustc_hash::FxHashSet;
+use std::collections::{HashMap, HashSet};
 
 pub struct Doc {
     tree: Tree,
     device: DeviceId,
     next_counter: u32,
     clock: Hlc,
-    applied: HashSet<ChangeId>, // to avoid applying the same change twice
-    reverted_by: HashMap<ChangeId, Vec<ChangeId>>, // to track which changes have been reverted by which other changes
-    seen: HashMap<DeviceId, u32>, // to track the highest counter seen from each device
-    moves: Vec<(Hlc, MoveInfo)>, // to track the moves that have been applied, in order of their HLC
-    typed_into: HashMap<CharId, Vec<CharId>>, // a piece's anchor → nodes typed or dropped into it
-    dismissals: Vec<(ChangeId, NoticeKey)>,   // every Dismiss Change, and the notice it hides
+    applied: HashSet<ChangeId>,                    // to avoid applying the same Change twice
+    reverted_by: HashMap<ChangeId, Vec<ChangeId>>, // a Change â†’ the Reverts that target it
+    seen: HashMap<DeviceId, u32>,                  // the highest counter applied from each Device
+    moves: Vec<(Hlc, MoveInfo)>,                   // every Move applied, with its clock for sorting
+    typed_into: HashMap<CharId, Vec<CharId>>,      // a piece's anchor â†’ nodes typed or dropped into it
+    dismissals: Vec<(ChangeId, NoticeKey)>,        // every Dismiss Change, and the notice it hides
     layout: Layout,
+    // Worked out by `refresh` (or a fast path) after every Change, so reading the text doesn't redo it.
+    visible: Vec<u32>, // the visible characters' tree nodes, in reading order
 }
 
 /// A message for the Author about text the merge had to decide on its own.
@@ -50,38 +59,33 @@ impl Doc {
             typed_into: HashMap::new(),
             dismissals: Vec::new(),
             layout: Layout::default(),
+            visible: Vec::new(),
         }
     }
+
+    // ---- Reading ----
 
     pub fn text(&self) -> String {
-        // build it from visible() with char_of
-        let mut result = String::new();
-        for (id, _) in self.visible() {
-            if let Some(ch) = self.tree.char_of(id) {
-                result.push(ch);
-            }
-        }
-        result
+        self.visible.iter().filter_map(|&node| self.tree.char_at(node)).collect()
     }
 
-    pub fn is_in_effect(&self, id:ChangeId) -> bool {
+    /// The number of visible characters.
+    pub fn len(&self) -> usize {
+        self.visible.len()
+    }
+
+    /// The visible characters in reading order, with the piece each is drawn in.
+    pub fn visible(&self) -> Vec<(CharId, Option<Piece>)> {
+        self.visible.iter().map(|&node| (self.tree.id_of(node), self.layout.level_at(node))).collect()
+    }
+
+    pub fn is_in_effect(&self, id: ChangeId) -> bool {
         match self.reverted_by.get(&id) {
             Some(reverters) => reverters.iter().all(|&r| !self.is_in_effect(r)),
             None => true,
         }
     }
-    fn refresh_undone(&mut self) {
-        // Only changes that have been reverted can be undone, so chekc just those.
-        let undone: HashSet<ChangeId> = self.reverted_by.keys().copied()
-            .filter(|&id| !self.is_in_effect(id))
-            .collect();
-        self.tree.set_undone(undone);
-    }
-    pub fn revert_local(&mut self, target: ChangeId, with_dependents: bool, now_ms: u64) -> Change {
-        let mut targets = vec![target];
-        if with_dependents { targets.extend(self.depends_on(target)); }
-        self.commit_local(ChangeKind::Revert { targets }, now_ms)
-    }
+
     /// The Merge notices the Author hasn't dismissed, worked out from the History.
     /// Every Device gets the same list, in the fixed Change order.
     pub fn merge_notices(&self) -> Vec<MergeNotice> {
@@ -89,18 +93,17 @@ impl Doc {
             .map(|(later, earlier, chars)| (NoticeKey::Overlap { later: *later, earlier: *earlier }, chars));
         let loops = self.layout.skipped().iter()
             .map(|(skipped, chars)| (NoticeKey::Loop { skipped: *skipped }, chars));
-
-        let visible = self.visible();
         overlaps.chain(loops)
             .filter(|(key, _)| !self.is_dismissed(*key))
             .map(|(key, involved)| {
                 // Walk the visible text so the characters come out in reading order.
-                let chars: Vec<CharId> = visible.iter()
-                    .map(|&(id, _)| id)
-                    .filter(|id| involved.contains(id))
-                    .collect();
-                let text = chars.iter().filter_map(|&id| self.tree.char_of(id)).collect();
-                MergeNotice { key, chars, text }
+                let involved: FxHashSet<u32> = involved.iter().filter_map(|&id| self.tree.index_of(id)).collect();
+                let nodes: Vec<u32> = self.visible.iter().copied().filter(|n| involved.contains(n)).collect();
+                MergeNotice {
+                    key,
+                    chars: nodes.iter().map(|&n| self.tree.id_of(n)).collect(),
+                    text: nodes.iter().filter_map(|&n| self.tree.char_at(n)).collect(),
+                }
             })
             .collect()
     }
@@ -110,41 +113,107 @@ impl Doc {
         self.dismissals.iter().any(|&(id, k)| k == key && self.is_in_effect(id))
     }
 
-    pub fn dismiss_local(&mut self, notice: NoticeKey, now_ms: u64) -> Change {
-        self.commit_local(ChangeKind::Dismiss { notice }, now_ms)
-    }
-
-    pub fn restore_local(&mut self, target: ChangeId, now_ms: u64) -> Option<Change> {
-        let reverters = self.reverted_by.get(&target).cloned().unwrap_or_default();
-        let in_effect: Vec<ChangeId> = reverters.into_iter().filter(|&r| self.is_in_effect(r)).collect();
-        if in_effect.is_empty() {
-            None
-        } else {
-            Some(self.commit_local(ChangeKind::Revert { targets: in_effect }, now_ms))
-        }
-    }
-
+    /// The text of a deleted range, deleted characters included: the readable copy in storage.
     pub fn text_of(&self, range: &CharRange) -> String {
-        let mut result = String::new();
-        for offset in range.first.offset..range.first.offset + range.len {
-            let id = CharId { change: range.first.change, offset };
-            if let Some(ch) = self.tree.char_of(id) {
-                result.push(ch);
-            }
+        (range.first.offset..range.first.offset + range.len)
+            .filter_map(|offset| self.tree.char_of(CharId { change: range.first.change, offset }))
+            .collect()
+    }
+
+    /// Readable copy of a moved piece: the visible text from its first to its last character.
+    /// A piece can hold text from many Changes, so walk the visible text rather than offsets.
+    /// Only used for the readable column in storage, so an empty string is fine if it's gone.
+    pub fn piece_text(&self, span: &Span) -> String {
+        let (Some(first), Some(last)) = (self.tree.index_of(span.first), self.tree.index_of(span.last)) else {
+            return String::new();
+        };
+        let start = self.visible.iter().position(|&n| n == first);
+        let end = self.visible.iter().position(|&n| n == last);
+        match (start, end) {
+            (Some(s), Some(e)) if s <= e => self.visible[s..=e].iter().filter_map(|&n| self.tree.char_at(n)).collect(),
+            _ => String::new(),
         }
-        result
+    }
+
+    pub fn depends_on(&self, target: ChangeId) -> Vec<ChangeId> {
+        self.tree.inside(target)
+    }
+
+    // ---- Applying Changes ----
+
+    /// Applies many Changes, e.g. when opening a Work, and works out the text once at the end.
+    /// They must be in the fixed Change order.
+    pub fn apply_all(&mut self, changes: &[Change]) {
+        for change in changes {
+            self.apply_change(change);
+        }
+        self.refresh();
     }
 
     pub fn apply(&mut self, change: &Change) {
+        let new = !self.applied.contains(&change.id);
+        self.apply_change(change);
+        match &change.kind {
+            // Dismissing a notice changes no text: nothing to recompute.
+            ChangeKind::Dismiss { .. } => self.debug_check(),
+            _ if new => self.refresh(),
+            _ => {} // already had it
+        }
+    }
+
+    /// Recomputes everything derived from the Changes: what's undone, the layout, the visible text.
+    fn refresh(&mut self) {
+        self.refresh_undone();
+        self.layout = Layout::compute(&self.tree, &self.in_effect_moves(), &self.typed_into);
+        self.visible = self.computed_visible(&self.layout);
+    }
+
+    fn refresh_undone(&mut self) {
+        // Only Changes that have been reverted can be undone, so check just those.
+        let undone: Vec<ChangeId> = self.reverted_by.keys().copied()
+            .filter(|&id| !self.is_in_effect(id))
+            .collect();
+        self.tree.set_undone(undone);
+    }
+
+    /// The visible characters in reading order, according to `layout`.
+    fn computed_visible(&self, layout: &Layout) -> Vec<u32> {
+        layout.reading_nodes(&self.tree).into_iter().filter(|&n| self.tree.is_visible_at(n)).collect()
+    }
+
+    /// The Moves in effect, in the fixed Change order: what the layout is computed from.
+    fn in_effect_moves(&self) -> Vec<MoveInfo> {
+        let mut in_effect: Vec<(Hlc, MoveInfo)> = self.moves.iter()
+            .filter(|(_, info)| self.is_in_effect(info.id))
+            .cloned()
+            .collect();
+        in_effect.sort_by_key(|(hlc, info)| (*hlc, info.id.device));
+        in_effect.into_iter().map(|(_, info)| info).collect()
+    }
+
+    /// In debug builds (the tests): recompute everything from scratch, without touching the
+    /// cached state, and check every shortcut gave the same visible text and pieces.
+    fn debug_check(&self) {
+        if cfg!(debug_assertions) {
+            let layout = Layout::compute(&self.tree, &self.in_effect_moves(), &self.typed_into);
+            let fresh: Vec<(u32, Option<Piece>)> = self.computed_visible(&layout).into_iter()
+                .map(|n| (n, layout.level_at(n)))
+                .collect();
+            let cached: Vec<(u32, Option<Piece>)> = self.visible.iter().map(|&n| (n, self.layout.level_at(n))).collect();
+            assert_eq!(cached, fresh, "a shortcut disagrees with recomputing from scratch");
+        }
+    }
+
+    /// Records one Change without recomputing what's derived from it; call `refresh` after.
+    fn apply_change(&mut self, change: &Change) {
         if !self.applied.insert(change.id) {
             return; // already applied
         }
-        // update seen: entry(change.id.device).or_insert(0) and take the max with change.id.counter
-        self.seen.entry(change.id.device).and_modify(|c| *c = (*c).max(change.id.counter)).or_insert(change.id.counter);
-
+        let seen = self.seen.entry(change.id.device).or_insert(0);
+        *seen = (*seen).max(change.id.counter);
         self.clock.observe(change.hlc);
         if change.id.device == self.device {
-            // raise the counter if this change is from us, so we don't reuse the same counter using Max()
+            // A Change of ours, e.g. loaded from the file: never reuse its counter.
             self.next_counter = self.next_counter.max(change.id.counter + 1);
         }
         match &change.kind {
@@ -165,17 +234,13 @@ impl Doc {
                 self.note_into(inserted.into, change.id, inserted.text.chars().count());
             }
             ChangeKind::Revert { targets } => {
-                // The Revert change itself doesn't modify the tree, but it affects which changes are considered undone.
-                // We need to update the reverted_by map and refresh the undone set.
                 for target in targets {
                     self.reverted_by.entry(*target).or_default().push(change.id);
                 }
             }
             ChangeKind::Move { pieces, parent, side, right_origin, seen, into } => {
-                // self.tree.insert_anchors(&mut self, change: ChangeId, count: usize, parent: Option<CharId>, side: Side, ro: Option<CharId>)
                 self.tree.insert_anchors(change.id, pieces.len(), *parent, *side, *right_origin);
                 self.note_into(*into, change.id, pieces.len());
-                // push (change.hlc, MoveInfo { id: change.id, pieces: pieces.clone(), seen: seen.clone() }) onto self.moves
                 self.moves.push((change.hlc, MoveInfo { id: change.id, pieces: pieces.clone(), seen: seen.clone() }));
             }
             ChangeKind::Dismiss { notice } => {
@@ -183,8 +248,6 @@ impl Doc {
                 self.dismissals.push((change.id, *notice));
             }
         }
-        self.refresh_undone();
-        self.refresh_layout();
     }
 
     /// Remember that the `count` nodes of `change` went into the piece with anchor `into`.
@@ -194,77 +257,54 @@ impl Doc {
             self.typed_into.entry(anchor).or_default().extend(nodes);
         }
     }
+
+    // ---- Local edits ----
+
     pub fn insert_local(&mut self, index: usize, text: &str, now_ms: u64) -> Change {
-        // 1. Call place(index)
+        assert!(index <= self.len(), "index {index} is past the end of the text ({})", self.len());
         let (left, into) = self.left_of(index);
         let (parent, side, right_origin) = self.tree.place_after(left);
+        let run = InsertRun { text: text.to_string(), parent, side, right_origin, into };
+        let change = self.new_change(ChangeKind::Insert(run), now_ms);
+        self.apply_change(&change);
 
-        // 2. build InsertRun
-        let run = InsertRun {
-            text: text.to_string(),
-            parent,
-            side,
-            right_origin,
-            into,
+        // Shortcut instead of `refresh`: typed text lands right after `left` in the tree, shows
+        // at exactly `index`, and belongs to the piece it was typed into. Nothing else changes.
+        let count = text.chars().count() as u32;
+        let nodes: Vec<u32> = match self.tree.index_of(CharId { change: change.id, offset: 0 }) {
+            Some(first) => (first..first + count).collect(), // a Change's nodes are consecutive
+            None => Vec::new(),                               // empty text: nothing to show
         };
-
-        self.commit_local(ChangeKind::Insert(run), now_ms)
-    }
-    pub fn refresh_layout(&mut self) {
-        // collect the Moves that are is_in_effect()
-        // sort them by HLC and DeviceId
-        // self.layout = Layout::compute(&self.tree, &infos);
-        // collect first and assign last
-        let mut in_effect: Vec<(Hlc, MoveInfo)> = self.moves.iter()
-            .filter(|(_, info)| self.is_in_effect(info.id))
-            .cloned()
-            .collect();
-        in_effect.sort_by_key(|(hlc, info)| (*hlc, info.id.device));
-        let infos: Vec<MoveInfo> = in_effect.into_iter().map(|(_, info)| info).collect();
-        self.layout = Layout::compute(&self.tree, &infos, &self.typed_into);
-
-
-    }
-    pub fn visible(&self) -> Vec<(CharId, Option<Piece>)> {
-        self.layout.reading_order(&self.tree).into_iter()
-            .filter(|(id, _)| self.tree.is_visible(*id))
-            .collect()
+        self.layout.insert_typed(&nodes, into.map(|a| (a.change, a.offset as usize)));
+        self.visible.splice(index..index, nodes);
+        self.debug_check();
+        change
     }
 
-    /// Readable copy of a moved piece: the visible text from its first to its last character.
-    /// A piece can hold text from many Changes, so walk the visible text rather than offsets.
-    /// Only used for the readable column in storage, so an empty string is fine if it's gone.
-    pub fn piece_text(&self, span: &Span) -> String {
-        let visible = self.visible();
-        let start = visible.iter().position(|&(id, _)| id == span.first);
-        let end = visible.iter().position(|&(id, _)| id == span.last);
-        match (start, end) {
-            (Some(s), Some(e)) if s <= e => visible[s..=e]
-                .iter()
-                .filter_map(|&(id, _)| self.tree.char_of(id))
-                .collect(),
-            _ => String::new(),
-        }
-    }
-    
     pub fn delete_local(&mut self, index: usize, len: usize, now_ms: u64) -> Change {
-        // Take ids from visible
-        let ids = self.visible().into_iter().skip(index).take(len).map(|(id, _)| id).collect::<Vec<_>>();
+        let end = (index + len).min(self.visible.len());
+        assert!(index <= end, "index {index} is past the end of the text ({})", self.len());
         let mut ranges: Vec<CharRange> = Vec::new();
-        for id in ids {
-            // Can this id extend the range we're building?
+        for &node in &self.visible[index..end] {
+            let id = self.tree.id_of(node);
+            // Extend the last range if this character follows on in the same Change.
             if let Some(last) = ranges.last_mut() {
                 if last.first.change == id.change && last.first.offset + last.len == id.offset {
                     last.len += 1;
-                    continue; // done with this id, go to the next one
+                    continue;
                 }
             }
-            // It can't (or there's no range yet), so start a new one.
             ranges.push(CharRange { first: id, len: 1 });
         }
+        let change = self.new_change(ChangeKind::Delete(ranges), now_ms);
+        self.apply_change(&change);
 
-        self.commit_local(ChangeKind::Delete(ranges), now_ms)
+        // Shortcut instead of `refresh`: a deletion moves nothing, it only hides these characters.
+        self.visible.drain(index..end);
+        self.debug_check();
+        change
     }
+
     /// Where new text at `index` goes: the node it goes after (None = the very start),
     /// and the anchor of the piece it goes into (None = the main text).
     /// Applies the edge rule: right after the last character of a piece,
@@ -273,27 +313,29 @@ impl Doc {
         if index == 0 {
             return (None, None);
         }
-        let (mut node, mut level) = self.visible()[index - 1];
+        let mut node = self.visible[index - 1];
+        let mut level = self.layout.level_at(node);
         while let Some(piece) = level {
-            let span = self.layout.span(piece).unwrap();
-            if node != span.last {
+            let span = self.layout.span(piece).expect("a drawn piece has a span");
+            if self.tree.id_of(node) != span.last {
                 break;
             }
-            node = anchor_of(piece);
-            level = self.layout.owner(node);
+            node = self.tree.index_of(anchor_of(piece)).expect("a drawn piece has an anchor");
+            level = self.layout.level_at(node);
         }
-        (Some(node), level.map(anchor_of))
+        (Some(self.tree.id_of(node)), level.map(anchor_of))
     }
+
     pub fn move_local(&mut self, from: usize, len: usize, to: usize, now_ms: u64) -> Change {
         assert!(len > 0, "len must be greater than 0");
-        let text_len = self.visible().len();
-        assert!(from + len <= text_len, "from + len must be less than or equal to the text length");
-        // Check that to <= from || to >= from + len
+        assert!(from + len <= self.len(), "from + len must be less than or equal to the text length");
         assert!(to <= from || to >= from + len, "to must be less than or equal to from or greater than or equal to from + len");
+        assert!(to <= self.len(), "to {to} is past the end of the text ({})", self.len());
 
-        let visible = self.visible();
+        // One piece per run of selected characters drawn in the same place.
         let mut groups: Vec<(Option<Piece>, Span)> = Vec::new();
-        for &(id, level) in visible.iter().skip(from).take(len) {
+        for &node in &self.visible[from..from + len] {
+            let (id, level) = (self.tree.id_of(node), self.layout.level_at(node));
             if let Some((last_level, span)) = groups.last_mut() {
                 if *last_level == level {
                     span.last = id;
@@ -309,23 +351,50 @@ impl Doc {
         let (parent, side, right_origin) = self.tree.place_after(left);
 
         let mut seen: Vec<(DeviceId, u32)> = self.seen.iter().map(|(&device, &counter)| (device, counter)).collect();
-        seen.sort_by(|a, b| a.0.cmp(&b.0));
+        seen.sort();
 
         self.commit_local(ChangeKind::Move { pieces, parent, side, right_origin, seen, into }, now_ms)
     }
 
-    fn commit_local(&mut self, kind: ChangeKind, now_ms: u64) -> Change {
+    pub fn revert_local(&mut self, target: ChangeId, with_dependents: bool, now_ms: u64) -> Change {
+        let mut targets = vec![target];
+        if with_dependents {
+            targets.extend(self.depends_on(target));
+        }
+        self.commit_local(ChangeKind::Revert { targets }, now_ms)
+    }
+
+    pub fn restore_local(&mut self, target: ChangeId, now_ms: u64) -> Option<Change> {
+        let reverters = self.reverted_by.get(&target).cloned().unwrap_or_default();
+        let in_effect: Vec<ChangeId> = reverters.into_iter().filter(|&r| self.is_in_effect(r)).collect();
+        if in_effect.is_empty() {
+            None
+        } else {
+            Some(self.commit_local(ChangeKind::Revert { targets: in_effect }, now_ms))
+        }
+    }
+
+    pub fn dismiss_local(&mut self, notice: NoticeKey, now_ms: u64) -> Change {
+        self.commit_local(ChangeKind::Dismiss { notice }, now_ms)
+    }
+
+    /// Makes a new Change from this Device, with the next counter and a fresh clock value.
+    fn new_change(&mut self, kind: ChangeKind, now_ms: u64) -> Change {
         let change = Change {
             id: ChangeId { device: self.device, counter: self.next_counter },
             hlc: self.clock.tick(now_ms),
             kind,
         };
         self.next_counter += 1;
-        self.apply(&change);
         change
     }
 
-    pub fn depends_on(&self, target: ChangeId) -> Vec<ChangeId> { self.tree.inside(target) }
+    /// Makes a new Change and applies it the general way.
+    fn commit_local(&mut self, kind: ChangeKind, now_ms: u64) -> Change {
+        let change = self.new_change(kind, now_ms);
+        self.apply(&change);
+        change
+    }
 }
 
 #[cfg(test)]
@@ -650,6 +719,21 @@ mod test {
         assert_eq!(notices[0].key, NoticeKey::Overlap { later: b.id, earlier: a.id });
         assert_eq!(notices[0].text, "cd");             // the text both Moves took
         assert_eq!(phone.merge_notices(), notices);    // worked out the same way everywhere
+    }
+
+    #[test]
+    fn typing_into_contested_text_does_not_grow_the_notice() {
+        // Found by comparing against the reference: a notice quotes the text the two Moves
+        // fought over, not text typed there afterwards by someone who saw both.
+        let (mut laptop, mut phone) = laptop_and_phone();
+        let a = laptop.move_local(1, 3, 6, 2000);
+        let b = phone.move_local(2, 3, 0, 2000);
+        laptop.apply(&b);
+        phone.apply(&a);
+        assert_eq!(laptop.text(), "cdeafb");
+        laptop.insert_local(1, "XYZ", 3000);          // inside "cd", which both Moves took
+        assert_eq!(laptop.text(), "cXYZdeafb");
+        assert_eq!(laptop.merge_notices()[0].text, "cd");
     }
 
     #[test]

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 rusqlite = { version = "0.41.1", features = ["bundled"] }
+rustc-hash = "2"  # fast hashing for the tree's lookup tables; no protection against crafted input needed here
 
 [dev-dependencies]
 proptest = "1"

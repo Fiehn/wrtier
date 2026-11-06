@@ -62,21 +62,23 @@ impl std::fmt::Display for CharId {
 }
 
 impl std::str::FromStr for DeviceId {
-    type Err = std::num::ParseIntError;
+    type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let n = u32::from_str_radix(s, 16)?; // "0000002a" -> 42
+        // Exactly the form Display writes: 8 hex digits ("0000002a" -> 42). Anything else is damage.
+        if s.len() != 8 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("Invalid DeviceId: {s:?}"));
+        }
+        let n = u32::from_str_radix(s, 16).map_err(|e| e.to_string())?;
         Ok(DeviceId(n))
     }
 }
 impl std::str::FromStr for ChangeId {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() != 2 {
-            return Err(format!("Invalid ChangeId format: {}", s));
-        }
-        let device = parts[0].parse::<DeviceId>().map_err(|e| e.to_string())?;
-        let counter = parts[1].parse::<u32>().map_err(|e| e.to_string())?;
+        // split_once instead of collecting the parts: no memory allocation per ID.
+        let (device, counter) = s.split_once(':').ok_or_else(|| format!("Invalid ChangeId format: {s:?}"))?;
+        let device = device.parse::<DeviceId>()?;
+        let counter = counter.parse::<u32>().map_err(|e| format!("Invalid ChangeId {s:?}: {e}"))?;
         Ok(ChangeId { device, counter })
     }
 }

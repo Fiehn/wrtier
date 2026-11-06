@@ -136,12 +136,14 @@ A standalone Rust library with no UI. Everything else is built on it.
 - Text file generation, and importing External edits (compare the file with the current text and record the difference as Changes).
 - The burst interface the editor will call: open a burst, extend it, close it.
 - A terminal harness to try it out by hand (the `/prototype` skill fits here).
+- A stress harness: a fixed-seed generator writes realistic Histories at increasing sizes (mostly typing near the last edit, some deletions, few Moves and Reverts) and times opening the Work and single edits on the full text. Speed-ups that update state step by step are checked against recomputing everything from scratch, which stays as the reference.
 
 *Done when:*
 
 - Three simulated Devices making random offline edits, Moves and Reverts, merged in any order, always end with identical text (property tests).
 - A Work's `.db` opened in DB Browser for SQLite reads as plain, understandable rows.
 - A generated novel-sized History (about 30,000 Changes) loads in under a second on desktop.
+- On that History, a keystroke takes under a frame (about 16 ms) on desktop.
 
 Reading: Weidner & Kleppmann, *The Art of the Fugue: Minimizing Interleaving in Collaborative Text Editing* (2023); Kleppmann, *Moving Elements in List CRDTs* (2020).
 
