@@ -59,6 +59,10 @@ body {
   margin-bottom: 12px;
 }
 
+#new-work {
+  margin-top: 10px;
+}
+
 #vault-root {
   margin-top: 6px;
   font-size: 12px;
@@ -119,6 +123,18 @@ main {
 
 #editor .cm-editor.cm-focused {
   outline: none;
+}
+
+#status {
+  white-space: pre-line;
+  font-size: 13px;
+  color: var(--warn-text);
+  margin-bottom: 10px;
+}
+
+#works li.open > button:first-child {
+  background: var(--line);
+  font-weight: 600;
 }
 
 #problems,

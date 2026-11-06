@@ -14,6 +14,7 @@
         <header>
           <button id="choose-vault" type="button">Open Vault…</button>
           <div id="vault-root" class="muted"></div>
+          <button id="new-work" type="button" hidden>New Work…</button>
         </header>
         <ul id="works"></ul>
       </aside>
@@ -22,6 +23,7 @@
         <div id="problems" hidden></div>
         <div id="error" hidden></div>
         <h1 id="work-title"></h1>
+        <div id="status" hidden></div>
         <div id="editor"></div>
         <p id="empty" class="muted">Open a Vault, then choose a Work on the left.</p>
       </main>
@@ -33,8 +35,20 @@
         <p id="ask-create-path" class="path"></p>
         <p class="muted">Making it one adds a <code>vault.db</code> file to it.</p>
         <menu>
-          <button value="cancel">Cancel</button>
+          <button type="button" data-close="cancel">Cancel</button>
           <button value="yes">Make it a Vault</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="ask-new-work">
+      <form method="dialog">
+        <p>What's the new Work called?</p>
+        <p class="muted">Put it in a folder with a slash, e.g. <code>Short stories/Rain</code>.</p>
+        <input id="new-work-name" required maxlength="200" autocomplete="off" />
+        <menu>
+          <button type="button" data-close="cancel">Cancel</button>
+          <button value="create">Create</button>
         </menu>
       </form>
     </dialog>

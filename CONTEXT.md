@@ -96,7 +96,7 @@ _Avoid_: cut and paste
 
 **Revert**:
 A **Change** that cancels out an earlier **Change**, which stays in the **History**.
-_Avoid_: undo (that is the ordinary Ctrl+Z), rollback, delete change
+_Avoid_: rollback, delete change, undo (that's the Ctrl+Z key, which may make a Revert)
 
 **Session**:
 The **Changes** one **Device** made in one sitting, shown together in the history view.
@@ -145,6 +145,7 @@ _Avoid_: device settings, local settings
 
 - A **Work** has exactly one **History** and one **Text file**.
 - A **Work** is written in one language, set in its **Preamble**; the language decides quotation marks and hyphenation.
+- Cutting text and pasting exactly that text elsewhere in the same **Work** is a **Move**, as is dragging it; anything else records the cut as a deletion.
 - A **Work** contains zero or more **Chapters**; reordering **Chapters** is a **Move**, so their history and **Comments** go with them.
 - A **Collection** includes other **Works** live; it never holds copies of them.
 - A **Vault** holds many **Works**, many **Reviewers** and one **Style library**.
@@ -175,6 +176,7 @@ _Avoid_: device settings, local settings
 - A **Session** belongs to one **Device** and one **Work**. A new one starts when the **Work** is opened, or after a long pause in writing.
 - Reverting a **Change** also reverts, by default, every later **Change** that added text inside the text it wrote (and anything added inside that, in turn). Later deletions and **Moves** of that text are not reverted with it.
 - A **Revert** can itself be reverted.
+- Undo (Ctrl+Z) only edits text typed in the last few seconds that isn't a **Change** yet; beyond that it's a **Revert** of the latest **Change** this **Device** made that's still in effect, and redo restores it.
 - A **Change** stays undone while any **Revert** of it is in effect; restoring a **Change** cancels every **Revert** of it.
 - Returning to a **Milestone** reverts every **Change** to the **Work**'s content that isn't part of it, including later **Reverts**; nothing is removed. **Device** names, other **Milestones** and dismissed **Merge notices** stay as they are.
 - A **Milestone** holds exactly the **Changes** the **Device** that named it had seen. A **Change** made earlier on another **Device** that hadn't synced yet is not part of it.

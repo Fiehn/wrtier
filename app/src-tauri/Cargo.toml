@@ -23,6 +23,7 @@ tauri-plugin-dialog = "2"  # the folder picker for choosing a Vault
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 getrandom = "0.3"          # a new Device ID
+similar = "2"              # the smallest patch for the editor when the text changes underneath it
 wrtier = { path = "../.." }  # the History engine
 
 [dev-dependencies]

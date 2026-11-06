@@ -25,7 +25,7 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 - How Moves, positions and Change order work: [ADR 0008](adr/0008-moves-are-ranges-over-a-fugue-position-tree.md).
 - One `.db` per Work. Every Device writes to it, and Conflict copies are merged back and deleted ([ADR 0002](adr/0002-one-self-healing-database-per-work.md)). History copies are merged first; then Text file copies are read like External edits (a copy another Device wrote is recognised and simply deleted). A copy that can't be absorbed (not a History, written by a newer version of the app, two Devices sharing a Device ID, or damaged) is never deleted: it's kept and reported as a Sync problem. Conflict copies are absorbed as soon as the app sees them (when the Vault opens, or when one appears), for every Work in the Vault, open or not. A copy whose main file is missing holds a whole History, so it becomes the main file.
 - Changes are stored as readable rows. A `.db` opened in DB Browser for SQLite makes sense to a person. Each Change row reads like a sentence: readable time, Device name, kind, and the text it inserted or deleted (deletions keep a copy of the deleted text, even though the engine could work it out). The engine's own columns sit next to these.
-- The app shows a Device's current name from `vault.db`, then the name the Work recorded, then its ID. When a Device saves Changes to a Work, it also records its current name in that Work if the Work has none or an older one. Reading never writes, and a rename reaches each Work the next time it's edited.
+- The app shows a Device's current name from `vault.db`, then the name the Work recorded, then its ID. Just before a Device's first edit to a Work in a sitting (before any typing burst opens, since nothing else may be recorded while one is open), it records its current name in that Work if the Work has none or an older one. Reading never writes, and a rename reaches each Work the next time it's edited.
 - Caches (the built tree, the current text, Session summaries) live in a cache folder on the Device, outside the Vault. They never sync and can always be rebuilt from the `.db`.
 - The app never holds a `.db` open between writes. Unsaved Changes stay in a recovery file outside the Vault until the app has seen them in the `.db`.
 - The Text file is regenerated on save. External edits are detected and recorded. The app recognises Text file contents it wrote itself, including in Conflict copies of the Text file.
@@ -50,6 +50,8 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 - CodeMirror 6 with a Formatted view (markup hidden except at the cursor, with hover tooltips on desktop) and a Raw view toggle.
 - Story element chips, Reviewer-coloured Comment highlights, and optional "who/when" colouring by Session.
 - The platform's built-in spellcheck can be switched on or off.
+- Moving text in the editor: dragging a selection is a Move, and so is cutting text and then pasting exactly that text in the same Work. Until the paste, the cut text is only hidden (like a deletion burst, but it doesn't close on a pause); any other edit, pasting different text, pasting in another Work or closing the Work records the cut as a deletion. Keyboard shortcuts for moving paragraphs come in Phase 6.
+- Ctrl+Z: while a typing burst is open, undo goes step by step inside it (nothing there is recorded yet), and its undo steps are cleared when it closes. After that, Ctrl+Z reverts this Device's latest Change still in effect and Ctrl+Shift+Z restores it, so undone and redone text keeps its History and Comments.
 
 **Comments**
 
@@ -165,7 +167,9 @@ Phase 1 is officially done. No terminal harness is needed.
 - A Tauri 2 app: Vault browser, opening a Work, and CodeMirror connected to the History. Typing bursts become Changes, and Changes merged from Conflict copies or External edits appear in the editor.
 - Raw view first, then the Formatted view.
 - Tabs, quick switcher, Device state, Vault settings, recovery file.
+- Saving: the `.db` is written every time a typing burst closes. The Text file is written at most every 30 seconds while writing, and whenever the Author leaves the Work (another tab, closing it, the window losing focus, quitting), so it's current whenever another program might read it.
 - The interface and the Rust core exchange positions in UTF-16 code units, as CodeMirror counts them. The core converts them to the engine's characters and rejects any position past the end or inside a character before the engine sees it.
+- Open: Syncthing may deliver another Device's Text file before its `.db`. Its hash is then unknown here, and importing it as an External edit would record that Device's text a second time, as new Changes from this Device. A changed Text file must not be imported until the `.db` has had a chance to catch up (settle when the file watcher is built).
 - An unexpected panic in the engine doesn't close the app: the affected Work's in-memory state is thrown away unsaved and the Work is reopened from its `.db` and the recovery file, with a message to the Author. Other open Works are untouched.
 
 *Done when:* you can write a short story on Windows and Debian, edit its Text file in vim, sync both machines through Syncthing with offline edits on each, and nothing is lost.

@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
-import { EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { listen } from "@tauri-apps/api/event";
+import { Compartment, EditorState } from "@codemirror/state";
+import { EditorView, dropCursor, keymap } from "@codemirror/view";
+import { history, standardKeymap } from "@codemirror/commands";
+import { WorkSync, type WorkState } from "./sync";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -12,7 +15,8 @@ type EntryKind =
   | { kind: "newWork" }
   | { kind: "leftover"; of: string }
   | { kind: "newer"; version: number }
-  | { kind: "unreadable"; reason: string };
+  | { kind: "unreadable"; reason: string }
+  | { kind: "blocked"; reason: string };
 
 type Entry = { id: string; name: string } & EntryKind;
 type SyncProblem = { path: string; reason: string };
@@ -21,11 +25,54 @@ type OpenedWork = { id: string; name: string; text: string; problems: SyncProble
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
-// Step 1 only shows the text; typing comes with the History connection (step 2).
-const editor = new EditorView({
-  parent: $("editor"),
-  state: EditorState.create({ doc: "", extensions: [EditorView.lineWrapping, EditorState.readOnly.of(true)] }),
-});
+// ---- The editor ----
+
+/** The Work in the editor, if any. */
+let current: WorkSync | null = null;
+const historyCompartment = new Compartment();
+
+/** Ctrl+Z and redo: the sync decides between the editor's own undo (inside a draft) and the History's. */
+const undoKeys = keymap.of([
+  { key: "Mod-z", run: () => current?.undo() ?? true, preventDefault: true },
+  { key: "Mod-Shift-z", run: () => current?.redo() ?? true, preventDefault: true },
+  { key: "Mod-y", run: () => current?.redo() ?? true, preventDefault: true },
+]);
+
+function editorState(text: string, editable: boolean) {
+  return EditorState.create({
+    doc: text,
+    extensions: [
+      EditorView.lineWrapping,
+      EditorState.readOnly.of(!editable),
+      EditorView.editable.of(editable),
+      historyCompartment.of(history()),
+      undoKeys,
+      // Only the basics: no shortcuts that move lines, which would bypass Moves.
+      keymap.of(standardKeymap),
+      dropCursor(),
+      EditorView.updateListener.of((update) => {
+        for (const tr of update.transactions) current?.track(tr);
+      }),
+    ],
+  });
+}
+
+const editor = new EditorView({ parent: $("editor"), state: editorState("", false) });
+
+/** The burst closed: its undo steps are gone (it's a Change now; Ctrl+Z reverts it). */
+function clearUndoSteps() {
+  editor.dispatch({ effects: historyCompartment.reconfigure([]) });
+  editor.dispatch({ effects: historyCompartment.reconfigure(history()) });
+}
+
+function showWorkState(state: WorkState) {
+  const el = $("status");
+  const lines = [state.saveError, state.textFileProblem].filter((line): line is string => line !== null);
+  el.textContent = lines.join("\n");
+  el.hidden = lines.length === 0;
+}
+
+// ---- Messages ----
 
 function showError(e: unknown) {
   const el = $("error");
@@ -53,6 +100,12 @@ function showProblems(problems: SyncProblem[]) {
   el.append(title, list);
 }
 
+// Cancel buttons are plain buttons, not submit buttons: pressing Enter in a dialog submits with
+// its first submit button, which must be the one that says yes.
+for (const button of document.querySelectorAll<HTMLButtonElement>("dialog button[data-close]")) {
+  button.addEventListener("click", () => button.closest("dialog")?.close(button.dataset.close));
+}
+
 /** Shows a <dialog> and resolves with the button that closed it ("" if Escape). */
 function ask(dialog: HTMLDialogElement): Promise<string> {
   return new Promise((resolve) => {
@@ -61,6 +114,8 @@ function ask(dialog: HTMLDialogElement): Promise<string> {
     dialog.showModal();
   });
 }
+
+// ---- The Vault ----
 
 async function askDeviceName(suggested: string) {
   const input = $<HTMLInputElement>("name-input");
@@ -79,6 +134,7 @@ async function askDeviceName(suggested: string) {
 
 async function openVault(path: string) {
   clearError();
+  await closeCurrent();
   let opened = await invoke<VaultOpened>("open_vault", { path, create: false });
   if (opened.status === "notAVault") {
     $("ask-create-path").textContent = path;
@@ -87,6 +143,7 @@ async function openVault(path: string) {
   }
   if (opened.status !== "opened") return;
   $("vault-root").textContent = opened.root;
+  $("new-work").hidden = false;
   showWork(null);
   if (opened.deviceName === null) await askDeviceName(opened.suggestedName);
   await refreshList();
@@ -98,6 +155,7 @@ const labels: Record<Entry["kind"], string> = {
   leftover: "",
   newer: "Made by a newer version of the app",
   unreadable: "Can't be read right now",
+  blocked: "",
 };
 
 async function refreshList() {
@@ -107,14 +165,17 @@ async function refreshList() {
   list.replaceChildren();
   for (const entry of listing.entries) {
     const item = document.createElement("li");
-    item.className = entry.kind;
+    item.className = entry.kind + (entry.id === current?.id ? " open" : "");
     const name = document.createElement("button");
     name.type = "button";
     name.textContent = entry.id;
-    name.disabled = entry.kind === "newer" || entry.kind === "unreadable" || entry.kind === "leftover";
+    name.disabled = entry.kind === "newer" || entry.kind === "unreadable" || entry.kind === "leftover" || entry.kind === "blocked";
     name.addEventListener("click", () => openWork(entry.id));
     item.append(name);
-    const note = entry.kind === "leftover" ? `Text file left over from ${entry.of}` : labels[entry.kind];
+    const note =
+      entry.kind === "leftover" ? `Text file left over from ${entry.of}`
+      : entry.kind === "blocked" ? entry.reason
+      : labels[entry.kind];
     if (note) {
       const small = document.createElement("small");
       small.textContent = note;
@@ -139,16 +200,40 @@ async function refreshList() {
   }
 }
 
+// ---- Works ----
+
 function showWork(work: OpenedWork | null) {
   $("work-title").textContent = work?.name ?? "";
   $("empty").hidden = work !== null;
   $("editor").hidden = work === null;
-  editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: work?.text ?? "" } });
+  $("status").hidden = true;
+  current = work === null ? null : new WorkSync(work.id, editor, {
+    state: showWorkState,
+    burstClosed: clearUndoSteps,
+    error: showError,
+  });
+  editor.setState(editorState(work?.text ?? "", work !== null));
+  if (work !== null) editor.focus();
+}
+
+/** Closes the Work in the editor: everything typed reaches Rust, is saved, and the Text file written. */
+async function closeCurrent() {
+  if (current === null) return;
+  const closing = current;
+  await closing.idle();
+  current = null;
+  try {
+    await invoke("close_work", { id: closing.id });
+  } catch (e) {
+    showError(e);
+  }
 }
 
 async function openWork(id: string) {
+  if (id === current?.id) return;
   clearError();
   try {
+    await closeCurrent();
     const work = await invoke<OpenedWork>("open_work", { id });
     showWork(work);
     if (work.problems.length > 0) showProblems(work.problems);
@@ -157,6 +242,38 @@ async function openWork(id: string) {
     showError(e);
   }
 }
+
+$("new-work").addEventListener("click", async () => {
+  const input = $<HTMLInputElement>("new-work-name");
+  input.value = "";
+  if ((await ask($<HTMLDialogElement>("ask-new-work"))) !== "create") return;
+  clearError();
+  try {
+    await closeCurrent();
+    showWork(await invoke<OpenedWork>("create_work", { id: input.value }));
+    await refreshList();
+  } catch (e) {
+    showWork(null);
+    showError(e);
+  }
+});
+
+// Leaving the window: the Text file is brought up to date for other programs.
+window.addEventListener("blur", async () => {
+  const work = current;
+  if (work === null) return;
+  await work.idle();
+  try {
+    showWorkState(await invoke<WorkState>("leave_work", { id: work.id }));
+  } catch (e) {
+    showError(e);
+  }
+});
+
+// The Rust side's timer closed a burst or saved something.
+void listen<{ id: string; state: WorkState }>("work-status", (event) => {
+  if (event.payload.id === current?.id) current.status(event.payload.state);
+});
 
 $("choose-vault").addEventListener("click", async () => {
   try {

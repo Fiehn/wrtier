@@ -70,6 +70,18 @@ pub enum BurstKind {
     Deleting,
 }
 
+/// What pasting a cut did (`Doc::cut_to_move`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CutPasted {
+    /// The cut text moved to where it was pasted: one Move.
+    Moved(Change),
+    /// Pasted back where it was cut from: nothing to record.
+    Unchanged,
+    /// It couldn't move as one stretch any more, so the cut was recorded as a deletion (if
+    /// anything was left to delete); the paste is then new text.
+    Deleted(Option<Change>),
+}
+
 /// A burst closes after this long without typing...
 pub const BURST_PAUSE_MS: u64 = 5_000;
 /// ...or after this long of nonstop typing. Both are for tuning; they don't affect correctness.
@@ -737,6 +749,45 @@ impl Doc {
         let replacing: FxHashSet<u32> = burst.replacing.iter().filter_map(|&id| self.tree.index_of(id)).collect();
         let doomed: Vec<u32> = self.visible.iter().copied().filter(|n| replacing.contains(n)).collect();
         self.commit_text(left, &doomed, &burst.draft, Some(burst.id), now_ms)
+    }
+
+    /// Drops the open burst without recording anything: its draft disappears and whatever it
+    /// hid shows again. (Undo inside a burst, or a cut that's undone.)
+    pub fn cancel_burst(&mut self) {
+        if let Some(burst) = self.burst.take() {
+            self.unreserve(burst.id);
+        }
+    }
+
+    /// Is the open burst a typing burst that would put back exactly what it hides? (E.g. typing
+    /// over a selection, then undoing back to the start.) Closing it would record a pointless
+    /// replacement, so the caller cancels it instead.
+    pub fn burst_changes_nothing(&self) -> bool {
+        let Some(burst) = self.burst.as_ref().filter(|b| b.kind == BurstKind::Typing) else { return false };
+        let hidden = self.hidden_by(burst);
+        let hidden_text: String = self.visible.iter().filter(|n| hidden.contains(n)).filter_map(|&n| self.tree.char_at(n)).collect();
+        hidden_text == burst.draft
+    }
+
+    /// Turns the open deletion burst (a cut) into a Move of the text it hides, so the text keeps
+    /// its History. `to` is where it's pasted, in the shown text (where the cut text is absent).
+    pub fn cut_to_move(&mut self, to: usize, now_ms: u64) -> CutPasted {
+        let burst = self.burst.as_ref().filter(|b| b.kind == BurstKind::Deleting).expect("a cut is open (a deletion burst)");
+        assert!(to <= self.len(), "to {to} is past the end of the text ({})", self.len());
+        let hidden = self.hidden_by(burst);
+        let positions: Vec<usize> = self.visible.iter().enumerate().filter(|(_, n)| hidden.contains(n)).map(|(i, _)| i).collect();
+        let whole = positions.last().is_some_and(|&last| last + 1 - positions[0] == positions.len());
+        if !whole {
+            // Something was merged into the middle of it: it's no longer one stretch of text.
+            return CutPasted::Deleted(self.close_burst(now_ms));
+        }
+        let (from, len) = (positions[0], positions.len());
+        self.cancel_burst();
+        if to == from {
+            return CutPasted::Unchanged; // pasted back where it was
+        }
+        let to = if to < from { to } else { to + len }; // in the text with the cut text back
+        CutPasted::Moved(self.move_local(from, len, to, now_ms))
     }
 
     /// Opens a burst at `index` (no burst may be open), hiding the `replacing` characters there.
@@ -1867,6 +1918,60 @@ mod test {
         assert!(laptop.merge_notices().is_empty());
     }
 
+    #[test]
+    fn a_cancelled_burst_records_nothing() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "abcdef", 1000);
+        doc.type_text(3, "XYZ", 2000);
+        doc.cancel_burst();
+        assert_eq!(doc.text(), "abcdef");
+        doc.delete_text(1, 2, 3000);
+        assert_eq!(doc.text(), "adef");
+        doc.cancel_burst();
+        assert_eq!(doc.text(), "abcdef");
+        // The reserved IDs were given back: the next Change follows the first without a gap.
+        assert_eq!(doc.insert_local(0, "!", 4000).id.counter, 2);
+    }
 
+    #[test]
+    fn a_burst_that_puts_back_what_it_hides_changes_nothing() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "abcdef", 1000);
+        doc.replace_text(1, 2, "X", 2000); // "aXdef"
+        assert!(!doc.burst_changes_nothing());
+        doc.replace_text(1, 1, "bc", 2100); // undone back to the start
+        assert_eq!(doc.text(), "abcdef");
+        assert!(doc.burst_changes_nothing());
+    }
 
+    #[test]
+    fn pasting_a_cut_moves_the_text() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "abcdef", 1000);
+        let before = doc.visible();
+        doc.delete_text(1, 2, 2000); // cut "bc"
+        assert_eq!(doc.text(), "adef");
+        let CutPasted::Moved(change) = doc.cut_to_move(3, 3000) else { panic!("a Move") }; // after "ade"
+        assert!(matches!(change.kind, ChangeKind::Move { .. }));
+        assert_eq!(doc.text(), "adebcf");
+        // The moved characters are the same ones: their History goes with them.
+        let id = |doc: &Doc, i: usize| doc.visible()[i].0;
+        assert_eq!(id(&doc, 3), before[1].0);
+        assert_eq!(id(&doc, 4), before[2].0);
+        // And to the left of where it came from.
+        doc.delete_text(4, 2, 4000); // cut "cf"
+        let CutPasted::Moved(_) = doc.cut_to_move(0, 5000) else { panic!("a Move") };
+        assert_eq!(doc.text(), "cfadeb");
+    }
+
+    #[test]
+    fn pasting_a_cut_back_where_it_was_records_nothing() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "abcdef", 1000);
+        doc.delete_text(1, 2, 2000);
+        assert_eq!(doc.cut_to_move(1, 3000), CutPasted::Unchanged);
+        assert_eq!(doc.text(), "abcdef");
+        assert!(doc.burst().is_none());
+        assert_eq!(doc.insert_local(0, "!", 4000).id.counter, 2);
+    }
 }

@@ -2,18 +2,21 @@
 //! and answers the interface. The interface only displays and captures input (ADR 0005).
 
 pub mod device;
+pub mod patch;
 pub mod positions;
 pub mod vault;
+pub mod work;
 
 use device::DeviceState;
 use serde::Serialize;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, State};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use vault::{Listing, Opened, OpenedWork, Vault};
+use work::{Op, WorkState};
 
 struct App {
     device: DeviceState,
@@ -81,6 +84,9 @@ fn open_vault(state: State<AppState>, path: String, create: bool) -> Result<Vaul
             Opened::NotAVault => Ok(VaultOpened::NotAVault),
             Opened::Vault(vault) => {
                 let device_name = vault.device_name();
+                if let Some(previous) = app.vault.as_mut() {
+                    previous.close_all(now_ms());
+                }
                 app.vault = Some(vault);
                 app.device.last_vault = Some(root);
                 app.device.save()?;
@@ -109,12 +115,65 @@ fn open_work(state: State<AppState>, id: String) -> Result<OpenedWork, String> {
     with_app(&state, |app| open_vault_of(app)?.open_work(&id, now_ms()))
 }
 
+/// Makes a new, empty Work and opens it.
+#[tauri::command]
+fn create_work(state: State<AppState>, id: String) -> Result<OpenedWork, String> {
+    with_app(&state, |app| open_vault_of(app)?.create_work(&id, now_ms()))
+}
+
 #[tauri::command]
 fn close_work(state: State<AppState>, id: String) -> Result<(), String> {
     with_app(&state, |app| {
-        open_vault_of(app)?.close_work(&id);
+        open_vault_of(app)?.close_work(&id, now_ms());
         Ok(())
     })
+}
+
+/// Edits from the editor, in the order they were made.
+#[tauri::command]
+fn edit(state: State<AppState>, id: String, ops: Vec<Op>) -> Result<WorkState, String> {
+    with_app(&state, |app| open_vault_of(app)?.edit(&id, ops, now_ms()))
+}
+
+/// The Author left the Work for now: the Text file is brought up to date.
+#[tauri::command]
+fn leave_work(state: State<AppState>, id: String) -> Result<WorkState, String> {
+    with_app(&state, |app| open_vault_of(app)?.leave(&id, now_ms()))
+}
+
+#[derive(Serialize)]
+struct WorkText {
+    text: String,
+    state: WorkState,
+}
+
+/// The whole text, for an editor that fell out of step with the History.
+#[tauri::command]
+fn work_text(state: State<AppState>, id: String) -> Result<WorkText, String> {
+    with_app(&state, |app| {
+        let (text, state) = open_vault_of(app)?.work_text(&id, now_ms())?;
+        Ok(WorkText { text, state })
+    })
+}
+
+/// What the timer did to a Work, for the editor.
+#[derive(Serialize, Clone)]
+struct WorkStatus {
+    id: String,
+    state: WorkState,
+}
+
+/// About once a second: close bursts after a pause, retry saves, write Text files when due.
+/// It runs here rather than in the interface, whose timers slow down in a background window.
+fn start_timer(handle: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let state = handle.state::<AppState>();
+        let changed = with_app(&state, |app| Ok(app.vault.as_mut().map(|v| v.tick(now_ms())).unwrap_or_default()));
+        for (id, state) in changed.unwrap_or_default() {
+            let _ = handle.emit("work-status", WorkStatus { id, state });
+        }
+    });
 }
 
 #[tauri::command]
@@ -130,7 +189,20 @@ pub fn run() {
             // Device state lives outside the Vault, in this Device's local app data.
             let device = DeviceState::load_or_create(&app.path().app_local_data_dir()?)?;
             app.manage(AppState(Mutex::new(App { device, vault: None })));
+            start_timer(app.handle().clone());
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Quitting: close every open burst, save, and write the Text files.
+            if let WindowEvent::CloseRequested { .. } = event {
+                let state = window.state::<AppState>();
+                let _ = with_app(&state, |app| {
+                    if let Some(vault) = app.vault.as_mut() {
+                        vault.close_all(now_ms());
+                    }
+                    Ok(())
+                });
+            }
         })
         .invoke_handler(tauri::generate_handler![
             startup,
@@ -139,8 +211,12 @@ pub fn run() {
             set_device_name,
             list_works,
             open_work,
+            create_work,
             close_work,
             delete_leftover,
+            edit,
+            leave_work,
+            work_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

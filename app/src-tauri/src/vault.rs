@@ -13,18 +13,12 @@ use wrtier::conflicts::{self, absorb_conflict_copies, conflict_copies, Absorbed}
 use wrtier::doc::Doc;
 use wrtier::ids::DeviceId;
 use wrtier::storage::{self, Probe};
+use crate::work::{Op, OpenWork, WorkState};
 
 /// The file that makes a folder a Vault.
 pub const VAULT_FILE: &str = "vault.db";
 /// Folders at the top of the Vault that hold something other than Works.
 const NOT_WORKS: &[&str] = &["styles", "themes", "fonts"];
-
-/// A Work open in the app: its History, held in memory, and where its files are.
-pub struct OpenWork {
-    pub db: PathBuf,
-    pub typ: PathBuf,
-    pub doc: Doc,
-}
 
 pub struct Vault {
     pub root: PathBuf,
@@ -55,6 +49,8 @@ pub enum EntryKind {
     Newer { version: i64 },
     /// Couldn't be read right now: it may be a Work.
     Unreadable { reason: String },
+    /// A Text file that can't get a History, e.g. because another program's `.db` has its name.
+    Blocked { reason: String },
 }
 
 #[derive(Serialize, Debug)]
@@ -271,6 +267,7 @@ impl Vault {
 
         let mut entries = Vec::new();
         let mut histories = Vec::new();
+        let mut foreign: HashSet<PathBuf> = HashSet::new(); // other programs' databases
         for db in &files.dbs {
             let (id, name) = (self.id_of(db), name_of(db));
             match storage::probe(db) {
@@ -286,7 +283,9 @@ impl Vault {
                     problems.push(self.problem(db, "made by a newer version of the app".into()));
                     entries.push(Entry { id, name, kind: EntryKind::Newer { version } });
                 }
-                Probe::NotHistory => {} // some other program's database
+                Probe::NotHistory => {
+                    foreign.insert(db.clone()); // some other program's: not listed
+                }
                 Probe::Unreadable(reason) => {
                     problems.push(self.problem(db, format!("can't be read right now: {reason}")));
                     entries.push(Entry { id, name, kind: EntryKind::Unreadable { reason } });
@@ -296,10 +295,17 @@ impl Vault {
 
         let dbs: HashSet<&PathBuf> = files.dbs.iter().collect();
         for typ in &files.typs {
-            if dbs.contains(&typ.with_extension("db")) {
+            let (id, name) = (self.id_of(typ), name_of(typ));
+            let db = typ.with_extension("db");
+            if foreign.contains(&db) {
+                // Its History would need that file's name: show it, with why it can't open.
+                let reason = format!("{name}.db next to it belongs to another program, so it can't get a History. Rename one of them.");
+                entries.push(Entry { id, name, kind: EntryKind::Blocked { reason } });
+                continue;
+            }
+            if dbs.contains(&db) {
                 continue; // a Work's own Text file
             }
-            let (id, name) = (self.id_of(typ), name_of(typ));
             let kind = match std::fs::read_to_string(typ) {
                 Ok(text) => match histories.iter().find(|db| storage::wrote_text(db, &text).unwrap_or(false)) {
                     Some(db) => EntryKind::Leftover { of: self.id_of(db) },
@@ -316,52 +322,30 @@ impl Vault {
         Listing { entries, problems }
     }
 
-    /// Absorbs a Work's Conflict copies: into its open History if it's open, otherwise into
-    /// one loaded just for this.
+    /// Absorbs the Conflict copies of a Work that isn't open, into a History loaded just for
+    /// this. (An open Work's copies wait until it's closed or opened again: taking them in
+    /// changes the text under the editor, which needs the file watcher's patches.)
     fn absorb(&mut self, db: &Path, typ: &Path, now_ms: u64, problems: &mut Vec<SyncProblem>) {
         let (id, name, me) = (self.id_of(db), self.device_name(), self.device);
-        let report = |vault: &Vault, absorbed: Absorbed, problems: &mut Vec<SyncProblem>| {
-            for (path, reason) in absorbed.kept {
-                problems.push(vault.problem(&path, reason));
+        if self.works.contains_key(&id) {
+            return;
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| -> Result<Absorbed, String> {
+            let (_, mut doc) = storage::load(db, me).map_err(err)?;
+            let absorbed = absorb_conflict_copies(db, typ, &mut doc, now_ms);
+            if absorbed.changes.iter().any(|c| c.id.device == me) {
+                record_name(db, &mut doc, name.as_deref(), now_ms)?;
             }
-        };
-        if let Some(work) = self.works.get_mut(&id) {
-            let result = catch_unwind(AssertUnwindSafe(|| -> Result<Absorbed, String> {
-                let absorbed = absorb_conflict_copies(db, typ, &mut work.doc, now_ms);
-                if absorbed.changes.iter().any(|c| c.id.device == me) {
-                    record_name(db, &mut work.doc, name.as_deref(), now_ms)?;
-                }
-                storage::write_text_file(db, typ, &work.doc, now_ms).map_err(err)?;
-                Ok(absorbed)
-            }));
-            match result {
-                Ok(Ok(absorbed)) => report(self, absorbed, problems),
-                Ok(Err(e)) => problems.push(self.problem(db, e)),
-                Err(panic) => {
-                    // Its state in memory may be half-updated: throw it away and reopen it from disk.
-                    let what = panic_message(panic.as_ref());
-                    self.works.remove(&id);
-                    let reason = match self.open_work(&id, now_ms) {
-                        Ok(_) => format!("something went wrong taking in another Device's copy ({what}); the Work was reopened from disk"),
-                        Err(e) => format!("something went wrong taking in another Device's copy ({what}), and the Work couldn't be reopened: {e}"),
-                    };
-                    problems.push(self.problem(db, reason));
+            Ok(absorbed)
+        }));
+        match result {
+            Ok(Ok(absorbed)) => {
+                for (path, reason) in absorbed.kept {
+                    problems.push(self.problem(&path, reason));
                 }
             }
-        } else {
-            let result = catch_unwind(AssertUnwindSafe(|| -> Result<Absorbed, String> {
-                let (_, mut doc) = storage::load(db, me).map_err(err)?;
-                let absorbed = absorb_conflict_copies(db, typ, &mut doc, now_ms);
-                if absorbed.changes.iter().any(|c| c.id.device == me) {
-                    record_name(db, &mut doc, name.as_deref(), now_ms)?;
-                }
-                Ok(absorbed)
-            }));
-            match result {
-                Ok(Ok(absorbed)) => report(self, absorbed, problems),
-                Ok(Err(e)) => problems.push(self.problem(db, e)),
-                Err(panic) => problems.push(self.problem(db, format!("something went wrong taking in another Device's copy: {}", panic_message(panic.as_ref())))),
-            }
+            Ok(Err(e)) => problems.push(self.problem(db, e)),
+            Err(panic) => problems.push(self.problem(db, format!("something went wrong taking in another Device's copy: {}", panic_message(panic.as_ref())))),
         }
     }
 
@@ -369,7 +353,7 @@ impl Vault {
     pub fn open_work(&mut self, id: &str, now_ms: u64) -> Result<OpenedWork, String> {
         let name = id.rsplit('/').next().unwrap_or(id).to_string();
         if let Some(work) = self.works.get(id) {
-            return Ok(OpenedWork { id: id.to_string(), name, text: work.doc.text(), problems: Vec::new() });
+            return Ok(OpenedWork { id: id.to_string(), name, text: work.text(), problems: Vec::new() });
         }
         let (db, typ) = self.paths(id)?;
         let (me, device_name) = (self.device, self.device_name());
@@ -414,12 +398,114 @@ impl Vault {
             Err(panic) => return Err(format!("Something went wrong opening {name}: {}", panic_message(panic.as_ref()))),
         };
         let text = doc.text();
-        self.works.insert(id.to_string(), OpenWork { db, typ, doc });
+        self.works.insert(id.to_string(), OpenWork::new(db, typ, doc, now_ms));
         Ok(OpenedWork { id: id.to_string(), name, text, problems })
     }
 
-    pub fn close_work(&mut self, id: &str) {
+    /// Makes a new, empty Work and opens it. `id` is its name, or a path inside the Vault
+    /// ("Short stories/Rain"), whose folders are made if they don't exist yet.
+    pub fn create_work(&mut self, id: &str, now_ms: u64) -> Result<OpenedWork, String> {
+        let parts: Vec<&str> = id.split('/').map(str::trim).collect();
+        for (i, part) in parts.iter().enumerate() {
+            check_name(part, i == 0 && parts.len() > 1, i == 0 && parts.len() == 1)?;
+        }
+        let id = parts.join("/");
+        let (db, typ) = self.paths(&id)?;
+        if db.exists() && storage::probe(&db) == Probe::NotHistory {
+            return Err(format!("{id}.db already exists in the Vault and belongs to another program. Pick another name."));
+        }
+        if db.exists() || typ.exists() {
+            return Err(format!("There's already a Work called {id}."));
+        }
+        if let Some(dir) = db.parent() {
+            std::fs::create_dir_all(dir).map_err(err)?;
+        }
+        let doc = Doc::new(self.device);
+        storage::save(&db, &[], &doc).map_err(err)?;
+        storage::write_text_file(&db, &typ, &doc, now_ms).map_err(err)?;
+        self.open_work(&id, now_ms)
+    }
+
+    /// Runs `f` on an open Work. If the engine panics, that Work's state in memory may be
+    /// half-updated: it's thrown away (never saved) and the Work is reopened from disk.
+    fn with_work<T>(&mut self, id: &str, now_ms: u64, f: impl FnOnce(&mut OpenWork, Option<&str>) -> Result<T, String>) -> Result<T, String> {
+        let name = self.device_name();
+        let work = self.works.get_mut(id).ok_or_else(|| format!("{id} isn't open."))?;
+        match catch_unwind(AssertUnwindSafe(|| f(work, name.as_deref()))) {
+            Ok(result) => result,
+            Err(panic) => {
+                let what = panic_message(panic.as_ref());
+                self.works.remove(id);
+                Err(match self.open_work(id, now_ms) {
+                    Ok(_) => format!("Something went wrong in {id} ({what}). It was reopened from disk; the last few seconds of typing may be missing."),
+                    Err(e) => format!("Something went wrong in {id} ({what}), and it couldn't be reopened: {e}"),
+                })
+            }
+        }
+    }
+
+    /// Edits from the editor. Any edit elsewhere means a cut waiting in another Work won't be
+    /// pasted there: it's recorded as a deletion.
+    pub fn edit(&mut self, id: &str, ops: Vec<Op>, now_ms: u64) -> Result<WorkState, String> {
+        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. })) {
+            let others: Vec<String> = self.works.iter().filter(|(other, w)| *other != id && w.has_cut()).map(|(o, _)| o.clone()).collect();
+            for other in others {
+                let _ = self.with_work(&other, now_ms, |w, _| {
+                    w.close_burst(now_ms);
+                    w.save();
+                    Ok(())
+                });
+            }
+        }
+        self.with_work(id, now_ms, |w, name| w.edit(ops, name, now_ms))
+    }
+
+    /// The Author left the Work for now (another Work, or another window).
+    pub fn leave(&mut self, id: &str, now_ms: u64) -> Result<WorkState, String> {
+        self.with_work(id, now_ms, |w, _| {
+            w.leave(now_ms);
+            Ok(w.state(Vec::new()))
+        })
+    }
+
+    /// The text as the History has it now, for an editor that fell out of step.
+    pub fn work_text(&mut self, id: &str, now_ms: u64) -> Result<(String, WorkState), String> {
+        self.with_work(id, now_ms, |w, _| Ok((w.text(), w.state(Vec::new()))))
+    }
+
+    /// The timer, about once a second: closes bursts after a pause, retries failed saves and
+    /// writes Text files when due. Returns the Works whose state the editor should hear about.
+    pub fn tick(&mut self, now_ms: u64) -> Vec<(String, WorkState)> {
+        let ids: Vec<String> = self.works.keys().cloned().collect();
+        let mut changed = Vec::new();
+        for id in ids {
+            let result = self.with_work(&id, now_ms, |w, _| {
+                let before = w.state(Vec::new());
+                w.tick(now_ms);
+                let after = w.state(Vec::new());
+                Ok((after != before).then_some(after))
+            });
+            if let Ok(Some(state)) = result {
+                changed.push((id, state));
+            }
+        }
+        changed
+    }
+
+    pub fn close_work(&mut self, id: &str, now_ms: u64) {
+        let _ = self.with_work(id, now_ms, |w, _| {
+            w.close(now_ms);
+            Ok(())
+        });
         self.works.remove(id);
+    }
+
+    /// Quitting, or opening another Vault: every open Work is closed and saved.
+    pub fn close_all(&mut self, now_ms: u64) {
+        let ids: Vec<String> = self.works.keys().cloned().collect();
+        for id in ids {
+            self.close_work(&id, now_ms);
+        }
     }
 
     /// Deletes a Text file left behind by a renamed Work, after checking that it still is one.
@@ -436,6 +522,37 @@ impl Vault {
         }
         std::fs::remove_file(&typ).map_err(err)
     }
+}
+
+/// Can `name` be part of a new Work's path? It must be a valid file name on Windows, Debian and
+/// Android, and not something the Vault browser skips. `top_folder`: the first folder in the
+/// path; `top_file`: a Work right in the Vault's folder.
+fn check_name(name: &str, top_folder: bool, top_file: bool) -> Result<(), String> {
+    const RESERVED: &[&str] = &["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+                                "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"];
+    if name.is_empty() {
+        return Err("A Work needs a name.".into());
+    }
+    if let Some(c) = name.chars().find(|c| r#"<>:"\|?*"#.contains(*c) || c.is_control()) {
+        return Err(format!("A name can't contain {c:?}."));
+    }
+    if name.ends_with('.') {
+        return Err("A name can't end with a dot.".into());
+    }
+    if name.starts_with('.') || name.ends_with(".images") {
+        return Err(format!("{name:?} would be hidden from the Vault browser."));
+    }
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    if RESERVED.contains(&stem.as_str()) {
+        return Err(format!("{name:?} is reserved by Windows."));
+    }
+    if top_folder && NOT_WORKS.contains(&name.to_lowercase().as_str()) {
+        return Err(format!("The {name} folder is for the app's own files, not Works."));
+    }
+    if top_file && name.eq_ignore_ascii_case("vault") {
+        return Err("\"vault\" is the Vault's own file.".into());
+    }
+    Ok(())
 }
 
 /// A file's name without its extension.
@@ -647,6 +764,49 @@ mod tests {
         work(root, "Short stories/Draft 1.5", "dots", ME);
         assert_eq!(kinds(&vault.list(2000)), vec![("Short stories/Draft 1.5", &EntryKind::Work)]);
         assert_eq!(vault.open_work("Short stories/Draft 1.5", 2000).unwrap().text, "dots");
+    }
+
+    #[test]
+    fn a_new_work_is_empty_open_and_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        let opened = vault.create_work("Rain", 1000).unwrap();
+        assert_eq!((opened.id.as_str(), opened.text.as_str()), ("Rain", ""));
+        assert!(root.join("Rain.db").exists() && root.join("Rain.typ").exists());
+        vault.create_work(" Short stories / The Long Night ", 1000).unwrap();
+        assert_eq!(kinds(&vault.list(2000)), vec![
+            ("Rain", &EntryKind::Work),
+            ("Short stories/The Long Night", &EntryKind::Work),
+        ]);
+        assert!(vault.create_work("Rain", 3000).is_err(), "already there");
+    }
+
+    #[test]
+    fn a_text_file_next_to_another_programs_database_is_shown_blocked() {
+        // Like the Phase 0c spike's test.db, with a test.typ added by hand.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        create_foreign_db(&root.join("test.db"));
+        std::fs::write(root.join("test.typ"), "").unwrap();
+        let listing = vault.list(1000);
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].id, "test");
+        assert!(matches!(listing.entries[0].kind, EntryKind::Blocked { .. }));
+        let refused = vault.create_work("test", 2000).unwrap_err();
+        assert!(refused.contains("another program"), "{refused}");
+    }
+
+    #[test]
+    fn a_new_works_name_must_work_everywhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open(dir.path());
+        for bad in ["", "a:b", "what?", "end.", ".hidden", "Rain.images", "CON", "nul.txt", "styles/Rain", "vault", "a//b", "../out"] {
+            assert!(vault.create_work(bad, 1000).is_err(), "{bad:?}");
+        }
+        assert!(vault.create_work("Draft 1.5", 1000).is_ok());
+        assert!(vault.create_work("Notes/vault", 1000).is_ok(), "only the top-level name is the Vault's");
     }
 
     #[test]

@@ -9,12 +9,10 @@ use std::fmt;
 
 /// Where the text's two-unit characters are, so converting a position is a binary search.
 /// With none (most text), both directions are the identity.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Positions {
     /// The character index of every two-unit character, in order.
-    wide_chars: Vec<usize>,
-    /// The UTF-16 position where each of those characters starts.
-    wide_starts: Vec<usize>,
+    wide: Vec<usize>,
     chars: usize,
 }
 
@@ -40,8 +38,7 @@ impl Positions {
         let mut positions = Positions::default();
         for (i, c) in text.chars().enumerate() {
             if c.len_utf16() == 2 {
-                positions.wide_starts.push(i + positions.wide_chars.len());
-                positions.wide_chars.push(i);
+                positions.wide.push(i);
             }
             positions.chars = i + 1;
         }
@@ -50,7 +47,18 @@ impl Positions {
 
     /// The text's length in UTF-16 code units.
     pub fn utf16_len(&self) -> usize {
-        self.chars + self.wide_chars.len()
+        self.chars + self.wide.len()
+    }
+
+    /// The number of two-unit characters that end at or before UTF-16 position `utf16`.
+    /// (The j-th one starts at `wide[j] + j`, which grows with j, so this is a binary search.)
+    fn wide_ending_by(&self, utf16: usize) -> usize {
+        let (mut lo, mut hi) = (0, self.wide.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.wide[mid] + mid + 2 <= utf16 { lo = mid + 1 } else { hi = mid }
+        }
+        lo
     }
 
     /// A position from the interface as a character index, if the engine may see it.
@@ -58,9 +66,8 @@ impl Positions {
         if utf16 > self.utf16_len() {
             return Err(PositionError::PastTheEnd { position: utf16, len: self.utf16_len() });
         }
-        // Two-unit characters that end at or before the position.
-        let before = self.wide_starts.partition_point(|&start| start + 2 <= utf16);
-        if self.wide_starts.get(before).is_some_and(|&start| start + 1 == utf16) {
+        let before = self.wide_ending_by(utf16);
+        if self.wide.get(before).is_some_and(|&i| i + before + 1 == utf16) {
             return Err(PositionError::InsideACharacter { position: utf16 });
         }
         Ok(utf16 - before)
@@ -68,8 +75,40 @@ impl Positions {
 
     /// A character index from the engine as a position for the interface.
     pub fn to_utf16(&self, char_index: usize) -> usize {
-        char_index + self.wide_chars.partition_point(|&i| i < char_index)
+        char_index + self.wide.partition_point(|&i| i < char_index)
     }
+
+    /// Keeps up with an edit: `removed` characters at character index `at` replaced by
+    /// `inserted`. Only the two-unit characters after the edit shift, and those are rare.
+    pub fn edit(&mut self, at: usize, removed: usize, inserted: &str) {
+        let start = self.wide.partition_point(|&i| i < at);
+        let end = self.wide.partition_point(|&i| i < at + removed);
+        let added = inserted.chars().count();
+        for i in &mut self.wide[end..] {
+            *i = *i + added - removed;
+        }
+        let new = inserted.chars().enumerate().filter(|(_, c)| c.len_utf16() == 2).map(|(i, _)| at + i);
+        self.wide.splice(start..end, new);
+        self.chars = self.chars + added - removed;
+    }
+}
+
+/// The byte index in `text` of UTF-16 position `utf16` (or the end).
+pub fn byte_at_utf16(text: &str, utf16: usize) -> usize {
+    let mut units = 0;
+    for (i, c) in text.char_indices() {
+        if units >= utf16 {
+            return i;
+        }
+        units += c.len_utf16();
+    }
+    text.len()
+}
+
+/// `text` with UTF-16 positions `from..to` replaced by `insert`.
+pub fn replace_utf16(text: &str, from: usize, to: usize, insert: &str) -> String {
+    let (a, b) = (byte_at_utf16(text, from), byte_at_utf16(text, to));
+    format!("{}{}{}", &text[..a], insert, &text[b..])
 }
 
 #[cfg(test)]
@@ -126,5 +165,33 @@ mod tests {
         let p = Positions::new("");
         assert_eq!(p.to_char(0), Ok(0));
         assert!(p.to_char(1).is_err());
+    }
+
+    #[test]
+    fn edits_keep_it_the_same_as_starting_over() {
+        // A fixed-seed run of random edits over text with emoji, checked against a fresh scan.
+        let pieces = ["a", "😊", "bc", "𝄞x", "", "漢字😊", "\n"];
+        let mut text: Vec<char> = "start 😊 here".chars().collect();
+        let mut p = Positions::new(&text.iter().collect::<String>());
+        let mut seed: u64 = 42;
+        let mut next = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n.max(1)
+        };
+        for _ in 0..500 {
+            let at = next(text.len() + 1);
+            let removed = next(text.len() - at + 1).min(3);
+            let inserted = pieces[next(pieces.len())];
+            text.splice(at..at + removed, inserted.chars());
+            p.edit(at, removed, inserted);
+            assert_eq!(p, Positions::new(&text.iter().collect::<String>()));
+        }
+    }
+
+    #[test]
+    fn replacing_by_utf16_position() {
+        assert_eq!(replace_utf16("a😊b", 3, 4, "X"), "a😊X");
+        assert_eq!(replace_utf16("a😊b", 1, 3, ""), "ab");
+        assert_eq!(replace_utf16("ab", 2, 2, "!"), "ab!");
     }
 }
