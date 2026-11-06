@@ -6,6 +6,8 @@ import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, dropCursor, keymap } from "@codemirror/view";
 import { history, standardKeymap } from "@codemirror/commands";
 import { WorkSync, type WorkState } from "./sync";
+import { formattedView } from "./formatted";
+import { toggleMarkup } from "./shortcuts";
 
 export type OpenedWork = { id: string; name: string; text: string; problems: { path: string; reason: string }[]; notice: string | null };
 
@@ -21,6 +23,8 @@ export type TabEvents = {
 };
 
 const historyCompartment = new Compartment();
+/** The Formatted view, or nothing (the Raw view). */
+const viewCompartment = new Compartment();
 
 /** One open Work. */
 class Tab {
@@ -62,6 +66,8 @@ class Tab {
       { key: "Mod-z", run: () => this.sync.undo(), preventDefault: true },
       { key: "Mod-Shift-z", run: () => this.sync.redo(), preventDefault: true },
       { key: "Mod-y", run: () => this.sync.redo(), preventDefault: true },
+      { key: "Mod-b", run: toggleMarkup("strong"), preventDefault: true },
+      { key: "Mod-i", run: toggleMarkup("emph"), preventDefault: true },
     ]);
     this.view = new EditorView({
       parent: editor,
@@ -74,6 +80,7 @@ class Tab {
           // Only the basics: no shortcuts that move lines, which would bypass Moves.
           keymap.of(standardKeymap),
           dropCursor(),
+          viewCompartment.of(tabs.formatted ? formattedView() : []),
           EditorView.updateListener.of((update) => {
             for (const tr of update.transactions) this.sync.track(tr);
           }),
@@ -116,6 +123,16 @@ class Tab {
 export class Tabs {
   private open: Tab[] = [];
   private front: Tab | null = null;
+  /** The Formatted view (markup hidden except at the cursor), or the Raw view. */
+  formatted = true;
+
+  /** Switches every tab between the Formatted and the Raw view. */
+  setFormatted(on: boolean) {
+    this.formatted = on;
+    for (const tab of this.open) {
+      tab.view.dispatch({ effects: viewCompartment.reconfigure(on ? formattedView() : []) });
+    }
+  }
 
   constructor(
     readonly bar: HTMLElement,

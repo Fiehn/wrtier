@@ -94,6 +94,7 @@ function act(run: () => Promise<unknown>) {
 const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $("status"), moved: $("moved") }, {
   changed: () => {
     $("empty").hidden = tabs.active !== null;
+    $("view-mode").hidden = tabs.active === null;
     rememberSoon();
     highlightOpen();
   },
@@ -394,6 +395,31 @@ window.addEventListener("keydown", (e) => {
   } else if (mod && !e.shiftKey && e.key.toLowerCase() === "w" && tabs.active) {
     e.preventDefault();
     act(() => tabs.close(tabs.active!));
+  }
+}, { capture: true });
+
+// ---- Formatted and Raw view (Ctrl+E), remembered on this Device ----
+
+function setFormatted(on: boolean) {
+  tabs.setFormatted(on);
+  $("view-mode").textContent = on ? "Raw view" : "Formatted view";
+  try {
+    localStorage.setItem("view", on ? "formatted" : "raw");
+  } catch {
+    // not remembered, then: no harm done
+  }
+}
+
+try {
+  setFormatted(localStorage.getItem("view") !== "raw");
+} catch {
+  setFormatted(true);
+}
+$("view-mode").addEventListener("click", () => setFormatted(!tabs.formatted));
+window.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "e" && tabs.active) {
+    e.preventDefault();
+    setFormatted(!tabs.formatted);
   }
 }, { capture: true });
 

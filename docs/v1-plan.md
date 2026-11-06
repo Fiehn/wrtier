@@ -52,6 +52,7 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 - Story element chips, Reviewer-coloured Comment highlights, and optional "who/when" colouring by Session.
 - The platform's built-in spellcheck can be switched on or off.
 - Moving text in the editor: dragging a selection is a Move, and so is cutting text and then pasting exactly that text in the same Work. Until the paste, the cut text is only hidden (like a deletion burst, but it doesn't close on a pause); any other edit, pasting different text, pasting in another Work or closing the Work records the cut as a deletion. Keyboard shortcuts for moving paragraphs come in Phase 6.
+- Ctrl+B and Ctrl+I type `*…*` and `_…_` around the selection (widened to whole words, since Typst ignores them inside a word), take them off text that already has them, or type a pair to type into. The words keep their History: only the markers are inserted.
 - Ctrl+Z: while a typing burst is open, undo goes step by step inside it (nothing there is recorded yet), and its undo steps are cleared when it closes. After that, Ctrl+Z reverts this Device's latest Change still in effect and Ctrl+Shift+Z restores it, so undone and redone text keeps its History and Comments.
 
 **Comments**
