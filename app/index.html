@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>Wrtier</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header>
+          <button id="choose-vault" type="button">Open Vault…</button>
+          <div id="vault-root" class="muted"></div>
+        </header>
+        <ul id="works"></ul>
+      </aside>
+
+      <main>
+        <div id="problems" hidden></div>
+        <div id="error" hidden></div>
+        <h1 id="work-title"></h1>
+        <div id="editor"></div>
+        <p id="empty" class="muted">Open a Vault, then choose a Work on the left.</p>
+      </main>
+    </div>
+
+    <dialog id="ask-create">
+      <form method="dialog">
+        <p>This folder isn't a Vault yet:</p>
+        <p id="ask-create-path" class="path"></p>
+        <p class="muted">Making it one adds a <code>vault.db</code> file to it.</p>
+        <menu>
+          <button value="cancel">Cancel</button>
+          <button value="yes">Make it a Vault</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="ask-name">
+      <form method="dialog">
+        <p>What should this device be called?</p>
+        <p class="muted">The History shows it next to everything you write here.</p>
+        <input id="name-input" required maxlength="100" autocomplete="off" />
+        <menu>
+          <button value="ok">Save</button>
+        </menu>
+      </form>
+    </dialog>
+  </body>
+</html>

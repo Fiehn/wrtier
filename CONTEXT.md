@@ -127,6 +127,20 @@ _Avoid_: conflict, merge error, warning
 A duplicate of a **History** file made by the sync tool when two **Devices** changed it before syncing; it is expected, not an error.
 _Avoid_: corruption, sync error
 
+**Sync problem**:
+A file in the **Vault** the app couldn't take in, such as a **Conflict copy** it couldn't merge or a **History** from a newer version of the app; it is kept untouched and reported until it's resolved.
+_Avoid_: conflict, sync error, merge notice
+
+### Settings
+
+**Vault settings**:
+Preferences kept in the **Vault** and shared by every **Device**, such as the app theme or the editor font size; any **Device** can override one for itself.
+_Avoid_: preferences, shared settings, config
+
+**Device state**:
+What one **Device** remembers only for itself and never syncs, such as its **Device** ID, open tabs and cursor positions.
+_Avoid_: device settings, local settings
+
 ## Relationships
 
 - A **Work** has exactly one **History** and one **Text file**.
@@ -168,10 +182,12 @@ _Avoid_: corruption, sync error
 - A **Text file** is always derived from its **History**, never the other way round.
 - An **External edit** is recorded into the **History** as a new **Change**; it never replaces the **History**.
 - An **External edit** is compared against the text the app last wrote to that **Text file**, so it merges as if it came from a **Device** that had been offline since then.
-- A **Conflict copy** is merged back into its **History** by whichever **Device** sees it first, then deleted.
+- A **Conflict copy** is merged back into its **History** by whichever **Device** sees it first, then deleted, whether or not its **Work** is open. One that can't be merged is kept as a **Sync problem**.
+- A **Merge notice** is about text inside a **Work**; a **Sync problem** is about a file in the **Vault**.
 - Every **Change** records which **Device** made it and when. **Changes** are ordered by when they were made, and a **Device** never places a new **Change** before one it has already seen.
-- A **Work**'s **History** records a readable name for every **Device** that changed it.
-- Settings that belong to one **Device** (app theme, window layout) are never stored in the **Vault**.
+- A **Work**'s **History** records a readable name for every **Device** that changed it, so the file can be read on its own. The app itself always shows a **Device**'s current name from the **Vault**.
+- **Device state** is never stored in the **Vault**. **Vault settings** are, including each **Device**'s overrides of them.
+- A **Device** knows only its own ID; it finds its name and overrides in the **Vault** by that ID.
 - Merging two copies of a **History** keeps every **Change** from both; nothing is ever lost or chosen between.
 
 ## Example dialogue
@@ -192,4 +208,5 @@ _Avoid_: corruption, sync error
 - "document" was used for both a whole novel and a single chapter. Resolved: the whole thing is a **Work**; its sections are **Chapters**.
 - "preview" was used for both the formatted editor and the compiled pages. Resolved: the editor mode is the **Formatted view**; the compiled pages are the **Page preview**.
 - "styling" and "theming" were both used for appearance. Resolved: a **Style** is about the printed page; "theme" means only the app's own appearance.
+- "Device settings" was used both for what one Device keeps locally and for preferences such as the theme. Resolved: what never syncs is **Device state**; preferences are **Vault settings**, which a **Device** can override for itself.
 - "editor" can mean the app's text-editing area or a person who reviews the **Work**. Resolved: a person is always a **Reviewer** (with "editor" as a role label); "editor" on its own means the app's text-editing area.

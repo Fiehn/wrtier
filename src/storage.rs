@@ -1,6 +1,6 @@
 ﻿use std::error::Error;
 use std::path::Path;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use crate::change::{Change, ChangeKind, CharRange, InsertRun, NoticeKey, Span};
 use crate::doc::Doc;
 use crate::ids::{ChangeId, CharId, Side, DeviceId, Hlc};
@@ -55,6 +55,36 @@ CREATE TABLE deletions (
 /// The newest storage version this app writes. A file with a higher one was written by a newer
 /// app, which may store things this one doesn't understand, so it isn't touched.
 pub const STORAGE_VERSION: i64 = 8;
+
+/// What a `.db` file is, for listing a Vault.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// A History this app can open.
+    History,
+    /// A History written by a newer version of the app (this storage version): it can't be opened.
+    NewerHistory(i64),
+    /// Some other program's database, or an empty file: not a Work.
+    NotHistory,
+    /// Couldn't be read (damaged, or being written right now): it may well be a Work.
+    Unreadable(String),
+}
+
+/// Works out what a file is without changing it: opened read-only, so it's never created,
+/// migrated or locked for writing. The same rule as `migrate`, next to the storage version.
+pub fn probe(path: &Path) -> Probe {
+    let inner = || -> Result<Probe> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let has_changes: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'changes')", [], |row| row.get(0))?;
+        Ok(match (has_changes, version) {
+            (true, v) if v > STORAGE_VERSION => Probe::NewerHistory(v),
+            (true, v) if v >= 1 => Probe::History,
+            _ => Probe::NotHistory,
+        })
+    };
+    inner().unwrap_or_else(|e| Probe::Unreadable(e.to_string()))
+}
 
 // Inner functions take a connection
 fn migrate(conn: &Connection) -> Result<()> {
@@ -761,6 +791,9 @@ pub fn write_text_file(db: &Path, text_file: &Path, doc: &Doc, now_ms: u64) -> R
         params![text_hash(&text), version_to_str(&doc.version()), doc.device().to_string(), now_ms as i64],
     )?;
     drop(conn); // recorded before the file exists, so a file the app wrote is always recognised
+    if std::fs::read(text_file).is_ok_and(|old| old == text.as_bytes()) {
+        return Ok(()); // already says exactly this: don't touch it, so the sync tool has nothing to send
+    }
     let partial = text_file.with_extension("typ.writing");
     std::fs::write(&partial, &text)?;
     std::fs::rename(&partial, text_file)?;
@@ -786,6 +819,18 @@ pub fn import_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64)
     let changes = doc.import_text(base.as_deref(), &text, now_ms);
     save(db, &changes, doc)?;
     Ok(changes)
+}
+
+/// Did this History record writing a Text file with exactly `text`, on any Device?
+/// Read-only. Used to recognise a Text file left behind when its Work was renamed.
+pub fn wrote_text(db: &Path, text: &str) -> Result<bool> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    let has_table: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'text_files')", [], |r| r.get(0))?;
+    if !has_table {
+        return Ok(false); // from before Text files were recorded
+    }
+    Ok(conn.query_row("SELECT EXISTS (SELECT 1 FROM text_files WHERE hash = ?1)", [text_hash(text)], |r| r.get(0))?)
 }
 
 /// Keeps a Work's Text file in step: records an External edit if there is one, then writes the
@@ -1133,5 +1178,62 @@ mod test {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(moved, vec!["cd", "cd", "X"]);
+    }
+
+    #[test]
+    fn probing_tells_a_history_from_other_files_without_changing_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = dir.path().join("work.db");
+        let mut doc = Doc::new(DeviceId(1));
+        save(&history, &[doc.insert_local(0, "abc", 1000)], &doc).unwrap();
+        assert_eq!(probe(&history), Probe::History);
+
+        let newer = dir.path().join("newer.db");
+        save(&newer, &[], &Doc::new(DeviceId(1))).unwrap();
+        Connection::open(&newer).unwrap().execute_batch(&format!("PRAGMA user_version = {}", STORAGE_VERSION + 1)).unwrap();
+        assert_eq!(probe(&newer), Probe::NewerHistory(STORAGE_VERSION + 1));
+
+        // Some other program's database, even one that sets a version of its own.
+        let foreign = dir.path().join("foreign.db");
+        Connection::open(&foreign).unwrap().execute_batch("CREATE TABLE rows (x TEXT); PRAGMA user_version = 3;").unwrap();
+        let before = std::fs::read(&foreign).unwrap();
+        assert_eq!(probe(&foreign), Probe::NotHistory);
+        assert_eq!(std::fs::read(&foreign).unwrap(), before, "left exactly as it was");
+
+        let empty = dir.path().join("empty.db");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(probe(&empty), Probe::NotHistory);
+
+        let garbage = dir.path().join("garbage.db");
+        std::fs::write(&garbage, b"this is not a database at all, just some text that is long enough").unwrap();
+        assert!(matches!(probe(&garbage), Probe::Unreadable(_)));
+
+        let missing = dir.path().join("missing.db");
+        assert!(matches!(probe(&missing), Probe::Unreadable(_)));
+        assert!(!missing.exists(), "probing never creates a file");
+    }
+
+    #[test]
+    fn a_history_knows_the_text_files_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, typ) = (dir.path().join("work.db"), dir.path().join("work.typ"));
+        let mut doc = Doc::new(DeviceId(1));
+        save(&db, &[doc.insert_local(0, "Once upon a time", 1000)], &doc).unwrap();
+        write_text_file(&db, &typ, &doc, 2000).unwrap();
+        assert!(wrote_text(&db, "Once upon a time").unwrap());
+        assert!(!wrote_text(&db, "Once upon a time, edited").unwrap());
+    }
+
+    #[test]
+    fn an_unchanged_text_file_is_not_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, typ) = (dir.path().join("work.db"), dir.path().join("work.typ"));
+        let mut doc = Doc::new(DeviceId(1));
+        save(&db, &[doc.insert_local(0, "abc", 1000)], &doc).unwrap();
+        write_text_file(&db, &typ, &doc, 2000).unwrap();
+        let written = std::fs::metadata(&typ).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_text_file(&db, &typ, &doc, 3000).unwrap();
+        assert_eq!(std::fs::metadata(&typ).unwrap().modified().unwrap(), written);
     }
 }

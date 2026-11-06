@@ -53,6 +53,15 @@ fn is_conflict_name(name: &str, stem: &str, ext: &str) -> bool {
     })
 }
 
+/// The file a Conflict copy is a copy of (`Rain.sync-conflict-…-ABC.db` → `Rain.db`, next to
+/// it), or None if `copy` isn't named like a Conflict copy.
+pub fn main_of(copy: &Path) -> Option<PathBuf> {
+    let name = copy.file_name()?.to_str()?;
+    let stem = &name[..name.find(".sync-conflict-")?];
+    let (_, ext) = name.rsplit_once('.')?;
+    (!stem.is_empty() && is_conflict_name(name, stem, ext)).then(|| copy.with_file_name(format!("{stem}.{ext}")))
+}
+
 /// What absorbing the Conflict copies did.
 #[derive(Debug, Default)]
 pub struct Absorbed {
@@ -133,6 +142,19 @@ mod tests {
         for name in no {
             assert!(!is_conflict_name(name, "test", "db"), "{name}");
         }
+    }
+
+    #[test]
+    fn a_copy_names_its_main_file() {
+        let main = |name: &str| main_of(Path::new("vault/Short stories").join(name).as_path())
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned());
+        assert_eq!(main("Rain.sync-conflict-20261105-082020-JGMDN7C.db").as_deref(), Some("Rain.db"));
+        assert_eq!(main("The Long Night.sync-conflict-20261105-082020-JGMDN7C.typ").as_deref(), Some("The Long Night.typ"));
+        assert_eq!(main("Rain.sync-conflict-20261105-082020-JGMDN7C.sync-conflict-20261106-101500-US2Y42W.db").as_deref(), Some("Rain.db"));
+        assert_eq!(main("Rain.db"), None);
+        assert_eq!(main("Rain.sync-conflict-bad.db"), None);
+        assert_eq!(main("Rain.sync-conflict-20261105-082020-JGMDN7C"), None); // no extension
+        assert_eq!(main(".sync-conflict-20261105-082020-JGMDN7C.db"), None);  // no name
     }
 
     /// A Vault folder with a Work `work.db`/`work.typ`, written by the laptop.

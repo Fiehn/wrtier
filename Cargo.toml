@@ -12,3 +12,24 @@ sha2 = "0.10"     # recognising Text file contents the app wrote itself
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
+
+# The History engine (this crate) and the Tauri app share one target folder and lock file.
+[workspace]
+members = ["app/src-tauri"]
+exclude = ["spikes"]  # throwaway Phase 0 code, built on its own
+
+# Profiles only take effect here at the workspace root; members' profiles are ignored.
+
+# Build libraries optimised even in dev builds, or Typst runs 10–50x slower (Phase 0b).
+[profile.dev.package."*"]
+opt-level = 3
+
+# Smaller, faster app builds: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+# Not "abort" (the Tauri template's default): an unexpected panic in the engine must not close
+# the app. The app catches it, throws that Work's in-memory state away and reopens it from disk.
+panic = "unwind"
+strip = true

@@ -23,15 +23,16 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 - A later Change depends on an earlier one only if it inserted text strictly inside text the earlier Change wrote (with that Change's characters on both sides), and so on transitively. Deletions and Moves are never dependents.
 - A Change is in effect unless a Revert that is itself in effect targets it. "Restore this Change" reverts every in-effect Revert of it at once, so a Change reverted on two Devices offline comes back with one action.
 - How Moves, positions and Change order work: [ADR 0008](adr/0008-moves-are-ranges-over-a-fugue-position-tree.md).
-- One `.db` per Work. Every Device writes to it, and Conflict copies are merged back and deleted ([ADR 0002](adr/0002-one-self-healing-database-per-work.md)). History copies are merged first; then Text file copies are read like External edits (a copy another Device wrote is recognised and simply deleted). A copy that can't be absorbed (not a History, written by a newer version of the app, two Devices sharing a Device ID, or damaged) is never deleted: it's kept and reported.
+- One `.db` per Work. Every Device writes to it, and Conflict copies are merged back and deleted ([ADR 0002](adr/0002-one-self-healing-database-per-work.md)). History copies are merged first; then Text file copies are read like External edits (a copy another Device wrote is recognised and simply deleted). A copy that can't be absorbed (not a History, written by a newer version of the app, two Devices sharing a Device ID, or damaged) is never deleted: it's kept and reported as a Sync problem. Conflict copies are absorbed as soon as the app sees them (when the Vault opens, or when one appears), for every Work in the Vault, open or not. A copy whose main file is missing holds a whole History, so it becomes the main file.
 - Changes are stored as readable rows. A `.db` opened in DB Browser for SQLite makes sense to a person. Each Change row reads like a sentence: readable time, Device name, kind, and the text it inserted or deleted (deletions keep a copy of the deleted text, even though the engine could work it out). The engine's own columns sit next to these.
+- The app shows a Device's current name from `vault.db`, then the name the Work recorded, then its ID. When a Device saves Changes to a Work, it also records its current name in that Work if the Work has none or an older one. Reading never writes, and a rename reaches each Work the next time it's edited.
 - Caches (the built tree, the current text, Session summaries) live in a cache folder on the Device, outside the Vault. They never sync and can always be rebuilt from the `.db`.
 - The app never holds a `.db` open between writes. Unsaved Changes stay in a recovery file outside the Vault until the app has seen them in the `.db`.
 - The Text file is regenerated on save. External edits are detected and recorded. The app recognises Text file contents it wrote itself, including in Conflict copies of the Text file.
 - Each time the app writes a Text file, it records the file's hash and the version (the set of Changes) it was built from. A Text file with an unknown hash is compared against the text of the last version written there, and the differences become Changes anchored to that version, so they merge like Changes from an offline Device. If no written version can be found, the file is compared against the current text and the Author gets a Merge notice.
 - In an External edit, a block of deleted text that reappears exactly somewhere else (at least a whole line, or about 40 characters) is recorded as a Move, so its History and Comments go with it; spaces at the block's edges may differ. Everything else is recorded as deletions and insertions. The file is compared word by word, so a changed word reads as one replacement, not as fragments of letters. All of one External edit's Changes form one Session, labelled "External edit". A byte order mark and Windows line endings added by another editor are ignored.
 - Images are stored in the `.db` once per unique content, and written out next to the Text file only when the Work has any ([ADR 0007](adr/0007-images-live-inside-the-work.md)).
-- `vault.db` holds Reviewers and shared settings, and merges the same way.
+- `vault.db` holds the Vault's Devices and their names, Reviewers, and Vault settings (including each Device's overrides), and merges the same way. A folder is a Vault because it has a `vault.db`; picking a folder without one asks before making it a Vault.
 
 **Typst**
 
@@ -68,10 +69,12 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 **App**
 
 - On desktop: Vault browser and Chapter list on the left (dragging a Chapter is a Move), the editor with tabs in the middle, and a Page preview / Comments / History panel on the right.
+- The Vault browser lists every History in the Vault except `vault.db`, plus Text files without one, which become Works when opened. It hides a file only when it's sure the file isn't a Work (some other program's database). A History from a newer version of the app, or a file that can't be read right now, is listed with the reason and is a Sync problem. Conflict copies are never listed. Whether a file is a History is decided in one place in the engine, next to the storage version.
+- Renaming a Work in the app renames its `.db`, `.typ` and `.images/` together. A Text file without a History whose exact contents some History in the Vault recorded writing is a leftover from a Work renamed outside the app: it's listed as "left over from" that Work, with an option to delete it, never offered as a new Work.
 - Quick switcher (Ctrl+O), focus mode, and word counts per Work and per Chapter.
 - On the phone: one screen at a time, with a bottom bar to switch screens.
-- Themes: light, dark or follow the system, plus CSS themes in the Vault's `themes/` folder. Which theme is used and the editor font size are Device settings.
-- Device settings (theme, layout, Device ID, cursor positions) are never stored in the Vault.
+- Themes: light, dark or follow the system, plus CSS themes in the Vault's `themes/` folder. Which theme is used and the editor font size are Vault settings, and a Device can override any of them for itself.
+- Device state (Device ID, the last Vault opened, window layout, open tabs, cursor positions) is never stored in the Vault. A Device finds its name and overrides in `vault.db` by its Device ID; one that isn't there yet asks for a name.
 
 **Exports**
 
@@ -155,11 +158,15 @@ A standalone Rust library with no UI. Everything else is built on it.
 
 Reading: Weidner & Kleppmann, *The Art of the Fugue: Minimizing Interleaving in Collaborative Text Editing* (2023); Kleppmann, *Moving Elements in List CRDTs* (2020).
 
+Phase 1 is officially done. No terminal harness is needed.
+
 ### Phase 2: Desktop editor
 
 - A Tauri 2 app: Vault browser, opening a Work, and CodeMirror connected to the History. Typing bursts become Changes, and Changes merged from Conflict copies or External edits appear in the editor.
 - Raw view first, then the Formatted view.
-- Tabs, quick switcher, Device settings, recovery file.
+- Tabs, quick switcher, Device state, Vault settings, recovery file.
+- The interface and the Rust core exchange positions in UTF-16 code units, as CodeMirror counts them. The core converts them to the engine's characters and rejects any position past the end or inside a character before the engine sees it.
+- An unexpected panic in the engine doesn't close the app: the affected Work's in-memory state is thrown away unsaved and the Work is reopened from its `.db` and the recovery file, with a message to the Author. Other open Works are untouched.
 
 *Done when:* you can write a short story on Windows and Debian, edit its Text file in vim, sync both machines through Syncthing with offline edits on each, and nothing is lost.
 
@@ -198,7 +205,7 @@ Settle these while building the History engine, and write an ADR for any answer 
 
 - ~~Two Devices Move the same text to different places while offline.~~ Settled: the later Move in the fixed Change order wins (so it depends on how Change IDs are formed).
 - ~~One Device Moves some text while another deletes part of it, or Moves part of it somewhere else.~~ Settled: a deletion wins wherever the text went. With overlapping Moves, only the overlap goes with the winning Move, the rest of each Move still happens, and the Author gets a Merge notice.
-- ~~How a Change ID is formed and how a Device gets its ID.~~ Settled: the ID is Device ID + counter. Changes are ordered by a hybrid logical clock (wall-clock time that never goes below anything already seen), then by Device ID. A Device ID is random and short, made on first launch, kept as a Device setting and left out of Android backups. The History records a readable name for each Device. A merge that finds the same ID with different content refuses loudly.
+- ~~How a Change ID is formed and how a Device gets its ID.~~ Settled: the ID is Device ID + counter. Changes are ordered by a hybrid logical clock (wall-clock time that never goes below anything already seen), then by Device ID. A Device ID is random and short, made on first launch, kept in Device state and left out of Android backups. The History records a readable name for each Device. A merge that finds the same ID with different content refuses loudly.
 - ~~How long a gap ends a Session.~~ Settled: each Change stores its Session ID (the ID of the Session's first Change). A new Session starts when the Work is opened on a Device, or after about 30 minutes without a Change (to be tuned in use). A Session never spans Devices or Works.
 - How the editor shows Changes merged in from elsewhere without making your cursor jump. Partly settled: an open typing burst is anchored to characters, so merges don't move it. Cursors and selections outside a burst are still open (Phase 2).
 - A Style file in `styles/` edited on two Devices. Style files are plain files with no History, so their Conflict copies can't merge automatically. Proposal: show both versions and let the Author pick.
@@ -226,5 +233,5 @@ Writing/                        ← the Vault (Syncthing folder)
 ├── styles/                     ← Style library: Styles, Looks, Story elements
 ├── themes/                     ← app themes (CSS)
 ├── fonts/
-└── vault.db                    ← Reviewers and shared settings
+└── vault.db                    ← marks the Vault: Devices, Reviewers, Vault settings
 ```

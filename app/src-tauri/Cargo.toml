@@ -1,0 +1,32 @@
+[package]
+name = "wrtier_app"
+version = "0.1.0"
+description = "Desktop and Android app for Wrtier"
+authors = ["R.L. Fiehn"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "wrtier_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"  # the folder picker for choosing a Vault
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = "0.3"          # a new Device ID
+wrtier = { path = "../.." }  # the History engine
+
+[dev-dependencies]
+tempfile = "3"
+rusqlite = { version = "0.41.1", features = ["bundled"] }  # tests write files as another program would
+
+# Build profiles live in the workspace root Cargo.toml.
