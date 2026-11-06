@@ -71,6 +71,9 @@ pub struct Absorbed {
     pub read: Vec<PathBuf>,
     /// Copies that couldn't be absorbed and were left in place, with the reason.
     pub kept: Vec<(PathBuf, String)>,
+    /// Text file copies written from Changes this History doesn't have yet: left in place, to
+    /// be read once the History catches up. (Not a problem: it's only waiting.)
+    pub waiting: Vec<PathBuf>,
     /// The Changes that came in: from merged History copies, and from External edits.
     pub changes: Vec<Change>,
 }
@@ -101,9 +104,12 @@ pub fn absorb_conflict_copies(db: &Path, text_file: &Path, doc: &mut Doc, now_ms
     }
 
     for copy in conflict_copies(text_file) {
-        match storage::import_text_file(db, &copy, doc, now_ms) {
-            Ok(changes) => {
-                absorbed.changes.extend(changes);
+        match storage::read_text_file(db, &copy, doc, now_ms) {
+            Ok(storage::TextFileRead::NotYet) => absorbed.waiting.push(copy),
+            Ok(read) => {
+                if let storage::TextFileRead::Imported(changes) = read {
+                    absorbed.changes.extend(changes);
+                }
                 match std::fs::remove_file(&copy) {
                     Ok(()) => absorbed.read.push(copy),
                     Err(e) => absorbed.kept.push((copy, format!("read, but couldn't delete it: {e}"))),

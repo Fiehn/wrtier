@@ -9,8 +9,10 @@ use crate::patch::{self, Patch};
 use crate::positions::{byte_at_utf16, replace_utf16, Positions};
 use crate::recovery::Recovery;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use wrtier::change::{Change, ChangeKind};
+use wrtier::conflicts::conflict_copies;
 use wrtier::doc::{BurstKind, CutPasted, Doc};
 use wrtier::ids::ChangeId;
 use wrtier::storage;
@@ -46,6 +48,9 @@ pub enum Op {
     /// Ctrl+Z / Ctrl+Shift+Z beyond what the editor can undo inside the open burst.
     Undo,
     Redo,
+    /// Take in what changed outside the app (`WorkState::outside` said so). It comes through
+    /// the editor's queue, so it's in order with the typing and the editor gets patches.
+    Sync,
 }
 
 impl Op {
@@ -60,7 +65,7 @@ impl Op {
                 let at = if at > from { at - (to - from) } else { *at };
                 replace_utf16(&without, at, at, moved)
             }
-            Op::Cursor { .. } | Op::Undo | Op::Redo => text.to_string(),
+            Op::Cursor { .. } | Op::Undo | Op::Redo | Op::Sync => text.to_string(),
         }
     }
 
@@ -68,7 +73,7 @@ impl Op {
     /// patches, and the editor never sends anything after such an op in the same batch.
     fn may_differ(&self, cut_waiting: bool) -> bool {
         match self {
-            Op::Undo | Op::Redo => true,
+            Op::Undo | Op::Redo | Op::Sync => true,
             Op::Type { origin, .. } | Op::Delete { origin, .. } => *origin != Origin::Input,
             Op::Paste { .. } => cut_waiting,
             _ => false,
@@ -92,6 +97,20 @@ pub struct WorkState {
     pub text_file_problem: Option<String>,
     /// Why the recovery file can't be kept, if it can't.
     pub recovery_problem: Option<String>,
+    /// Goes up each time something changed outside the app: the editor then sends a `Sync`.
+    pub outside: u32,
+    /// What a `Sync` took in, to tell the Author (only in the answer to that `Sync`).
+    pub took_in: Option<String>,
+    /// A Conflict copy that couldn't be taken in, if any.
+    pub sync_problem: Option<String>,
+}
+
+/// When a file was last modified, and its size: if either changes, someone else wrote it.
+type Stamp = Option<(std::time::SystemTime, u64)>;
+
+fn stamp(path: &Path) -> Stamp {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 pub struct OpenWork {
@@ -117,6 +136,22 @@ pub struct OpenWork {
     /// Keeps what's only in memory (the open burst, a waiting cut, unsaved Changes) on disk.
     recovery: Recovery,
     recovery_problem: Option<String>,
+    /// Every Change this Device made in this Work that it knows of. If Syncthing delivers a
+    /// `.db` without some of them, they're saved into it again.
+    mine: Vec<Change>,
+    /// The `.db` and Text file as this Work last wrote or read them.
+    db_stamp: Stamp,
+    typ_stamp: Stamp,
+    /// Counts the times something changed outside (see `WorkState::outside`).
+    outside: u32,
+    /// An edit to the Text file waits for the open burst to close (it's recorded at once).
+    typ_waiting: bool,
+    /// The Text file was written from Changes that haven't arrived yet: it's newer than ours.
+    typ_newer: bool,
+    /// Conflict copies already tried: only new ones count as a change from outside.
+    copies_tried: HashSet<PathBuf>,
+    took_in: Option<String>,
+    sync_problem: Option<String>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -130,9 +165,20 @@ pub fn undoable(change: &Change) -> bool {
 
 impl OpenWork {
     /// `sitting`: Changes already made in this sitting (recovered ones), which undo can take back.
-    pub fn new(db: PathBuf, typ: PathBuf, doc: Doc, now_ms: u64, recovery: Recovery, sitting: Vec<ChangeId>) -> Self {
+    /// `mine`: the Changes this Device made in the Work, as loaded.
+    pub fn new(db: PathBuf, typ: PathBuf, doc: Doc, now_ms: u64, recovery: Recovery, sitting: Vec<ChangeId>, mine: Vec<Change>) -> Self {
         let positions = Positions::new(&doc.text());
+        let (db_stamp, typ_stamp) = (stamp(&db), stamp(&typ));
         OpenWork {
+            mine,
+            db_stamp,
+            typ_stamp,
+            outside: 0,
+            typ_waiting: false,
+            typ_newer: false,
+            copies_tried: HashSet::new(),
+            took_in: None,
+            sync_problem: None,
             db, typ, doc, positions,
             named: false,
             sitting,
@@ -160,6 +206,9 @@ impl OpenWork {
             save_error: self.save_error.clone(),
             text_file_problem: self.text_file_problem.clone(),
             recovery_problem: self.recovery_problem.clone(),
+            outside: self.outside,
+            took_in: None,
+            sync_problem: self.sync_problem.clone(),
         }
     }
 
@@ -179,7 +228,7 @@ impl OpenWork {
 
     /// Applies a batch of ops from the editor, saves, and says what the editor needs to know.
     pub fn edit(&mut self, ops: Vec<Op>, device_name: Option<&str>, now_ms: u64) -> Result<WorkState, String> {
-        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. })) {
+        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync)) {
             self.name_this_device(device_name, now_ms)?;
         }
         let count = ops.len();
@@ -207,7 +256,8 @@ impl OpenWork {
         self.keep_recovery(false);
         #[cfg(debug_assertions)]
         assert_eq!(self.positions, Positions::new(&self.doc.text()), "the position map drifted from the text");
-        result.map(|()| self.state(patches))
+        let took_in = self.took_in.take();
+        result.map(|()| WorkState { took_in, ..self.state(patches) })
     }
 
     /// Records this Device's name in the Work before its first edit in a sitting, while no burst
@@ -343,6 +393,7 @@ impl OpenWork {
             }
             Op::Undo => self.undo(now_ms),
             Op::Redo => self.redo(now_ms),
+            Op::Sync => self.take_in(now_ms)?,
         }
         Ok(())
     }
@@ -408,9 +459,10 @@ impl OpenWork {
         }
         match storage::save(&self.db, &self.unsaved, &self.doc) {
             Ok(()) => {
-                self.unsaved.clear();
+                self.mine.append(&mut self.unsaved);
                 self.save_error = None;
                 self.text_file_behind = true;
+                self.db_stamp = stamp(&self.db); // our own write: not a change from outside
             }
             Err(e) => self.save_error = Some(format!("Couldn't save to {}: {e}. Your writing is kept and saving is tried again.", file_name(&self.db))),
         }
@@ -427,6 +479,91 @@ impl OpenWork {
         if now_ms.saturating_sub(self.text_file_written_ms) >= TEXT_FILE_EVERY_MS {
             self.write_text_file(now_ms);
         }
+        self.look_outside();
+    }
+
+    /// Has anything changed outside the app: the `.db` or Text file written by someone else
+    /// (Syncthing, another editor), or a new Conflict copy? Then `outside` goes up, and the
+    /// editor sends a `Sync` to take it in.
+    fn look_outside(&mut self) {
+        let copies = conflict_copies(&self.db).into_iter().chain(conflict_copies(&self.typ));
+        let new_copy = copies.into_iter().any(|copy| !self.copies_tried.contains(&copy));
+        let typ_ready = self.typ_waiting && self.doc.burst().is_none();
+        if stamp(&self.db) != self.db_stamp || stamp(&self.typ) != self.typ_stamp || new_copy || typ_ready {
+            self.outside += 1;
+            // Noted until the `Sync` reads them, so this counts once.
+            self.db_stamp = stamp(&self.db);
+            self.typ_stamp = stamp(&self.typ);
+            self.typ_waiting = false;
+            self.copies_tried.extend(conflict_copies(&self.db).into_iter().chain(conflict_copies(&self.typ)));
+        }
+    }
+
+    /// Takes in what changed outside the app, in order with the editor's edits (`Op::Sync`).
+    fn take_in(&mut self, now_ms: u64) -> Result<(), String> {
+        let mut from: BTreeSet<wrtier::ids::DeviceId> = BTreeSet::new();
+        let mut problems: Vec<String> = Vec::new();
+        // Conflict copies of the History merge in first (that works with a burst open).
+        for copy in conflict_copies(&self.db) {
+            match storage::merge(&self.db, &copy) {
+                Ok(()) => { let _ = std::fs::remove_file(&copy); }
+                Err(e) => problems.push(format!("{} was kept: {e}", file_name(&copy))),
+            }
+        }
+        // Then the History itself: whatever it has that this Work doesn't yet.
+        let in_file = storage::read_all(&self.db).map_err(err)?;
+        let ids: HashSet<ChangeId> = in_file.iter().map(|c| c.id).collect();
+        let new: Vec<Change> = in_file.into_iter().filter(|c| !self.doc.has(c.id)).collect();
+        from.extend(new.iter().map(|c| c.id.device).filter(|&d| d != self.doc.device()));
+        self.doc.apply_all(&new);
+        // Changes this Device saved must stay saved, even if the `.db` that arrived lacks them.
+        let missing: Vec<Change> = self.mine.iter().filter(|c| !ids.contains(&c.id)).cloned().collect();
+        if !missing.is_empty() {
+            storage::save(&self.db, &missing, &self.doc).map_err(err)?;
+        }
+        if !new.is_empty() {
+            self.text_file_behind = true;
+        }
+        // The Text file and its copies. An edit there is recorded at once, which can't happen
+        // while a burst is open: it waits (a few seconds at most).
+        let mut edited = false;
+        if self.doc.burst().is_some() {
+            self.typ_waiting = true;
+        } else {
+            let texts = conflict_copies(&self.typ).into_iter().chain(self.typ.exists().then(|| self.typ.clone()));
+            for path in texts.collect::<Vec<_>>() {
+                let read = storage::read_text_file(&self.db, &path, &mut self.doc, now_ms);
+                let is_copy = path != self.typ;
+                if !is_copy {
+                    self.typ_newer = matches!(read, Ok(storage::TextFileRead::NotYet));
+                }
+                match read {
+                    Ok(storage::TextFileRead::Imported(changes)) => {
+                        edited = true;
+                        self.mine.extend(changes);
+                        self.text_file_behind = true; // written again, with its marker line
+                        if is_copy { let _ = std::fs::remove_file(&path); }
+                    }
+                    Ok(storage::TextFileRead::Known) => if is_copy { let _ = std::fs::remove_file(&path); },
+                    Ok(storage::TextFileRead::NotYet) => {} // its History hasn't arrived yet: read again when it does
+                    Err(e) => problems.push(format!("{} couldn't be read: {e}", file_name(&path))),
+                }
+            }
+        }
+        self.db_stamp = stamp(&self.db);
+        self.typ_stamp = stamp(&self.typ);
+        self.copies_tried = conflict_copies(&self.db).into_iter().chain(conflict_copies(&self.typ)).collect();
+        self.sync_problem = (!problems.is_empty()).then(|| problems.join(" "));
+        let mut lines = Vec::new();
+        if !from.is_empty() {
+            let names: Vec<String> = from.iter().map(|&d| self.doc.device_name(d).map(str::to_string).unwrap_or_else(|| d.to_string())).collect();
+            lines.push(format!("Took in changes from {}.", names.join(", ")));
+        }
+        if edited {
+            lines.push(format!("Took in an edit made to {} in another program.", file_name(&self.typ)));
+        }
+        self.took_in = (!lines.is_empty()).then(|| lines.join(" "));
+        Ok(())
     }
 
     /// The Author left the Work (another Work, the window lost focus): save everything and bring
@@ -449,26 +586,21 @@ impl OpenWork {
         self.write_text_file(now_ms);
     }
 
-    /// Writes the Text file if it lags behind, unless it was edited outside the app since the
-    /// app last wrote it: then it's left alone, so that edit isn't lost.
+    /// Writes the Text file if it lags behind. Never over a file this Work hasn't read yet (an
+    /// edit made in another program, taken in at the next `Sync`), or one written from Changes
+    /// that haven't arrived yet (it's newer).
     fn write_text_file(&mut self, now_ms: u64) {
-        if !self.text_file_behind || !self.unsaved.is_empty() {
+        if !self.text_file_behind || !self.unsaved.is_empty() || self.typ_newer || stamp(&self.typ) != self.typ_stamp {
             return;
-        }
-        if let Ok(current) = std::fs::read_to_string(&self.typ) {
-            // If that can't be checked, assume it was edited: never overwrite an edit made elsewhere.
-            if !storage::wrote_text(&self.db, &current).unwrap_or(false) {
-                self.text_file_problem = Some(format!(
-                    "{} was edited outside the app while the Work was open. It's left as it is, and the edit is taken in when the Work is opened again.",
-                    file_name(&self.typ)));
-                return;
-            }
         }
         match storage::write_text_file(&self.db, &self.typ, &self.doc, now_ms) {
             Ok(()) => {
                 self.text_file_behind = false;
                 self.text_file_written_ms = now_ms;
                 self.text_file_problem = None;
+                // Our own writes (the file, and its record in the `.db`): not changes from outside.
+                self.typ_stamp = stamp(&self.typ);
+                self.db_stamp = stamp(&self.db);
             }
             Err(e) => self.text_file_problem = Some(format!("Couldn't write {}: {e}", file_name(&self.typ))),
         }
@@ -497,7 +629,93 @@ mod tests {
         storage::write_text_file(&db, &typ, &doc, 100).unwrap();
         let (_, doc) = storage::load(&db, DeviceId(1)).unwrap();
         let recovery = Recovery::for_work(&dir.path().join("recovery"), dir.path(), "w");
-        (dir, OpenWork::new(db, typ, doc, 100, recovery, Vec::new()))
+        let mine = storage::read_all(&db).unwrap();
+        (dir, OpenWork::new(db, typ, doc, 100, recovery, Vec::new(), mine))
+    }
+
+    /// A Text file's text, without its marker line.
+    fn text_of(path: &Path) -> String {
+        wrtier::text_file::split_marker(&std::fs::read_to_string(path).unwrap()).0
+    }
+
+    /// Another Device (the phone) adds `text` at `at` straight into the Work's `.db`, as if
+    /// Syncthing had delivered the phone's copy.
+    fn phone_types(w: &OpenWork, at: usize, text: &str) {
+        let (_, mut phone) = storage::load(&w.db, DeviceId(2)).unwrap();
+        let mut changes = vec![phone.set_device_name_local("Phone", 5000)];
+        changes.push(phone.insert_local(at, text, 5000));
+        storage::save(&w.db, &changes, &phone).unwrap();
+    }
+
+    /// The timer noticed something; the editor sends a `Sync`, as it does when `outside` goes up.
+    fn notice_and_sync(w: &mut OpenWork, now_ms: u64) -> WorkState {
+        let before = w.state(Vec::new()).outside;
+        w.tick(now_ms);
+        assert!(w.state(Vec::new()).outside > before, "the change was noticed");
+        w.edit(vec![Op::Sync], None, now_ms + 1).unwrap()
+    }
+
+    #[test]
+    fn another_devices_changes_arrive_without_disturbing_the_open_burst() {
+        let (_dir, mut w) = work("abc");
+        w.edit(vec![typing(3, "X")], None, 1000).unwrap(); // a burst is open
+        phone_types(&w, 0, "P");
+        let state = notice_and_sync(&mut w, 2000);
+        assert_eq!(w.text(), "PabcX");
+        assert_eq!(editor_after("abcX", &state), "PabcX", "the editor gets the phone's text as a patch");
+        assert!(state.burst.is_some(), "and the burst stays open");
+        assert_eq!(state.took_in.as_deref(), Some("Took in changes from Phone."));
+        w.close(9000);
+        assert_eq!(saved(&w), vec!["insert", "insert", "insert"]);
+    }
+
+    #[test]
+    fn an_edit_in_vim_is_taken_in_while_the_work_is_open() {
+        let (_dir, mut w) = work("The rain had stopped.");
+        std::fs::write(&w.typ, "The rain had eased.").unwrap(); // vim, without the marker line
+        let state = notice_and_sync(&mut w, 1000);
+        assert_eq!(w.text(), "The rain had eased.");
+        assert_eq!(editor_after("The rain had stopped.", &state), "The rain had eased.");
+        assert!(state.took_in.unwrap().contains("another program"));
+        w.leave(2000);
+        assert_eq!(text_of(&w.typ), "The rain had eased.", "written again, with its marker");
+        assert!(std::fs::read_to_string(&w.typ).unwrap().contains("// Wrtier version:"));
+    }
+
+    #[test]
+    fn an_edit_in_vim_waits_for_the_open_burst() {
+        let (_dir, mut w) = work("abc");
+        w.edit(vec![typing(3, "X")], None, 1000).unwrap();
+        std::fs::write(&w.typ, "abc!").unwrap();
+        notice_and_sync(&mut w, 2000);
+        assert_eq!(w.text(), "abcX", "not yet: the burst is open");
+        w.tick(9000); // the burst closes, and the waiting edit counts as a change again
+        w.edit(vec![Op::Sync], None, 9001).unwrap();
+        assert!(w.text().contains('X') && w.text().contains('!'), "{}", w.text());
+    }
+
+    #[test]
+    fn a_db_that_lacks_this_devices_changes_gets_them_again() {
+        let (dir, mut w) = work("abc");
+        let older = dir.path().join("older.db");
+        std::fs::copy(&w.db, &older).unwrap();
+        w.edit(vec![typing(3, "d")], None, 1000).unwrap();
+        w.tick(8000); // "d" saved
+        std::fs::copy(&older, &w.db).unwrap(); // Syncthing puts back a copy from before it
+        notice_and_sync(&mut w, 9000);
+        assert_eq!(storage::load(&w.db, DeviceId(1)).unwrap().1.text(), "abcd");
+    }
+
+    #[test]
+    fn a_conflict_copy_is_taken_in_while_the_work_is_open() {
+        let (dir, mut w) = work("abc");
+        let copy = dir.path().join("w.sync-conflict-20261106-120000-ABCDEFG.db");
+        std::fs::copy(&w.db, &copy).unwrap();
+        let (_, mut phone) = storage::load(&copy, DeviceId(2)).unwrap();
+        storage::save(&copy, &[phone.insert_local(3, "!", 5000)], &phone).unwrap();
+        notice_and_sync(&mut w, 6000);
+        assert_eq!(w.text(), "abc!");
+        assert!(!copy.exists(), "merged and deleted");
     }
 
     fn typing(from: usize, text: &str) -> Op {
@@ -690,21 +908,20 @@ mod tests {
         let (_dir, mut w) = work("abc");
         w.edit(vec![typing(3, "d")], None, 1000).unwrap();
         w.tick(7000); // saved, but the Text file waits
-        assert_eq!(std::fs::read_to_string(&w.typ).unwrap(), "abc");
+        assert_eq!(text_of(&w.typ), "abc");
         w.tick(31_000);
-        assert_eq!(std::fs::read_to_string(&w.typ).unwrap(), "abcd");
+        assert_eq!(text_of(&w.typ), "abcd");
         w.edit(vec![typing(4, "e")], None, 32_000).unwrap();
         w.leave(33_000);
-        assert_eq!(std::fs::read_to_string(&w.typ).unwrap(), "abcde");
+        assert_eq!(text_of(&w.typ), "abcde");
     }
 
     #[test]
-    fn a_text_file_edited_outside_is_not_overwritten() {
+    fn a_text_file_edited_outside_is_not_overwritten_before_it_is_taken_in() {
         let (_dir, mut w) = work("abc");
         std::fs::write(&w.typ, "edited in vim").unwrap();
         w.edit(vec![typing(3, "d")], None, 1000).unwrap();
         w.leave(2000);
         assert_eq!(std::fs::read_to_string(&w.typ).unwrap(), "edited in vim");
-        assert!(w.state(Vec::new()).text_file_problem.is_some());
     }
 }

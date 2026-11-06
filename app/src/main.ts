@@ -67,9 +67,14 @@ function clearUndoSteps() {
 
 function showWorkState(state: WorkState) {
   const el = $("status");
-  const lines = [state.saveError, state.textFileProblem, state.recoveryProblem].filter((line): line is string => line !== null);
+  const lines = [state.saveError, state.textFileProblem, state.recoveryProblem, state.syncProblem]
+    .filter((line): line is string => line !== null);
   el.textContent = lines.join("\n");
   el.hidden = lines.length === 0;
+  if (state.tookIn) {
+    $("notice").textContent = state.tookIn;
+    $("notice").hidden = false;
+  }
 }
 
 // ---- Messages ----
@@ -147,6 +152,7 @@ async function openVault(path: string) {
   showWork(null);
   if (opened.deviceName === null) await askDeviceName(opened.suggestedName);
   await refreshList();
+  vaultOpen = true;
 }
 
 const labels: Record<Entry["kind"], string> = {
@@ -259,6 +265,20 @@ $("new-work").addEventListener("click", async () => {
     showError(e);
   }
 });
+
+// The Vault list follows what Syncthing brings (new Works, Conflict copies of Works that
+// aren't open): every 10 seconds, and whenever the window gets focus.
+let vaultOpen = false;
+async function refreshQuietly() {
+  if (!vaultOpen || document.querySelector("dialog[open]")) return;
+  try {
+    await refreshList();
+  } catch (e) {
+    showError(e);
+  }
+}
+setInterval(refreshQuietly, 10_000);
+window.addEventListener("focus", refreshQuietly);
 
 // Leaving the window: the Text file is brought up to date for other programs.
 window.addEventListener("blur", async () => {

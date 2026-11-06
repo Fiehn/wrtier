@@ -782,7 +782,8 @@ fn version_from_str(s: &str) -> Result<Vec<(DeviceId, u32)>> {
 /// The file is written next to itself first and then renamed over it, so a crash never leaves
 /// half a file.
 pub fn write_text_file(db: &Path, text_file: &Path, doc: &Doc, now_ms: u64) -> Result<()> {
-    let text = doc.committed_text();
+    // The text, then the line naming the version it was written from (ADR 0010).
+    let text = crate::text_file::with_marker(&doc.committed_text(), &doc.version());
     let conn = Connection::open(db)?;
     migrate(&conn)?;
     conn.execute(
@@ -800,25 +801,59 @@ pub fn write_text_file(db: &Path, text_file: &Path, doc: &Doc, now_ms: u64) -> R
     Ok(())
 }
 
-/// Reads a Text file (or a Conflict copy of one). If it holds text the app wrote, on any
-/// Device, there's nothing to do. Otherwise it was edited outside the app: the difference from
-/// the version last written is recorded as Changes in `doc` and saved. Returns those Changes.
-pub fn import_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -> Result<Vec<Change>> {
-    let text = std::fs::read_to_string(text_file)?;
+/// What reading a Text file found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TextFileRead {
+    /// The app wrote exactly this, on some Device: nothing to do.
+    Known,
+    /// It was edited outside the app: these Changes record the edit (already saved).
+    Imported(Vec<Change>),
+    /// It was written from Changes this History doesn't have yet (another Device's Text file
+    /// arrived before its History did). Read it again once they're here.
+    NotYet,
+}
+
+/// Reads a Text file (or a Conflict copy of one). `doc` must already hold everything in `db`.
+///
+/// If the app wrote exactly this, on any Device, there's nothing to do. Otherwise it was edited
+/// outside the app: the difference from the version it was written from (named on its last
+/// line; if that line is gone, the version last written) is recorded as Changes and saved.
+pub fn read_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -> Result<TextFileRead> {
+    let contents = std::fs::read_to_string(text_file)?;
     let conn = Connection::open(db)?;
     migrate(&conn)?;
-    let known: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM text_files WHERE hash = ?1)", [text_hash(&text)], |r| r.get(0))?;
+    let known: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM text_files WHERE hash = ?1)", [text_hash(&contents)], |r| r.get(0))?;
     if known {
-        return Ok(Vec::new()); // the app wrote exactly this
+        return Ok(TextFileRead::Known);
     }
-    let last: Option<String> = conn
-        .query_row("SELECT version FROM text_files ORDER BY written DESC, device DESC LIMIT 1", [], |r| r.get(0))
-        .optional()?;
+    let (text, marked) = crate::text_file::split_marker(&contents);
+    let base = match marked {
+        Some(version) => {
+            let seen: HashMap<DeviceId, u32> = doc.version().into_iter().collect();
+            if version.iter().any(|(device, counter)| seen.get(device).is_none_or(|have| have < counter)) {
+                return Ok(TextFileRead::NotYet);
+            }
+            Some(version)
+        }
+        // No marker (it was removed, or the file comes from elsewhere): the version last written.
+        None => conn
+            .query_row("SELECT version FROM text_files ORDER BY written DESC, device DESC LIMIT 1", [], |r| r.get::<_, String>(0))
+            .optional()?
+            .map(|v| version_from_str(&v))
+            .transpose()?,
+    };
     drop(conn);
-    let base = last.map(|v| version_from_str(&v)).transpose()?;
     let changes = doc.import_text(base.as_deref(), &text, now_ms);
     save(db, &changes, doc)?;
-    Ok(changes)
+    Ok(TextFileRead::Imported(changes))
+}
+
+/// `read_text_file`, for callers that only need the Changes (none if it was known or not yet).
+pub fn import_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -> Result<Vec<Change>> {
+    Ok(match read_text_file(db, text_file, doc, now_ms)? {
+        TextFileRead::Imported(changes) => changes,
+        TextFileRead::Known | TextFileRead::NotYet => Vec::new(),
+    })
 }
 
 /// Did this History record writing a Text file with exactly `text`, on any Device?
@@ -834,11 +869,15 @@ pub fn wrote_text(db: &Path, text: &str) -> Result<bool> {
 }
 
 /// Keeps a Work's Text file in step: records an External edit if there is one, then writes the
-/// current text. Returns the Changes the External edit became (empty if there was none).
+/// current text. Returns the Changes the External edit became (empty if there was none). A
+/// file written from Changes this History doesn't have yet is left alone: it's newer.
 pub fn sync_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -> Result<Vec<Change>> {
-    let changes = if text_file.exists() { import_text_file(db, text_file, doc, now_ms)? } else { Vec::new() };
-    write_text_file(db, text_file, doc, now_ms)?;
-    Ok(changes)
+    let read = if text_file.exists() { read_text_file(db, text_file, doc, now_ms)? } else { TextFileRead::Known };
+    match read {
+        TextFileRead::NotYet => Ok(Vec::new()),
+        TextFileRead::Known => write_text_file(db, text_file, doc, now_ms).map(|()| Vec::new()),
+        TextFileRead::Imported(changes) => write_text_file(db, text_file, doc, now_ms).map(|()| changes),
+    }
 }
 
 #[cfg(test)]
@@ -1047,8 +1086,58 @@ mod test {
         let typed = doc.insert_local(0, "The rain had stopped.\n", 1000);
         save(&db, &[typed], &doc).unwrap();
         write_text_file(&db, &typ, &doc, 1500).unwrap();
-        assert_eq!(std::fs::read_to_string(&typ).unwrap(), "The rain had stopped.\n");
+        assert_eq!(text_of(&typ), "The rain had stopped.\n");
         assert!(sync_text_file(&db, &typ, &mut doc, 2000).unwrap().is_empty());
+    }
+
+    /// A Text file's text, without its marker line.
+    fn text_of(path: &Path) -> String {
+        crate::text_file::split_marker(&std::fs::read_to_string(path).unwrap()).0
+    }
+
+    #[test]
+    fn another_devices_text_file_waits_for_its_history() {
+        // The phone's Text file arrives before the phone's History does.
+        let dir = tempfile::tempdir().unwrap();
+        let (laptop_db, phone_db, typ) = (dir.path().join("laptop.db"), dir.path().join("phone.db"), dir.path().join("work.typ"));
+        let mut laptop = Doc::new(DeviceId(1));
+        let base = laptop.insert_local(0, "abc", 1000);
+        save(&laptop_db, std::slice::from_ref(&base), &laptop).unwrap();
+        let mut phone = Doc::new(DeviceId(2));
+        phone.apply(&base);
+        let theirs = phone.insert_local(3, "def", 2000);
+        save(&phone_db, &[base, theirs.clone()], &phone).unwrap();
+        write_text_file(&phone_db, &typ, &phone, 2500).unwrap();
+
+        assert_eq!(read_text_file(&laptop_db, &typ, &mut laptop, 3000).unwrap(), TextFileRead::NotYet);
+        assert!(sync_text_file(&laptop_db, &typ, &mut laptop, 3000).unwrap().is_empty());
+        assert_eq!(text_of(&typ), "abcdef", "the newer file is left alone");
+        assert_eq!(laptop.text(), "abc", "and nothing was recorded");
+
+        // The History arrives: the file is recognised as the phone's.
+        merge(&laptop_db, &phone_db).unwrap();
+        laptop.apply(&theirs);
+        assert_eq!(read_text_file(&laptop_db, &typ, &mut laptop, 4000).unwrap(), TextFileRead::Known);
+    }
+
+    #[test]
+    fn an_edit_that_keeps_the_marker_is_compared_with_its_own_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, typ) = (dir.path().join("work.db"), dir.path().join("work.typ"));
+        let mut doc = Doc::new(DeviceId(1));
+        let first = doc.insert_local(0, "One.\n", 1000);
+        save(&db, &[first], &doc).unwrap();
+        write_text_file(&db, &typ, &doc, 1500).unwrap(); // written from "One.\n"
+        let second = doc.insert_local(5, "Two.\n", 2000);
+        save(&db, std::slice::from_ref(&second), &doc).unwrap();
+        write_text_file(&db, &typ, &doc, 2500).unwrap(); // and again from "One.\nTwo.\n"
+        // vim edits the first of the two files written (say, a Conflict copy of it), marker and all.
+        let old = crate::text_file::with_marker("One!\n", &[(DeviceId(1), 1)]);
+        let copy = dir.path().join("work.sync-conflict-20261106-120000-ABCDEFG.typ");
+        std::fs::write(&copy, old).unwrap();
+        let TextFileRead::Imported(changes) = read_text_file(&db, &copy, &mut doc, 3000).unwrap() else { panic!("an External edit") };
+        assert!(!changes.is_empty());
+        assert_eq!(doc.text(), "One!\nTwo.\n", "the later line is kept: only the edit is taken in");
     }
 
     #[test]
@@ -1066,7 +1155,7 @@ mod test {
         let recorded = sync_text_file(&db, &typ, &mut doc, 3000).unwrap();
         assert!(!recorded.is_empty());
         assert_eq!(doc.text(), "The rain had eased.\nGulls circled.\n");
-        assert_eq!(std::fs::read_to_string(&typ).unwrap(), doc.text()); // rewritten with both
+        assert_eq!(text_of(&typ), doc.text()); // rewritten with both
         let (_, reopened) = load(&db, DeviceId(1)).unwrap();
         assert_eq!(reopened.text(), doc.text());                         // and saved
         assert!(sync_text_file(&db, &typ, &mut doc, 4000).unwrap().is_empty()); // recognised now
@@ -1220,8 +1309,9 @@ mod test {
         let mut doc = Doc::new(DeviceId(1));
         save(&db, &[doc.insert_local(0, "Once upon a time", 1000)], &doc).unwrap();
         write_text_file(&db, &typ, &doc, 2000).unwrap();
-        assert!(wrote_text(&db, "Once upon a time").unwrap());
-        assert!(!wrote_text(&db, "Once upon a time, edited").unwrap());
+        let written = std::fs::read_to_string(&typ).unwrap(); // as a Text file found in the Vault
+        assert!(wrote_text(&db, &written).unwrap());
+        assert!(!wrote_text(&db, &written.replace("time", "time, edited")).unwrap());
     }
 
     #[test]

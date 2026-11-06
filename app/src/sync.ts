@@ -20,7 +20,8 @@ type Op =
   | { op: "cut"; from: number; to: number }
   | { op: "move"; from: number; to: number; at: number }
   | { op: "undo" }
-  | { op: "redo" };
+  | { op: "redo" }
+  | { op: "sync" };
 
 type Patch = { from: number; to: number; insert: string };
 
@@ -31,6 +32,11 @@ export type WorkState = {
   saveError: string | null;
   textFileProblem: string | null;
   recoveryProblem: string | null;
+  /** Goes up each time something changed outside the app: the editor then asks to take it in. */
+  outside: number;
+  /** What taking it in brought (only in the answer to that request). */
+  tookIn: string | null;
+  syncProblem: string | null;
 };
 
 /** Marks the editor's own changes from Rust, so they aren't sent back. */
@@ -41,13 +47,14 @@ type Item =
   | { kind: "edit"; changes: ChangeSet; event: string; origin: Origin }
   | { kind: "cursor"; pos: number }
   | { kind: "undo" }
-  | { kind: "redo" };
+  | { kind: "redo" }
+  | { kind: "sync" };
 
 const EVENTS = ["move.drop", "input.paste", "input.drop", "delete.cut"];
 
 /** Can Rust's text end up different from the editor's after this? Then nothing is sent after it in the same batch. */
 const mayDiffer = (item: Item) =>
-  item.kind === "undo" || item.kind === "redo" || (item.kind === "edit" && item.origin !== "input");
+  item.kind === "undo" || item.kind === "redo" || item.kind === "sync" || (item.kind === "edit" && item.origin !== "input");
 
 /** An edit as ops for Rust. Several changes are sent last-first, so each one's positions stay right. */
 function toOps(item: Item): Op[] {
@@ -56,6 +63,7 @@ function toOps(item: Item): Op[] {
       return [{ op: "cursor", pos: item.pos }];
     case "undo":
     case "redo":
+    case "sync":
       return [{ op: item.kind }];
   }
   const parts: { from: number; to: number; text: string }[] = [];
@@ -87,6 +95,8 @@ export class WorkSync {
   private burst: string | null = null;
   /** Whose undo ran last: the editor's (inside a draft) or the History's (a Revert). Redo follows it. */
   private lastUndo: "editor" | "history" | null = null;
+  /** The last `outside` count asked about (see `WorkState.outside`). */
+  private outside = 0;
 
   constructor(
     readonly id: string,
@@ -148,10 +158,24 @@ export class WorkSync {
     }
   }
 
-  /** The timer on the Rust side saved something, or closed the burst. */
+  /** The timer on the Rust side saved something, closed the burst, or noticed a change from outside. */
   status(state: WorkState) {
     this.noteBurst(state.burst);
+    this.noteOutside(state.outside);
     this.events.state(state);
+  }
+
+  /**
+   * Something changed outside the app (Syncthing, another editor). It's taken in through the
+   * queue, in order with the typing, so the patches it brings fit around everything typed.
+   */
+  private noteOutside(outside: number) {
+    if (outside <= this.outside) return;
+    this.outside = outside;
+    if (!this.queue.some((item) => item.kind === "sync")) {
+      this.queue.push({ kind: "sync" });
+      void this.flush();
+    }
   }
 
   /**
@@ -204,6 +228,7 @@ export class WorkSync {
     }
     if (state.len !== expected) throw new Error(`The editor and the History disagree about the text's length (${expected} and ${state.len}).`);
     this.noteBurst(state.burst, undone);
+    this.noteOutside(state.outside);
     this.events.state(state);
   }
 

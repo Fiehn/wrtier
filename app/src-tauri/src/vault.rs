@@ -35,6 +35,32 @@ pub struct Vault {
     /// Works recovered since the Vault opened: the Changes recovered (undo can take them back
     /// when the Work is opened) and the line that tells the Author.
     recovered: HashMap<String, (Vec<ChangeId>, String)>,
+    /// Why Syncthing couldn't be told to ignore SQLite's temporary files, if it couldn't.
+    ignore_problem: Option<String>,
+}
+
+/// Syncthing must never sync SQLite's temporary `-journal` files (Phase 0c). Its ignore
+/// patterns don't sync themselves, so each Device adds the pattern when it opens the Vault, in
+/// the `.stignore` of the Syncthing folder the Vault is in (the Vault itself, or a folder above it).
+fn ignore_journals(root: &Path) -> Result<(), String> {
+    let Some(folder) = root.ancestors().find(|dir| dir.join(".stfolder").exists()) else {
+        return Ok(()); // not in a Syncthing folder (yet)
+    };
+    let path = folder.join(".stignore");
+    let current = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.to_string()),
+    };
+    if current.lines().any(|line| line.trim() == "*-journal") {
+        return Ok(());
+    }
+    let mut text = current;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("// Added by Wrtier: SQLite's temporary files must never sync.\n*-journal\n");
+    std::fs::write(&path, text).map_err(err)
 }
 
 /// A file the app couldn't take in: kept untouched and reported until it's resolved.
@@ -154,6 +180,7 @@ impl Vault {
             works: HashMap::new(),
             recovery_dir: recovery_dir.to_path_buf(),
             recovered: HashMap::new(),
+            ignore_problem: ignore_journals(root).err(),
         };
         vault.absorb_vault_copies(&mut Vec::new()); // any left are reported when the Works are listed
         Ok(Opened::Vault(vault))
@@ -262,6 +289,9 @@ impl Vault {
     /// Every Work in the Vault, after absorbing any Conflict copies.
     pub fn list(&mut self, now_ms: u64) -> Listing {
         let mut problems = Vec::new();
+        if let Some(reason) = &self.ignore_problem {
+            problems.push(SyncProblem { path: ".stignore".into(), reason: format!("couldn't add *-journal to it: {reason}") });
+        }
         // Writing kept from before the app closed unexpectedly goes back first.
         for id in recovery::kept_for(&self.recovery_dir, &self.root) {
             if let Err(problem) = self.recover(&id, now_ms) {
@@ -383,7 +413,8 @@ impl Vault {
         if let Err(problem) = self.recover(id, now_ms) {
             problems.push(problem);
         }
-        let result = catch_unwind(AssertUnwindSafe(|| -> Result<Doc, String> {
+        // The History, and the Changes this Device made in it (see `OpenWork::mine`).
+        let result = catch_unwind(AssertUnwindSafe(|| -> Result<(Doc, Vec<Change>), String> {
             if db.exists() {
                 match storage::probe(&db) {
                     Probe::History => {}
@@ -391,34 +422,36 @@ impl Vault {
                     Probe::NotHistory => return Err(format!("{name}.db belongs to another program.")),
                     Probe::Unreadable(e) => return Err(format!("{name} can't be read right now: {e}")),
                 }
-                let (_, mut doc) = storage::load(&db, me).map_err(err)?;
-                let mut mine = false; // did this Device just save Changes to it?
+                let (loaded, mut doc) = storage::load(&db, me).map_err(err)?;
+                let mut mine: Vec<Change> = loaded.into_iter().filter(|c| c.id.device == me).collect();
+                let saved_before = mine.len();
                 if !conflict_copies(&db).is_empty() || !conflict_copies(&typ).is_empty() {
                     let absorbed = absorb_conflict_copies(&db, &typ, &mut doc, now_ms);
-                    mine = absorbed.changes.iter().any(|c| c.id.device == me);
+                    mine.extend(absorbed.changes.into_iter().filter(|c| c.id.device == me));
                     problems.extend(absorbed.kept.into_iter().map(|(path, reason)| self.problem(&path, reason)));
                 }
                 // An External edit made while the app was closed becomes Changes now.
-                mine |= !storage::sync_text_file(&db, &typ, &mut doc, now_ms).map_err(err)?.is_empty();
-                if mine {
+                mine.extend(storage::sync_text_file(&db, &typ, &mut doc, now_ms).map_err(err)?);
+                if mine.len() > saved_before {
                     record_name(&db, &mut doc, device_name.as_deref(), now_ms)?;
                 }
-                Ok(doc)
+                Ok((doc, mine))
             } else if typ.exists() {
                 // A Text file without a History: the whole file is one External edit, written
                 // from an empty version (so it's not "unknown", and there's no Merge notice).
-                let text = std::fs::read_to_string(&typ).map_err(err)?;
+                // (Without any marker line: that names a version of another History.)
+                let (text, _) = wrtier::text_file::split_marker(&std::fs::read_to_string(&typ).map_err(err)?);
                 let mut doc = Doc::new(me);
                 let changes = doc.import_text(Some(&[]), &text, now_ms);
                 storage::save(&db, &changes, &doc).map_err(err)?;
                 storage::write_text_file(&db, &typ, &doc, now_ms).map_err(err)?;
                 record_name(&db, &mut doc, device_name.as_deref(), now_ms)?;
-                Ok(doc)
+                Ok((doc, changes))
             } else {
                 Err(format!("{name} isn't in the Vault anymore."))
             }
         }));
-        let doc = match result {
+        let (doc, mine) = match result {
             Ok(result) => result?,
             Err(panic) => return Err(format!("Something went wrong opening {name}: {}", panic_message(panic.as_ref()))),
         };
@@ -428,7 +461,7 @@ impl Vault {
             None => (Vec::new(), None),
         };
         let recovery = Recovery::for_work(&self.recovery_dir, &self.root, id);
-        self.works.insert(id.to_string(), OpenWork::new(db, typ, doc, now_ms, recovery, sitting));
+        self.works.insert(id.to_string(), OpenWork::new(db, typ, doc, now_ms, recovery, sitting, mine));
         Ok(OpenedWork { id: id.to_string(), name, text, problems, notice })
     }
 
@@ -897,7 +930,8 @@ mod tests {
         let saved = storage::read_all(&root.join("Rain.db")).unwrap();
         assert!(saved.iter().any(|c| matches!(c.kind, ChangeKind::Insert(_)) && c.hlc.0 >= 2000 && c.hlc.0 < 50_000),
                 "recorded at its last keystroke: {saved:?}");
-        assert_eq!(std::fs::read_to_string(root.join("Rain.typ")).unwrap(), "The rain had stopped.");
+        let typ = std::fs::read_to_string(root.join("Rain.typ")).unwrap();
+        assert_eq!(wrtier::text_file::split_marker(&typ).0, "The rain had stopped.");
         let opened = vault.open_work("Rain", 60_000).unwrap();
         assert_eq!(opened.text, "The rain had stopped.");
         assert!(opened.notice.unwrap().contains("Recovered 21 characters"));
@@ -953,6 +987,21 @@ mod tests {
         let listing = vault.list(50_000);
         assert!(listing.problems.iter().any(|p| p.path == "Rain" && p.reason.contains("kept")), "{:?}", listing.problems);
         assert_eq!(recovery::kept_for(&root.join(".recovery"), root), vec!["Rain".to_string()]);
+    }
+
+    #[test]
+    fn syncthing_is_told_to_ignore_sqlites_temporary_files() {
+        // The Vault is a folder inside a Syncthing folder, whose .stignore has a pattern already.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".stfolder")).unwrap();
+        std::fs::write(dir.path().join(".stignore"), "*.tmp").unwrap();
+        let root = dir.path().join("Writing");
+        std::fs::create_dir_all(&root).unwrap();
+        open(&root);
+        open(&root); // only once
+        assert_eq!(std::fs::read_to_string(dir.path().join(".stignore")).unwrap(),
+                   "*.tmp\n// Added by Wrtier: SQLite's temporary files must never sync.\n*-journal\n");
+        assert!(!root.join(".stignore").exists());
     }
 
     #[test]

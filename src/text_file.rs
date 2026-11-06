@@ -5,6 +5,40 @@
 
 use std::time::{Duration, Instant};
 use similar::{capture_diff_slices_deadline, Algorithm, DiffOp};
+use crate::ids::{ChangeId, DeviceId};
+
+/// The last line of every Text file the app writes says which version the text above it was
+/// written from: the highest Change counter it held from each Device. Another Device that gets
+/// the file before the History it came from then knows to wait, and an edit made in another
+/// editor is compared against exactly that version (ADR 0010). It's a Typst comment, so it
+/// changes nothing when the file is compiled, and it's never part of the Work's text.
+const MARKER: &str = "// Wrtier version:";
+
+/// A Text file's contents: `text`, then the marker line.
+pub fn with_marker(text: &str, version: &[(DeviceId, u32)]) -> String {
+    let version: Vec<String> = version.iter().map(|&(device, counter)| ChangeId { device, counter }.to_string()).collect();
+    format!("{text}\n{MARKER} {}\n", version.join(", "))
+}
+
+/// A Text file's text, and the version its marker line names (None if the line is missing or
+/// was edited, as in a file from elsewhere). A byte order mark and Windows line endings, which
+/// other editors may add, are dropped first.
+pub fn split_marker(file: &str) -> (String, Option<Vec<(DeviceId, u32)>>) {
+    let file = file.strip_prefix('\u{feff}').unwrap_or(file).replace("\r\n", "\n");
+    let body = file.strip_suffix('\n').unwrap_or(&file); // an editor may drop the last line break
+    if let Some((text, last)) = body.rsplit_once('\n') {
+        if let Some(version) = last.strip_prefix(MARKER).and_then(|rest| parse_version(rest.trim())) {
+            return (text.to_string(), Some(version));
+        }
+    }
+    (file, None)
+}
+
+fn parse_version(s: &str) -> Option<Vec<(DeviceId, u32)>> {
+    s.split(',').map(str::trim).filter(|p| !p.is_empty())
+        .map(|p| p.parse::<ChangeId>().ok().map(|id| (id.device, id.counter)))
+        .collect()
+}
 
 /// A deleted block that reappears exactly elsewhere is recorded as a Move if it's at least
 /// this many characters, or at least one whole line.
@@ -208,6 +242,30 @@ fn split(segments: &mut Vec<(usize, usize, usize)>, j: usize, (h, s, l): (usize,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_marker_comes_off_exactly() {
+        let version = vec![(DeviceId(0x7f8c3ffd), 120), (DeviceId(0x3e91a2b0), 48)];
+        let file = with_marker("The rain had stopped.", &version);
+        assert_eq!(file, "The rain had stopped.\n// Wrtier version: 7f8c3ffd:120, 3e91a2b0:48\n");
+        // Whatever the text ends with, it comes back as it was.
+        for text in ["", "abc", "abc\n", "abc\n\n", "\n"] {
+            assert_eq!(split_marker(&with_marker(text, &version)), (text.to_string(), Some(version.clone())), "{text:?}");
+        }
+        assert_eq!(split_marker(&with_marker("abc", &[])), ("abc".to_string(), Some(vec![])));
+    }
+
+    #[test]
+    fn other_editors_may_touch_the_file() {
+        let version = vec![(DeviceId(1), 5)];
+        // Windows line endings, a byte order mark, and no line break after the marker.
+        let file = format!("\u{feff}{}", with_marker("one\ntwo", &version).replace('\n', "\r\n"));
+        assert_eq!(split_marker(&file), ("one\ntwo".to_string(), Some(version.clone())));
+        assert_eq!(split_marker("abc\n// Wrtier version: 00000001:5"), ("abc".to_string(), Some(version)));
+        // An edited or missing marker: the whole file is text, compared the old way.
+        assert_eq!(split_marker("abc\n// Wrtier version: garbled\n").1, None);
+        assert_eq!(split_marker("plain text from elsewhere\n"), ("plain text from elsewhere\n".to_string(), None));
+    }
 
     fn chars(s: &str) -> Vec<char> {
         s.chars().collect()
