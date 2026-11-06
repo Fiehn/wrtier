@@ -52,9 +52,24 @@ CREATE TABLE deletions (
 );
 ";
 
+/// The newest storage version this app writes. A file with a higher one was written by a newer
+/// app, which may store things this one doesn't understand, so it isn't touched.
+pub const STORAGE_VERSION: i64 = 8;
+
 // Inner functions take a connection
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version > STORAGE_VERSION {
+        return Err(format!("this History was written by a newer version of the app (storage version {version})").into());
+    }
+    if version == 0 {
+        // Version 0 means a new, empty file. One that already has tables is some other
+        // database: never turn it into a History (or merge it and delete it).
+        let tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))?;
+        if tables > 0 {
+            return Err("this is not a History file".into());
+        }
+    }
     if version < 1 {
         conn.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = 1; COMMIT;"))?;
     }
@@ -608,6 +623,13 @@ pub fn save(path: &Path, changes: &[Change], doc: &Doc) -> Result<()> {
     tx.commit()?;
     Ok(())
 }
+/// Every Change in a History file, in the fixed Change order.
+pub fn read_all(path: &Path) -> Result<Vec<Change>> {
+    let conn = Connection::open(path)?;
+    migrate(&conn)?;
+    read_changes(&conn)
+}
+
 pub fn load(path: &Path, device: DeviceId) -> Result<(Vec<Change>, Doc)> {
     let conn = Connection::open(path)?;
     migrate(&conn)?;
@@ -653,6 +675,10 @@ impl Error for SameIdDifferentContent {}
 /// Merges a Conflict copy (`other`) into `main`: every Change from both, nothing lost.
 /// All or nothing: if the copies disagree about any Change, or anything fails, `main` is untouched.
 pub fn merge(main: &Path, other: &Path) -> Result<()> {
+    if !other.is_file() {
+        // Opening it would quietly create an empty database.
+        return Err(format!("no such file: {}", other.display()).into());
+    }
     migrate(&Connection::open(other)?)?; // bring the other file up to date first
     let conn = Connection::open(main)?;
     migrate(&conn)?;
@@ -942,6 +968,30 @@ mod test {
         let conn = Connection::open(&path).unwrap();
         let text: String = conn.query_row("SELECT text FROM history WHERE kind = 'milestone'", [], |r| r.get(0)).unwrap();
         assert_eq!(text, "Draft 2, sent to editor");
+    }
+
+    #[test]
+    fn files_this_app_cant_safely_handle_are_refused_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        // Written by a newer version of the app.
+        let newer = dir.path().join("newer.db");
+        {
+            let conn = Connection::open(&newer).unwrap();
+            migrate(&conn).unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version = {}", STORAGE_VERSION + 1)).unwrap();
+        }
+        let err = load(&newer, DeviceId(1)).err().expect("refused");
+        assert!(err.to_string().contains("newer version"), "{err}");
+        // Some other database entirely.
+        let foreign = dir.path().join("foreign.db");
+        Connection::open(&foreign).unwrap().execute_batch("CREATE TABLE rows (x TEXT)").unwrap();
+        let before = std::fs::read(&foreign).unwrap();
+        assert!(load(&foreign, DeviceId(1)).err().expect("refused").to_string().contains("not a History"));
+        assert_eq!(std::fs::read(&foreign).unwrap(), before);
+        // A merge with a file that doesn't exist doesn't create one.
+        let missing = dir.path().join("missing.db");
+        assert!(merge(&newer, &missing).is_err());
+        assert!(!missing.exists());
     }
 
     #[test]

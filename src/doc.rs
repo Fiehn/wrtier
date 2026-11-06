@@ -231,6 +231,11 @@ impl Doc {
     }
 
     /// This Device's ID.
+    /// Has this Doc applied the Change?
+    pub fn has(&self, id: ChangeId) -> bool {
+        self.applied.contains(&id)
+    }
+
     pub fn device(&self) -> DeviceId {
         self.device
     }
