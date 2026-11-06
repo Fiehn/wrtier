@@ -4,6 +4,7 @@
 pub mod device;
 pub mod patch;
 pub mod positions;
+pub mod recovery;
 pub mod vault;
 pub mod work;
 
@@ -21,6 +22,8 @@ use work::{Op, WorkState};
 struct App {
     device: DeviceState,
     vault: Option<Vault>,
+    /// This Device's recovery files, outside every Vault.
+    recovery_dir: PathBuf,
 }
 
 struct AppState(Mutex<App>);
@@ -80,7 +83,7 @@ enum VaultOpened {
 fn open_vault(state: State<AppState>, path: String, create: bool) -> Result<VaultOpened, String> {
     with_app(&state, |app| {
         let root = PathBuf::from(&path);
-        match Vault::open(&root, app.device.device, create)? {
+        match Vault::open(&root, app.device.device, create, &app.recovery_dir)? {
             Opened::NotAVault => Ok(VaultOpened::NotAVault),
             Opened::Vault(vault) => {
                 let device_name = vault.device_name();
@@ -187,8 +190,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Device state lives outside the Vault, in this Device's local app data.
-            let device = DeviceState::load_or_create(&app.path().app_local_data_dir()?)?;
-            app.manage(AppState(Mutex::new(App { device, vault: None })));
+            let local = app.path().app_local_data_dir()?;
+            let device = DeviceState::load_or_create(&local)?;
+            app.manage(AppState(Mutex::new(App { device, vault: None, recovery_dir: local.join("recovery") })));
             start_timer(app.handle().clone());
             Ok(())
         })

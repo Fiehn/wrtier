@@ -13,7 +13,10 @@ use wrtier::conflicts::{self, absorb_conflict_copies, conflict_copies, Absorbed}
 use wrtier::doc::Doc;
 use wrtier::ids::DeviceId;
 use wrtier::storage::{self, Probe};
-use crate::work::{Op, OpenWork, WorkState};
+use crate::recovery::{self, Recovery};
+use crate::work::{undoable, Op, OpenWork, WorkState};
+use wrtier::change::Change;
+use wrtier::ids::ChangeId;
 
 /// The file that makes a folder a Vault.
 pub const VAULT_FILE: &str = "vault.db";
@@ -27,6 +30,11 @@ pub struct Vault {
     vault_doc: Doc,
     /// Open Works by ID: the path from the Vault's folder without the extension ("Short stories/Rain").
     pub works: HashMap<String, OpenWork>,
+    /// This Device's recovery files (outside the Vault).
+    recovery_dir: PathBuf,
+    /// Works recovered since the Vault opened: the Changes recovered (undo can take them back
+    /// when the Work is opened) and the line that tells the Author.
+    recovered: HashMap<String, (Vec<ChangeId>, String)>,
 }
 
 /// A file the app couldn't take in: kept untouched and reported until it's resolved.
@@ -73,6 +81,8 @@ pub struct OpenedWork {
     pub name: String,
     pub text: String,
     pub problems: Vec<SyncProblem>,
+    /// What was recovered from before the app closed unexpectedly, if anything.
+    pub notice: Option<String>,
 }
 
 pub enum Opened {
@@ -114,7 +124,8 @@ fn record_name(db: &Path, doc: &mut Doc, name: Option<&str>, now_ms: u64) -> Res
 impl Vault {
     /// Opens the Vault in `root`. Without a `vault.db` it's not a Vault yet: then it's made one
     /// only if `create` (the Author said yes).
-    pub fn open(root: &Path, device: DeviceId, create: bool) -> Result<Opened, String> {
+    /// `recovery_dir`: where this Device keeps recovery files.
+    pub fn open(root: &Path, device: DeviceId, create: bool, recovery_dir: &Path) -> Result<Opened, String> {
         if !root.is_dir() {
             return Err(format!("{} isn't a folder", root.display()));
         }
@@ -138,7 +149,12 @@ impl Vault {
             Probe::Unreadable(e) => return Err(format!("{VAULT_FILE} can't be read right now: {e}")),
         }
         let (_, vault_doc) = storage::load(&file, device).map_err(err)?;
-        let mut vault = Vault { root: root.to_path_buf(), device, vault_doc, works: HashMap::new() };
+        let mut vault = Vault {
+            root: root.to_path_buf(), device, vault_doc,
+            works: HashMap::new(),
+            recovery_dir: recovery_dir.to_path_buf(),
+            recovered: HashMap::new(),
+        };
         vault.absorb_vault_copies(&mut Vec::new()); // any left are reported when the Works are listed
         Ok(Opened::Vault(vault))
     }
@@ -246,6 +262,12 @@ impl Vault {
     /// Every Work in the Vault, after absorbing any Conflict copies.
     pub fn list(&mut self, now_ms: u64) -> Listing {
         let mut problems = Vec::new();
+        // Writing kept from before the app closed unexpectedly goes back first.
+        for id in recovery::kept_for(&self.recovery_dir, &self.root) {
+            if let Err(problem) = self.recover(&id, now_ms) {
+                problems.push(problem);
+            }
+        }
         let mut files = self.walk();
 
         // A copy whose main file is missing holds the whole file: it becomes the main file.
@@ -353,11 +375,14 @@ impl Vault {
     pub fn open_work(&mut self, id: &str, now_ms: u64) -> Result<OpenedWork, String> {
         let name = id.rsplit('/').next().unwrap_or(id).to_string();
         if let Some(work) = self.works.get(id) {
-            return Ok(OpenedWork { id: id.to_string(), name, text: work.text(), problems: Vec::new() });
+            return Ok(OpenedWork { id: id.to_string(), name, text: work.text(), problems: Vec::new(), notice: None });
         }
         let (db, typ) = self.paths(id)?;
         let (me, device_name) = (self.device, self.device_name());
         let mut problems = Vec::new();
+        if let Err(problem) = self.recover(id, now_ms) {
+            problems.push(problem);
+        }
         let result = catch_unwind(AssertUnwindSafe(|| -> Result<Doc, String> {
             if db.exists() {
                 match storage::probe(&db) {
@@ -398,8 +423,84 @@ impl Vault {
             Err(panic) => return Err(format!("Something went wrong opening {name}: {}", panic_message(panic.as_ref()))),
         };
         let text = doc.text();
-        self.works.insert(id.to_string(), OpenWork::new(db, typ, doc, now_ms));
-        Ok(OpenedWork { id: id.to_string(), name, text, problems })
+        let (sitting, notice) = match self.recovered.remove(id) {
+            Some((changes, notice)) => (changes, Some(notice)),
+            None => (Vec::new(), None),
+        };
+        let recovery = Recovery::for_work(&self.recovery_dir, &self.root, id);
+        self.works.insert(id.to_string(), OpenWork::new(db, typ, doc, now_ms, recovery, sitting));
+        Ok(OpenedWork { id: id.to_string(), name, text, problems, notice })
+    }
+
+    /// Puts back what a Work's recovery file kept from before the app closed unexpectedly: the
+    /// open burst becomes the Change it would have become (at its last keystroke), unsaved
+    /// Changes are saved, and a cut waiting for its paste goes back where it was. Then the
+    /// recovery file is removed. If it can't be put back it's kept, and tried again later.
+    fn recover(&mut self, id: &str, now_ms: u64) -> Result<(), SyncProblem> {
+        if self.works.contains_key(id) {
+            return Ok(()); // open: its recovery file is the live one
+        }
+        let mut files = Recovery::for_work(&self.recovery_dir, &self.root, id);
+        let problem = |reason: String| SyncProblem {
+            path: id.to_string(),
+            reason: format!("writing that wasn't saved before the app closed couldn't be put back ({reason}). It's kept, and tried again."),
+        };
+        let kept = match files.read() {
+            Ok(Some(kept)) => kept,
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(problem(e)),
+        };
+        let (db, typ) = self.paths(id).map_err(|e| problem(e))?;
+        if storage::probe(&db) != Probe::History {
+            return Err(problem(format!("{id}.db isn't a History in the Vault right now")));
+        }
+        let (me, device_name) = (self.device, self.device_name());
+        let result = catch_unwind(AssertUnwindSafe(|| -> Result<(Vec<ChangeId>, Vec<String>), String> {
+            let (_, mut doc) = storage::load(&db, me).map_err(err)?;
+            let mut recovered: Vec<ChangeId> = Vec::new();
+            let mut lines: Vec<String> = Vec::new();
+            // Changes that failed to save: merged in like a Conflict copy (any already saved are skipped).
+            if files.db.exists() {
+                storage::merge(&db, &files.db).map_err(err)?;
+                let new: Vec<Change> = storage::read_all(&db).map_err(err)?.into_iter().filter(|c| !doc.has(c.id)).collect();
+                doc.apply_all(&new);
+                recovered.extend(new.iter().filter(|c| undoable(c)).map(|c| c.id));
+                if !new.is_empty() {
+                    lines.push(format!("Saved {} Change{} that couldn't be saved before the app closed.", new.len(), if new.len() == 1 { "" } else { "s" }));
+                }
+            }
+            if let Some(burst) = &kept.burst {
+                if burst.resume(&mut doc)? {
+                    if kept.cut {
+                        doc.cancel_burst();
+                        lines.push("A cut that hadn't been pasted yet was put back where it was.".into());
+                    } else if let Some(change) = doc.close_burst(burst.last_ms) {
+                        storage::save(&db, std::slice::from_ref(&change), &doc).map_err(err)?;
+                        recovered.push(change.id);
+                        lines.push(if burst.deleting {
+                            "Recovered a deletion made just before the app closed unexpectedly.".into()
+                        } else {
+                            format!("Recovered {} characters typed just before the app closed unexpectedly.", burst.draft.chars().count())
+                        });
+                    }
+                }
+            }
+            if !recovered.is_empty() {
+                record_name(&db, &mut doc, device_name.as_deref(), now_ms)?;
+            }
+            storage::sync_text_file(&db, &typ, &mut doc, now_ms).map_err(err)?;
+            Ok((recovered, lines))
+        }));
+        let (changes, lines) = match result {
+            Ok(Ok(done)) => done,
+            Ok(Err(e)) => return Err(problem(e)),
+            Err(panic) => return Err(problem(panic_message(panic.as_ref()))),
+        };
+        files.clear().map_err(|e| problem(e))?;
+        if !lines.is_empty() {
+            self.recovered.insert(id.to_string(), (changes, lines.join(" ")));
+        }
+        Ok(())
     }
 
     /// Makes a new, empty Work and opens it. `id` is its name, or a path inside the Vault
@@ -437,7 +538,7 @@ impl Vault {
                 let what = panic_message(panic.as_ref());
                 self.works.remove(id);
                 Err(match self.open_work(id, now_ms) {
-                    Ok(_) => format!("Something went wrong in {id} ({what}). It was reopened from disk; the last few seconds of typing may be missing."),
+                    Ok(_) => format!("Something went wrong in {id} ({what}). It was reopened from disk, with what you had typed recovered."),
                     Err(e) => format!("Something went wrong in {id} ({what}), and it couldn't be reopened: {e}"),
                 })
             }
@@ -569,7 +670,7 @@ mod tests {
     const OTHER: DeviceId = DeviceId(2);
 
     fn open(root: &Path) -> Vault {
-        match Vault::open(root, ME, true).unwrap() {
+        match Vault::open(root, ME, true, &root.join(".recovery")).unwrap() {
             Opened::Vault(v) => v,
             Opened::NotAVault => panic!("asked to create it"),
         }
@@ -592,13 +693,13 @@ mod tests {
     #[test]
     fn a_folder_becomes_a_vault_only_when_asked() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(Vault::open(dir.path(), ME, false).unwrap(), Opened::NotAVault));
+        assert!(matches!(Vault::open(dir.path(), ME, false, &dir.path().join(".recovery")).unwrap(), Opened::NotAVault));
         assert!(!dir.path().join(VAULT_FILE).exists());
         let mut vault = open(dir.path());
         assert_eq!(vault.device_name(), None);
         vault.set_device_name("Laptop", 2000).unwrap();
         // Another start of the app finds it.
-        let Opened::Vault(again) = Vault::open(dir.path(), ME, false).unwrap() else { panic!("it's a Vault now") };
+        let Opened::Vault(again) = Vault::open(dir.path(), ME, false, &dir.path().join(".recovery")).unwrap() else { panic!("it's a Vault now") };
         assert_eq!(again.device_name().as_deref(), Some("Laptop"));
     }
 
@@ -606,7 +707,7 @@ mod tests {
     fn a_vault_file_from_another_program_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         create_foreign_db(&dir.path().join(VAULT_FILE));
-        assert!(Vault::open(dir.path(), ME, true).is_err());
+        assert!(Vault::open(dir.path(), ME, true, &dir.path().join(".recovery")).is_err());
     }
 
     #[test]
@@ -764,6 +865,94 @@ mod tests {
         work(root, "Short stories/Draft 1.5", "dots", ME);
         assert_eq!(kinds(&vault.list(2000)), vec![("Short stories/Draft 1.5", &EntryKind::Work)]);
         assert_eq!(vault.open_work("Short stories/Draft 1.5", 2000).unwrap().text, "dots");
+    }
+
+    use crate::work::{Op, Origin};
+    use wrtier::change::ChangeKind;
+
+    fn typing(from: usize, text: &str) -> Op {
+        Op::Type { from, to: from, text: text.into(), origin: Origin::Input }
+    }
+
+    /// The app stops without closing anything (a crash), then the Vault is opened again.
+    fn crash_and_reopen(vault: Vault, root: &Path) -> Vault {
+        std::mem::forget(vault); // nothing is closed or cleaned up
+        let mut vault = open(root);
+        vault.list(50_000);
+        vault
+    }
+
+    #[test]
+    fn typing_open_at_a_crash_is_recovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.set_device_name("Laptop", 500).unwrap();
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "The rain had stopped.")], 2000).unwrap();
+        let typed = |root: &Path| storage::read_all(&root.join("Rain.db")).unwrap().iter().any(|c| matches!(c.kind, ChangeKind::Insert(_)));
+        assert!(!typed(root), "the burst was still open");
+
+        let mut vault = crash_and_reopen(vault, root);
+        let saved = storage::read_all(&root.join("Rain.db")).unwrap();
+        assert!(saved.iter().any(|c| matches!(c.kind, ChangeKind::Insert(_)) && c.hlc.0 >= 2000 && c.hlc.0 < 50_000),
+                "recorded at its last keystroke: {saved:?}");
+        assert_eq!(std::fs::read_to_string(root.join("Rain.typ")).unwrap(), "The rain had stopped.");
+        let opened = vault.open_work("Rain", 60_000).unwrap();
+        assert_eq!(opened.text, "The rain had stopped.");
+        assert!(opened.notice.unwrap().contains("Recovered 21 characters"));
+        // It's part of the sitting: undo takes it back.
+        vault.edit("Rain", vec![Op::Undo], 61_000).unwrap();
+        assert_eq!(vault.works["Rain"].text(), "");
+        assert!(recovery::kept_for(&root.join(".recovery"), root).is_empty(), "nothing left to recover");
+    }
+
+    #[test]
+    fn a_cut_waiting_at_a_crash_goes_back_where_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "One. Two.")], 2000).unwrap();
+        vault.tick(10_000); // saved
+        vault.edit("Rain", vec![Op::Cut { from: 0, to: 5 }], 11_000).unwrap();
+        let mut vault = crash_and_reopen(vault, root);
+        let opened = vault.open_work("Rain", 60_000).unwrap();
+        assert_eq!(opened.text, "One. Two.");
+        assert!(opened.notice.unwrap().contains("cut"));
+    }
+
+    #[test]
+    fn a_recovery_already_saved_isnt_recorded_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "abc")], 2000).unwrap();
+        // Keep a copy of the recovery file, then let the burst be saved normally.
+        let files = Recovery::for_work(&root.join(".recovery"), root, "Rain");
+        let copy = std::fs::read(&files.json).unwrap();
+        vault.tick(10_000);
+        std::fs::write(&files.json, copy).unwrap(); // as if the app crashed before removing it
+        let mut vault = crash_and_reopen(vault, root);
+        assert_eq!(vault.open_work("Rain", 60_000).unwrap().text, "abc");
+        let inserts = storage::read_all(&root.join("Rain.db")).unwrap().iter().filter(|c| matches!(c.kind, ChangeKind::Insert(_))).count();
+        assert_eq!(inserts, 1);
+    }
+
+    #[test]
+    fn a_recovery_without_its_history_is_kept_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "abc")], 2000).unwrap();
+        std::mem::forget(vault);
+        std::fs::rename(root.join("Rain.db"), root.join("Elsewhere.db")).unwrap(); // gone, e.g. renamed on another Device
+        let mut vault = open(root);
+        let listing = vault.list(50_000);
+        assert!(listing.problems.iter().any(|p| p.path == "Rain" && p.reason.contains("kept")), "{:?}", listing.problems);
+        assert_eq!(recovery::kept_for(&root.join(".recovery"), root), vec!["Rain".to_string()]);
     }
 
     #[test]

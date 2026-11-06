@@ -759,6 +759,22 @@ impl Doc {
         }
     }
 
+    /// Opens a burst again from what a recovery file kept of it, after the app stopped with it
+    /// open. Its reserved ID is taken again. False if it can't be: a burst is open, its Change is
+    /// already in the History (it was saved after all), or a character it's anchored to isn't.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume_burst(&mut self, kind: BurstKind, id: ChangeId, left: Option<CharId>, replacing: Vec<CharId>,
+                        draft: String, opened_ms: u64, last_ms: u64) -> bool {
+        let known = |c: &CharId| self.tree.index_of(*c).is_some();
+        if self.burst.is_some() || id.device != self.device || self.has(id) || !left.iter().all(known) || !replacing.iter().all(known) {
+            return false;
+        }
+        self.next_counter = self.next_counter.max(id.counter + 1);
+        self.burst = Some(Burst { kind, id, left, replacing, draft, opened_ms, last_ms, at: 0, hidden: 0 });
+        self.place_burst();
+        true
+    }
+
     /// Is the open burst a typing burst that would put back exactly what it hides? (E.g. typing
     /// over a selection, then undoing back to the start.) Closing it would record a pointless
     /// replacement, so the caller cancels it instead.
@@ -1931,6 +1947,25 @@ mod test {
         assert_eq!(doc.text(), "abcdef");
         // The reserved IDs were given back: the next Change follows the first without a gap.
         assert_eq!(doc.insert_local(0, "!", 4000).id.counter, 2);
+    }
+
+    #[test]
+    fn a_burst_resumes_from_what_was_kept_of_it() {
+        // The app stopped with a burst open over a selection; the History is loaded again.
+        let mut before = Doc::new(DeviceId(1));
+        let saved = vec![before.insert_local(0, "The rain had stopped.", 1000)];
+        before.replace_text(13, 7, "eased", 2000);
+        let kept = before.burst().unwrap().clone();
+        before.close_burst(3000);
+
+        let mut after = Doc::new(DeviceId(1));
+        after.apply_all(&saved);
+        assert!(after.resume_burst(kept.kind, kept.id, kept.left, kept.replacing.clone(), kept.draft.clone(), kept.opened_ms, kept.last_ms));
+        assert_eq!(after.text(), "The rain had eased.");
+        let change = after.close_burst(kept.last_ms).unwrap();
+        assert_eq!(change.id, kept.id, "it keeps the ID it reserved");
+        assert_eq!(after.text(), before.text());
+        assert!(!after.resume_burst(kept.kind, kept.id, kept.left, kept.replacing, kept.draft, 0, 0), "not twice");
     }
 
     #[test]

@@ -21,7 +21,7 @@ type EntryKind =
 type Entry = { id: string; name: string } & EntryKind;
 type SyncProblem = { path: string; reason: string };
 type Listing = { entries: Entry[]; problems: SyncProblem[] };
-type OpenedWork = { id: string; name: string; text: string; problems: SyncProblem[] };
+type OpenedWork = { id: string; name: string; text: string; problems: SyncProblem[]; notice: string | null };
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -67,7 +67,7 @@ function clearUndoSteps() {
 
 function showWorkState(state: WorkState) {
   const el = $("status");
-  const lines = [state.saveError, state.textFileProblem].filter((line): line is string => line !== null);
+  const lines = [state.saveError, state.textFileProblem, state.recoveryProblem].filter((line): line is string => line !== null);
   el.textContent = lines.join("\n");
   el.hidden = lines.length === 0;
 }
@@ -207,6 +207,8 @@ function showWork(work: OpenedWork | null) {
   $("empty").hidden = work !== null;
   $("editor").hidden = work === null;
   $("status").hidden = true;
+  $("notice").textContent = work?.notice ?? "";
+  $("notice").hidden = !work?.notice;
   current = work === null ? null : new WorkSync(work.id, editor, {
     state: showWorkState,
     burstClosed: clearUndoSteps,

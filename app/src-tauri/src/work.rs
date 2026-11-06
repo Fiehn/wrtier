@@ -7,6 +7,7 @@
 
 use crate::patch::{self, Patch};
 use crate::positions::{byte_at_utf16, replace_utf16, Positions};
+use crate::recovery::Recovery;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use wrtier::change::{Change, ChangeKind};
@@ -89,6 +90,8 @@ pub struct WorkState {
     pub save_error: Option<String>,
     /// Why the Text file isn't being written, if it isn't.
     pub text_file_problem: Option<String>,
+    /// Why the recovery file can't be kept, if it can't.
+    pub recovery_problem: Option<String>,
 }
 
 pub struct OpenWork {
@@ -111,6 +114,9 @@ pub struct OpenWork {
     text_file_behind: bool,
     text_file_written_ms: u64,
     text_file_problem: Option<String>,
+    /// Keeps what's only in memory (the open burst, a waiting cut, unsaved Changes) on disk.
+    recovery: Recovery,
+    recovery_problem: Option<String>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -118,17 +124,18 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 /// Is this a Change to the text that undo can take back?
-fn undoable(change: &Change) -> bool {
+pub fn undoable(change: &Change) -> bool {
     matches!(change.kind, ChangeKind::Insert(_) | ChangeKind::Delete(_) | ChangeKind::Replace { .. } | ChangeKind::Move { .. })
 }
 
 impl OpenWork {
-    pub fn new(db: PathBuf, typ: PathBuf, doc: Doc, now_ms: u64) -> Self {
+    /// `sitting`: Changes already made in this sitting (recovered ones), which undo can take back.
+    pub fn new(db: PathBuf, typ: PathBuf, doc: Doc, now_ms: u64, recovery: Recovery, sitting: Vec<ChangeId>) -> Self {
         let positions = Positions::new(&doc.text());
         OpenWork {
             db, typ, doc, positions,
             named: false,
-            sitting: Vec::new(),
+            sitting,
             redo: Vec::new(),
             cut: None,
             unsaved: Vec::new(),
@@ -136,6 +143,8 @@ impl OpenWork {
             text_file_behind: false,
             text_file_written_ms: now_ms,
             text_file_problem: None,
+            recovery,
+            recovery_problem: None,
         }
     }
 
@@ -150,7 +159,18 @@ impl OpenWork {
             burst: self.doc.burst().map(|b| b.id.to_string()),
             save_error: self.save_error.clone(),
             text_file_problem: self.text_file_problem.clone(),
+            recovery_problem: self.recovery_problem.clone(),
         }
+    }
+
+    /// Updates the recovery file with what's only in memory. `flush`: also make sure it's on the
+    /// disk itself (the timer does that about once a second).
+    fn keep_recovery(&mut self, flush: bool) {
+        let mut result = self.recovery.keep(&self.doc, self.cut.is_some(), &self.unsaved);
+        if flush && result.is_ok() {
+            result = self.recovery.flush();
+        }
+        self.recovery_problem = result.err().map(|e| format!("Couldn't keep a recovery copy of what you're typing: {e}"));
     }
 
     pub fn has_cut(&self) -> bool {
@@ -184,6 +204,7 @@ impl OpenWork {
             }
         }
         self.save();
+        self.keep_recovery(false);
         #[cfg(debug_assertions)]
         assert_eq!(self.positions, Positions::new(&self.doc.text()), "the position map drifted from the text");
         result.map(|()| self.state(patches))
@@ -402,6 +423,7 @@ impl OpenWork {
             self.recorded(change);
         }
         self.save();
+        self.keep_recovery(true);
         if now_ms.saturating_sub(self.text_file_written_ms) >= TEXT_FILE_EVERY_MS {
             self.write_text_file(now_ms);
         }
@@ -414,13 +436,16 @@ impl OpenWork {
             self.close_burst(now_ms);
         }
         self.save();
+        self.keep_recovery(true);
         self.write_text_file(now_ms);
     }
 
-    /// Closing the Work or quitting: nothing stays open.
+    /// Closing the Work or quitting: nothing stays open. (If saving fails, the recovery file
+    /// keeps the Changes, and they're saved when the Vault is opened again.)
     pub fn close(&mut self, now_ms: u64) {
         self.close_burst(now_ms);
         self.save();
+        self.keep_recovery(true);
         self.write_text_file(now_ms);
     }
 
@@ -471,7 +496,8 @@ mod tests {
         }
         storage::write_text_file(&db, &typ, &doc, 100).unwrap();
         let (_, doc) = storage::load(&db, DeviceId(1)).unwrap();
-        (dir, OpenWork::new(db, typ, doc, 100))
+        let recovery = Recovery::for_work(&dir.path().join("recovery"), dir.path(), "w");
+        (dir, OpenWork::new(db, typ, doc, 100, recovery, Vec::new()))
     }
 
     fn typing(from: usize, text: &str) -> Op {
@@ -648,6 +674,15 @@ mod tests {
         assert_eq!(w.text(), "abc");
         assert_eq!(editor_after("abc", &state), "abc");
         assert_eq!(saved(&w), vec!["insert", "insert", "revert"]);
+    }
+
+    #[test]
+    fn the_open_burst_is_kept_until_it_is_saved() {
+        let (_dir, mut w) = work("abc");
+        w.edit(vec![typing(3, "def")], None, 1000).unwrap();
+        assert!(w.recovery.json.exists(), "kept from the first keystroke");
+        w.tick(10_000); // closed and saved
+        assert!(!w.recovery.json.exists(), "nothing left to keep");
     }
 
     #[test]

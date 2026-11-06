@@ -125,6 +125,12 @@ main {
   outline: none;
 }
 
+#notice {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
 #status {
   white-space: pre-line;
   font-size: 13px;

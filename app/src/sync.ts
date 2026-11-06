@@ -30,6 +30,7 @@ export type WorkState = {
   burst: string | null;
   saveError: string | null;
   textFileProblem: string | null;
+  recoveryProblem: string | null;
 };
 
 /** Marks the editor's own changes from Rust, so they aren't sent back. */
