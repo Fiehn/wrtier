@@ -97,6 +97,14 @@ Planned for v2:
 - Maybe: detect text that was both moved and edited in an External edit as a Move (fuzzy matching), if exact matching turns out not to be enough.
 - Revisit which Changes count as dependent when reverting, based on how the v1 rule feels in real use.
 - Smarter Move edges: text added at the edge of a moved range on another Device follows the Move when it clearly belongs to it. Example: if the range starts just after a ".", a word added after that "." (such as "Quietly, ") goes with the Move, and the same at the end. The rule must give the same answer on every Device even when the punctuation itself was edited concurrently.
+- A cache for opening Works almost instantly, mainly for phones. The History engine's working state (the position tree, the layout, which Changes are applied and undone, the Moves, the clock) is saved as one file outside the Vault. Opening loads it and applies only the Changes added since. It needs no change to the engine's rules or to anything stored in the Vault:
+  - Everything the engine shows is derived from the Changes, so the cache is only a shortcut. Deleting it loses nothing; the Work opens the normal way.
+  - The tree and layout are flat arrays of numbers, so saving and loading them is close to copying memory.
+  - Applying a batch of new Changes and recomputing once already handles Changes that sort before ones already applied, such as those from a merged Conflict copy.
+  - The cache records the highest Change counter it holds from each Device, plus the total number of Changes. Anything that doesn't match the `.db` means the cache is discarded.
+  - The cache file has a version number, so any change to the engine's in-memory shape (such as moving to FugueMax) just discards old caches.
+  - Tested like the engine itself: opening from the cache plus new Changes must give exactly the same result as opening from scratch.
+  - Until then, keep the `.db` the single source of truth. Nothing the engine needs may exist only in memory or only in a cache.
 
 Out of scope entirely: notes and worldbuilding, grammar checking, Reviewers using the app themselves, and suggested edits.
 
@@ -191,7 +199,7 @@ Settle these while building the History engine, and write an ADR for any answer 
 - ~~Two Devices Move the same text to different places while offline.~~ Settled: the later Move in the fixed Change order wins (so it depends on how Change IDs are formed).
 - ~~One Device Moves some text while another deletes part of it, or Moves part of it somewhere else.~~ Settled: a deletion wins wherever the text went. With overlapping Moves, only the overlap goes with the winning Move, the rest of each Move still happens, and the Author gets a Merge notice.
 - ~~How a Change ID is formed and how a Device gets its ID.~~ Settled: the ID is Device ID + counter. Changes are ordered by a hybrid logical clock (wall-clock time that never goes below anything already seen), then by Device ID. A Device ID is random and short, made on first launch, kept as a Device setting and left out of Android backups. The History records a readable name for each Device. A merge that finds the same ID with different content refuses loudly.
-- ~~How long a gap ends a Session.~~ Settled: each Change stores its Session ID. A new Session starts when the Work is opened on a Device, or after about 30 minutes without a Change (to be tuned in use). A Session never spans Devices or Works.
+- ~~How long a gap ends a Session.~~ Settled: each Change stores its Session ID (the ID of the Session's first Change). A new Session starts when the Work is opened on a Device, or after about 30 minutes without a Change (to be tuned in use). A Session never spans Devices or Works.
 - How the editor shows Changes merged in from elsewhere without making your cursor jump. Partly settled: an open typing burst is anchored to characters, so merges don't move it. Cursors and selections outside a burst are still open (Phase 2).
 - A Style file in `styles/` edited on two Devices. Style files are plain files with no History, so their Conflict copies can't merge automatically. Proposal: show both versions and let the Author pick.
 - ~~An External edit on one Device while the app edits the same Work on another.~~ Settled: the External edit is compared against the version the app last wrote to that Text file, not against the current text, and then merges as normal.

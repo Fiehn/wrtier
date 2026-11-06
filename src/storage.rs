@@ -122,6 +122,45 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
+    if version < 6 {
+        // Sessions, record fields (such as Device names), and a readable view of the History.
+        conn.execute_batch("
+        BEGIN;
+        ALTER TABLE changes ADD COLUMN session TEXT; -- the Session's first Change; NULL in older rows = its own
+        CREATE TABLE fields (
+            change  TEXT PRIMARY KEY REFERENCES changes(id),
+            record  TEXT NOT NULL,  -- e.g. 'device/0000002a'
+            field   TEXT NOT NULL,  -- e.g. 'name'
+            value   TEXT NOT NULL
+        );
+        -- Every Change as a readable sentence: when, which Device, which Session, what kind, what text.
+        -- (The Device's latest name; the engine itself also applies Reverts to names.)
+        CREATE VIEW history AS
+        SELECT
+            c.time                          AS time,
+            COALESCE(names.name, c.device)  AS device,
+            COALESCE(c.session, c.id)       AS session,
+            c.kind                          AS kind,
+            COALESCE(
+                i.text,
+                (SELECT group_concat(d.deleted_text, '') FROM deletions d WHERE d.change = c.id),
+                (SELECT group_concat(p.moved_text, ' | ') FROM move_pieces p WHERE p.change = c.id),
+                (SELECT f.record || ' ' || f.field || ' = ' || f.value FROM fields f WHERE f.change = c.id)
+            )                               AS text,
+            c.id                            AS id
+        FROM changes c
+        LEFT JOIN insertions i ON i.change = c.id
+        LEFT JOIN (
+            SELECT substr(f.record, 8) AS device, f.value AS name, MAX(fc.hlc) AS hlc
+            FROM fields f JOIN changes fc ON fc.id = f.change
+            WHERE f.record LIKE 'device/%' AND f.field = 'name'
+            GROUP BY f.record
+        ) names ON names.device = c.device
+        ORDER BY c.hlc, c.device;
+        PRAGMA user_version = 6;
+        COMMIT;
+        ")?;
+    }
     Ok(())
 }
 /// One row in `insertions`. Insert and Replace both write one.
@@ -143,7 +182,8 @@ fn write_insertion(conn: &Connection, change: ChangeId, run: &InsertRun) -> Resu
 
 fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO changes (id, device, counter, hlc, time, kind) VALUES (?1, ?2, ?3, ?4, datetime(?4 / 1000, 'unixepoch'), ?5)",
+        "INSERT OR IGNORE INTO changes (id, device, counter, hlc, time, kind, session)
+         VALUES (?1, ?2, ?3, ?4, datetime(?4 / 1000, 'unixepoch'), ?5, ?6)",
         params![
             change.id.to_string(),
             change.id.device.to_string(),
@@ -156,7 +196,9 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                 ChangeKind::Revert { .. } => "revert",
                 ChangeKind::Move { .. } => "move",
                 ChangeKind::Dismiss { .. } => "dismiss",
+                ChangeKind::SetField { .. } => "field",
             },
+            change.session.to_string(),
         ],
     )?;
     match &change.kind {
@@ -245,6 +287,12 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
             conn.execute(
                 "INSERT OR IGNORE INTO dismissals (change, notice, move, other_move) VALUES (?1, ?2, ?3, ?4)",
                 params![change.id.to_string(), kind, mv.to_string(), other.map(|o| o.to_string())],
+            )?;
+        }
+        ChangeKind::SetField { record, field, value } => {
+            conn.execute(
+                "INSERT OR IGNORE INTO fields (change, record, field, value) VALUES (?1, ?2, ?3, ?4)",
+                params![change.id.to_string(), record, field, value],
             )?;
         }
     }
@@ -355,9 +403,18 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
         dismissals.insert(change, key);
     }
 
+    // Pass 3e: which field each SetField sets.
+    let mut fields: HashMap<ChangeId, (String, String, String)> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT change, record, field, value FROM fields")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let change: ChangeId = column(row, 0)?.parse()?;
+        fields.insert(change, (row.get(1)?, row.get(2)?, row.get(3)?));
+    }
+
     // Pass 4: read every change
     let mut stmt = conn.prepare(
-        "SELECT c.id, c.hlc, c.kind, i.text, i.parent, i.side, i.right_origin, i.into_anchor
+        "SELECT c.id, c.hlc, c.kind, i.text, i.parent, i.side, i.right_origin, i.into_anchor, c.session
         FROM changes c LEFT JOIN insertions i ON i.change = c.id
         ORDER BY c.hlc, c.device",
     )?;
@@ -366,6 +423,8 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
     while let Some(row) = rows.next()? {
         let id: ChangeId = column(row, 0)?.parse()?;
         let hlc: i64 = row.get(1)?;
+        // Rows from before Sessions were stored count as a Session of their own.
+        let session: ChangeId = parse_optional(optional_column(row, 8)?)?.unwrap_or(id);
         let kind = match column(row, 2)? {
             "insert" => ChangeKind::Insert(insert_run_from(row)?),
             "delete" => {
@@ -393,9 +452,13 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
                 let notice = dismissals.remove(&id).ok_or(format!("Missing dismissal for change {}", id))?;
                 ChangeKind::Dismiss { notice }
             }
+            "field" => {
+                let (record, field, value) = fields.remove(&id).ok_or(format!("Missing field for change {}", id))?;
+                ChangeKind::SetField { record, field, value }
+            }
             other => return Err(format!("Unknown change kind: {}", other).into()),
         };
-        changes.push(Change { id, hlc: Hlc(hlc as u64), kind });
+        changes.push(Change { id, hlc: Hlc(hlc as u64), session, kind });
     }
     Ok(changes)
 }
@@ -447,22 +510,84 @@ pub fn load(path: &Path, device: DeviceId) -> Result<(Vec<Change>, Doc)> {
     doc.apply_all(&changes); // works out the text once, not after every Change
     Ok((changes, doc))
 }
+/// Every table that holds Changes:
+/// (name, column naming the Change, what the engine reads (must match between copies), columns to copy).
+/// Readable copies such as `deleted_text` are copied but not compared: they're written when a
+/// Change is saved and may legitimately differ.
+const TABLES: &[(&str, &str, &str, &str)] = &[
+    ("changes", "id", "id, device, counter, hlc, kind, COALESCE(session, id)", "id, device, counter, hlc, time, kind, session"),
+    ("insertions", "change", "change, text, parent, side, right_origin, into_anchor", "change, text, parent, side, right_origin, into_anchor"),
+    ("deletions", "change", "change, first_char, len", "change, first_char, len, deleted_text"),
+    ("revert_targets", "change", "change, target", "change, target"),
+    ("moves", "change", "change, parent, side, right_origin, into_anchor", "change, parent, side, right_origin, into_anchor"),
+    ("move_pieces", "change", "change, piece, first_char, last_char, from_anchor", "change, piece, first_char, last_char, from_anchor, moved_text"),
+    ("move_seen", "change", "change, device, counter", "change, device, counter"),
+    ("dismissals", "change", "change, notice, move, other_move", "change, notice, move, other_move"),
+    ("fields", "change", "change, record, field, value", "change, record, field, value"),
+];
+
+/// Two copies of a History hold the same Change ID with different content. That can only
+/// happen if two Devices used the same Device ID, so the merge refuses instead of guessing.
+#[derive(Debug)]
+pub struct SameIdDifferentContent {
+    pub ids: Vec<String>,
+}
+
+impl std::fmt::Display for SameIdDifferentContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "refusing to merge: Changes {} have the same ID but different content in the two files \
+                   (two Devices are probably using the same Device ID)", self.ids.join(", "))
+    }
+}
+
+impl Error for SameIdDifferentContent {}
+
+/// Merges a Conflict copy (`other`) into `main`: every Change from both, nothing lost.
+/// All or nothing: if the copies disagree about any Change, or anything fails, `main` is untouched.
 pub fn merge(main: &Path, other: &Path) -> Result<()> {
-    // ATTACH the other file and run INSERT OR IGNORE INTO main.changes SELECT * FROM other.changes
-    migrate(&Connection::open(other)?)?;   // bring the other file up to date first
+    migrate(&Connection::open(other)?)?; // bring the other file up to date first
     let conn = Connection::open(main)?;
     migrate(&conn)?;
     conn.execute("ATTACH DATABASE ?1 AS other", [other.to_string_lossy()])?;
-    conn.execute("INSERT OR IGNORE INTO changes SELECT * FROM other.changes", [])?;
-    conn.execute("INSERT OR IGNORE INTO insertions SELECT * FROM other.insertions", [])?;
-    conn.execute("INSERT OR IGNORE INTO deletions SELECT * FROM other.deletions", [])?;
-    conn.execute("INSERT OR IGNORE INTO revert_targets SELECT * FROM other.revert_targets", [])?;
-    conn.execute("INSERT OR IGNORE INTO moves SELECT * FROM other.moves", [])?;
-    conn.execute("INSERT OR IGNORE INTO move_pieces SELECT * FROM other.move_pieces", [])?;
-    conn.execute("INSERT OR IGNORE INTO move_seen SELECT * FROM other.move_seen", [])?;
-    conn.execute("INSERT OR IGNORE INTO dismissals SELECT * FROM other.dismissals", [])?;
+    let result = merge_attached(&conn);
+    conn.execute("DETACH DATABASE other", [])?;
+    result
+}
+
+fn merge_attached(conn: &Connection) -> Result<()> {
+    // 1. Every Change both copies have must be identical, in every table.
+    let mut differing: Vec<String> = Vec::new();
+    for (table, key, compare, _) in TABLES {
+        for (a, b) in [("main", "other"), ("other", "main")] {
+            let sql = format!(
+                "SELECT {key} FROM (
+                     SELECT {compare} FROM {a}.{table} WHERE {key} IN (SELECT id FROM {b}.changes)
+                     EXCEPT
+                     SELECT {compare} FROM {b}.{table} WHERE {key} IN (SELECT id FROM {a}.changes)
+                 )"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let id: String = row.get(0)?;
+                if !differing.contains(&id) {
+                    differing.push(id);
+                }
+            }
+        }
+    }
+    if !differing.is_empty() {
+        differing.sort();
+        return Err(Box::new(SameIdDifferentContent { ids: differing }));
+    }
+
+    // 2. Copy everything `main` doesn't have yet, in one transaction.
+    let tx = conn.unchecked_transaction()?;
+    for (table, _, _, columns) in TABLES {
+        tx.execute(&format!("INSERT OR IGNORE INTO main.{table} ({columns}) SELECT {columns} FROM other.{table}"), [])?;
+    }
+    tx.commit()?;
     Ok(())
-    // TODO: Checks of same id different content.
 }
 
 #[cfg(test)]
@@ -474,7 +599,7 @@ mod test {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     #[test]
@@ -576,6 +701,89 @@ mod test {
         assert!(merged_changes.contains(&b));
         assert!(merged_changes.contains(&c));
         assert_eq!(merged_doc.text(), "chatdog");
+    }
+
+    /// A Doc whose Device has a name and has typed and deleted something.
+    fn named_history() -> (Doc, Vec<Change>) {
+        let mut doc = Doc::new(DeviceId(1));
+        let changes = vec![
+            doc.set_device_name_local("Laptop", 1000),
+            doc.insert_local(0, "The rain had stopped.", 2000),
+            doc.delete_local(13, 7, 3000), // "stopped"
+        ];
+        (doc, changes)
+    }
+
+    #[test]
+    fn sessions_and_fields_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work.db");
+        let (doc, changes) = named_history();
+        save(&path, &changes, &doc).unwrap();
+        let (loaded, loaded_doc) = load(&path, DeviceId(1)).unwrap();
+        assert_eq!(loaded, changes); // sessions included
+        assert_eq!(loaded_doc.device_name(DeviceId(1)), Some("Laptop"));
+    }
+
+    #[test]
+    fn the_history_view_reads_like_sentences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work.db");
+        let (doc, changes) = named_history();
+        save(&path, &changes, &doc).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let rows: Vec<(String, String, String)> = conn
+            .prepare("SELECT device, kind, text FROM history").unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let laptop = |kind: &str, text: &str| ("Laptop".to_string(), kind.to_string(), text.to_string());
+        assert_eq!(rows, vec![
+            laptop("field", "device/00000001 name = Laptop"),
+            laptop("insert", "The rain had stopped."),
+            laptop("delete", "stopped"),
+        ]);
+    }
+
+    #[test]
+    fn merge_refuses_the_same_id_with_different_content() {
+        // Two Devices that wrongly share Device ID 1 both make Change 00000001:1.
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.db"), dir.path().join("b.db"));
+        let mut laptop = Doc::new(DeviceId(1));
+        let mut clone = Doc::new(DeviceId(1));
+        let mine = laptop.insert_local(0, "mine", 1000);
+        let theirs = clone.insert_local(0, "theirs", 1000);
+        save(&a, &[mine.clone()], &laptop).unwrap();
+        save(&b, &[theirs], &clone).unwrap();
+
+        let err = merge(&a, &b).unwrap_err();
+        let err = err.downcast_ref::<SameIdDifferentContent>().expect("the specific error");
+        assert_eq!(err.ids, vec!["00000001:1".to_string()]);
+        // Nothing was copied: the main file is exactly as it was.
+        let (kept, doc) = load(&a, DeviceId(1)).unwrap();
+        assert_eq!(kept, vec![mine]);
+        assert_eq!(doc.text(), "mine");
+    }
+
+    #[test]
+    fn merge_accepts_shared_changes_and_is_harmless_twice() {
+        // Both files hold the same "abcdef"; each adds its own Change; merging twice changes nothing more.
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.db"), dir.path().join("b.db"));
+        let mut laptop = Doc::new(DeviceId(1));
+        let mut phone = Doc::new(DeviceId(2));
+        let base = laptop.insert_local(0, "abcdef", 1000);
+        phone.apply(&base);
+        let x = laptop.insert_local(6, "X", 2000);
+        let y = phone.delete_local(0, 1, 2000);
+        save(&a, &[base.clone(), x], &laptop).unwrap();
+        save(&b, &[base, y], &phone).unwrap();
+        merge(&a, &b).unwrap();
+        merge(&a, &b).unwrap();
+        let (all, doc) = load(&a, DeviceId(1)).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(doc.text(), "bcdefX");
     }
 
     #[test]

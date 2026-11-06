@@ -33,6 +33,15 @@ pub enum ChangeKind {
     },
     /// Hides a Merge notice. Notices are worked out from the History; dismissing one is the only part recorded.
     Dismiss { notice: NoticeKey },
+    /// Sets one field of a record: anything that isn't the Work's text, such as a Device's name.
+    /// The latest value in the fixed Change order wins; older values stay in the History,
+    /// and reverting this Change brings the previous value back.
+    SetField { record: String, field: String, value: String },
+}
+
+/// The record holding a Device's own settings, such as its readable name.
+pub fn device_record(device: DeviceId) -> String {
+    format!("device/{device}")
 }
 
 /// Names a Merge notice the same way on every Device, by the Moves involved.
@@ -48,6 +57,9 @@ pub enum NoticeKey {
 pub struct Change {
     pub id: ChangeId,
     pub hlc: Hlc,
+    /// The Session it belongs to: the ID of the Session's first Change.
+    /// A Session is one Device's Changes in one sitting, and never spans Devices or Works.
+    pub session: ChangeId,
     pub kind: ChangeKind,
 }
 
@@ -78,6 +90,7 @@ mod test {
         let change1 = Change {
             id: ChangeId { device: DeviceId(9), counter: 1 },
             hlc: Hlc(100),
+            session: ChangeId { device: DeviceId(9), counter: 1 },
             kind: ChangeKind::Insert(InsertRun {
                 text: "Hello".to_string(),
                 parent: None,
@@ -90,6 +103,7 @@ mod test {
         let change2 = Change {
             id: ChangeId { device: DeviceId(1), counter: 2 },
             hlc: Hlc(200),
+            session: ChangeId { device: DeviceId(1), counter: 2 },
             kind: ChangeKind::Insert(InsertRun {
                 text: "World".to_string(),
                 parent: Some(CharId { offset: 4, change: change1.id }),

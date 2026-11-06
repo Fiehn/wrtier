@@ -17,6 +17,7 @@ pub struct Doc {
     moves: Vec<(Hlc, MoveInfo)>, // to track the moves that have been applied, in order of their HLC
     typed_into: HashMap<CharId, Vec<CharId>>, // a piece's anchor â†’ nodes typed or dropped into it
     dismissals: Vec<(ChangeId, NoticeKey)>,   // every Dismiss Change, and the notice it hides
+    session: Option<(ChangeId, u64)>,         // this Device's current Session: (its first Change, time of the last)
     layout: Layout,
     // Worked out by `refresh` after every Change, so reading the text doesn't redo it.
     visible: Vec<(CharId, Option<Piece>)>,    // the visible characters in reading order, with their piece
@@ -51,6 +52,7 @@ impl Doc {
             moves: Vec::new(),
             typed_into: HashMap::new(),
             dismissals: Vec::new(),
+            session: None,
             layout: Layout::default(),
             visible: Vec::new(),
         }
@@ -203,6 +205,7 @@ impl Doc {
                 // Changes nothing in the text; merge_notices() checks this list.
                 self.dismissals.push((change.id, *notice));
             }
+            ChangeKind::SetField { .. } => {} // fields aren't part of what the reference checks
         }
     }
 
@@ -335,11 +338,14 @@ impl Doc {
 
     /// Makes a new Change from this Device, with the next counter and a fresh clock value.
     fn new_change(&mut self, kind: ChangeKind, now_ms: u64) -> Change {
-        let change = Change {
-            id: ChangeId { device: self.device, counter: self.next_counter },
-            hlc: self.clock.tick(now_ms),
-            kind,
+        let id = ChangeId { device: self.device, counter: self.next_counter };
+        // Sessions: the same rule as the fast engine, so both make identical Changes.
+        let session = match self.session {
+            Some((first, last)) if now_ms.saturating_sub(last) < crate::doc::SESSION_GAP_MS => first,
+            _ => id,
         };
+        self.session = Some((session, now_ms));
+        let change = Change { id, hlc: self.clock.tick(now_ms), session, kind };
         self.next_counter += 1;
         change
     }

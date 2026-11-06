@@ -1,4 +1,4 @@
-use proptest::prelude::*;
+﻿use proptest::prelude::*;
 use wrtier::change::Change;
 use wrtier::doc::Doc;
 use wrtier::ids::DeviceId;
@@ -13,6 +13,7 @@ enum Action {
     Restore { device: usize, pick: u16 },
     Move { device: usize, from: u16, len: u8, to: u16 },
     Dismiss { device: usize, pick: u16 },
+    Rename { device: usize, name: u8 },
 }
 
 // Generate a random Action.
@@ -26,6 +27,7 @@ fn action() -> impl Strategy<Value = Action> {
         (0..3usize, any::<u16>(), any::<u8>(), any::<u16>())
             .prop_map(|(device, from, len, to)| Action::Move { device, from, len, to }),
         (0..3usize, any::<u16>()).prop_map(|(device, pick)| Action::Dismiss { device, pick }),
+        (0..3usize, 0..4u8).prop_map(|(device, name)| Action::Rename { device, name }),
     ]
 }
 
@@ -146,6 +148,15 @@ fn run(actions: &[Action]) {
                 changes[*device].push(change);
                 now_ms += 1;
             }
+            Action::Rename { device, name } => {
+                // A Device renames itself; a few names so renames collide and revert into each other.
+                let name = ["Laptop", "Phone", "Desk", "Train"][*name as usize];
+                let change = docs[*device].set_device_name_local(name, now_ms - skew[*device]);
+                assert_eq!(docs[*device].device_name(DeviceId(*device as u32)), Some(name));
+                all.push(change.clone());
+                changes[*device].push(change);
+                now_ms += 1;
+            }
         }
     }
     // sync all devices with each other
@@ -173,7 +184,41 @@ fn run(actions: &[Action]) {
         actual.sort();
         assert_eq!(actual, expected);
     }
+    // Every Device agrees on every Device's name, and it's the one worked out independently:
+    // the latest name in the fixed Change order among the renames still in effect.
+    for named in 0..3u32 {
+        let expected = expected_name(&all, DeviceId(named));
+        for doc in &docs {
+            assert_eq!(doc.device_name(DeviceId(named)), expected.as_deref(), "name of Device {named}");
+        }
+    }
+}
 
+/// A Device's name, worked out without Doc.
+fn expected_name(all: &[Change], device: DeviceId) -> Option<String> {
+    let reverted_by = reverted_by(all);
+    let record = wrtier::change::device_record(device);
+    all.iter()
+        .filter(|c| in_effect(c.id, &reverted_by))
+        .filter_map(|c| match &c.kind {
+            ChangeKind::SetField { record: r, field, value } if *r == record && field == "name" => Some((c.order_key(), value.clone())),
+            _ => None,
+        })
+        .max_by_key(|(order, _)| *order)
+        .map(|(_, value)| value)
+}
+
+/// Every Change that is targeted by a Revert → those Reverts.
+fn reverted_by(all: &[Change]) -> HashMap<ChangeId, Vec<ChangeId>> {
+    let mut reverted_by: HashMap<ChangeId, Vec<ChangeId>> = HashMap::new();
+    for c in all {
+        if let ChangeKind::Revert { targets } = &c.kind {
+            for &t in targets {
+                reverted_by.entry(t).or_default().push(c.id);
+            }
+        }
+    }
+    reverted_by
 }
 
 use std::collections::HashMap;
@@ -201,14 +246,14 @@ fn expected_chars(all: &[Change]) -> Vec<char> {
         }
     }
 
-    // Each character → the Changes that deleted it.
+    // Each character â†’ the Changes that deleted it.
     let mut deleted_by: HashMap<CharId, Vec<ChangeId>> = HashMap::new();
     for c in all {
         let ranges = match &c.kind {
             ChangeKind::Delete(r) => r,
             ChangeKind::Replace { deleted, .. } => deleted,
             ChangeKind::Insert(_) | ChangeKind::Revert { .. } => continue,
-            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } => continue, // they don't delete characters
+            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } => continue, // they don't delete characters
         };
         for r in ranges {
             for offset in r.first.offset..r.first.offset + r.len {
@@ -223,7 +268,7 @@ fn expected_chars(all: &[Change]) -> Vec<char> {
             ChangeKind::Insert(run) => run,
             ChangeKind::Replace { inserted, .. } => inserted,
             ChangeKind::Delete(_) | ChangeKind::Revert { .. } => continue,
-            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } => continue, // they don't add characters
+            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } => continue, // they don't add characters
         };
         if !in_effect(c.id, &reverted_by) {
             continue;

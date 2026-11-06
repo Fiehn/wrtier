@@ -6,7 +6,7 @@
 //! such shortcut is checked against a full recompute. `crate::reference::doc` is the first,
 //! simple version; this one must behave identically (`tests/against_reference.rs`).
 
-use crate::change::{Change, ChangeKind, InsertRun, CharRange, NoticeKey, Span};
+use crate::change::{device_record, Change, ChangeKind, InsertRun, CharRange, NoticeKey, Span};
 use crate::fugue::Tree;
 use crate::ids::{ChangeId, DeviceId, Hlc, CharId};
 use crate::layout::{Layout, MoveInfo, Piece};
@@ -24,6 +24,8 @@ pub struct Doc {
     moves: Vec<(Hlc, MoveInfo)>,                   // every Move applied, with its clock for sorting
     typed_into: HashMap<CharId, Vec<CharId>>,      // a piece's anchor â†’ nodes typed or dropped into it
     dismissals: Vec<(ChangeId, NoticeKey)>,        // every Dismiss Change, and the notice it hides
+    fields: HashMap<(String, String), Vec<(Hlc, ChangeId, String)>>, // (record, field) → every value set
+    session: Option<(ChangeId, u64)>,              // this Device's current Session: (its first Change, time of the last)
     layout: Layout,
     // Worked out by `refresh` (or a fast path) after every Change, so reading the text doesn't redo it.
     visible: Vec<u32>, // the visible characters' tree nodes, in reading order
@@ -39,6 +41,9 @@ pub struct MergeNotice {
     /// The same characters as text, to quote in the History view.
     pub text: String,
 }
+
+/// A new Session starts after this long without a Change from this Device (to be tuned in use).
+pub const SESSION_GAP_MS: u64 = 30 * 60 * 1000;
 
 /// The anchor node of a piece.
 fn anchor_of(piece: Piece) -> CharId {
@@ -58,6 +63,8 @@ impl Doc {
             moves: Vec::new(),
             typed_into: HashMap::new(),
             dismissals: Vec::new(),
+            fields: HashMap::new(),
+            session: None, // a Work just opened: the first Change starts a new Session
             layout: Layout::default(),
             visible: Vec::new(),
         }
@@ -108,6 +115,21 @@ impl Doc {
             .collect()
     }
 
+    /// The current value of a record's field: the latest in the fixed Change order among the
+    /// Changes in effect. None if it was never set, or every value was reverted.
+    pub fn field(&self, record: &str, field: &str) -> Option<&str> {
+        self.fields.get(&(record.to_string(), field.to_string()))?
+            .iter()
+            .filter(|(_, id, _)| self.is_in_effect(*id))
+            .max_by_key(|(hlc, id, _)| (*hlc, id.device))
+            .map(|(_, _, value)| value.as_str())
+    }
+
+    /// A Device's readable name, if it has one.
+    pub fn device_name(&self, device: DeviceId) -> Option<&str> {
+        self.field(&device_record(device), "name")
+    }
+
     /// Dismissed if a Dismiss of it is in effect, so reverting the Dismiss brings it back.
     fn is_dismissed(&self, key: NoticeKey) -> bool {
         self.dismissals.iter().any(|&(id, k)| k == key && self.is_in_effect(id))
@@ -154,8 +176,8 @@ impl Doc {
         let new = !self.applied.contains(&change.id);
         self.apply_change(change);
         match &change.kind {
-            // Dismissing a notice changes no text: nothing to recompute.
-            ChangeKind::Dismiss { .. } => self.debug_check(),
+            // Dismissing a notice or setting a field changes no text: nothing to recompute.
+            ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } => self.debug_check(),
             _ if new => self.refresh(),
             _ => {} // already had it
         }
@@ -246,6 +268,10 @@ impl Doc {
             ChangeKind::Dismiss { notice } => {
                 // Changes nothing in the text; merge_notices() checks this list.
                 self.dismissals.push((change.id, *notice));
+            }
+            ChangeKind::SetField { record, field, value } => {
+                // Changes nothing in the text; field() picks the latest value in effect.
+                self.fields.entry((record.clone(), field.clone())).or_default().push((change.hlc, change.id, value.clone()));
             }
         }
     }
@@ -378,13 +404,29 @@ impl Doc {
         self.commit_local(ChangeKind::Dismiss { notice }, now_ms)
     }
 
-    /// Makes a new Change from this Device, with the next counter and a fresh clock value.
+    /// Sets a field of a record, such as a Device's name.
+    pub fn set_field_local(&mut self, record: &str, field: &str, value: &str, now_ms: u64) -> Change {
+        let kind = ChangeKind::SetField { record: record.to_string(), field: field.to_string(), value: value.to_string() };
+        self.commit_local(kind, now_ms)
+    }
+
+    /// Gives this Device a readable name, shown in the History.
+    pub fn set_device_name_local(&mut self, name: &str, now_ms: u64) -> Change {
+        let record = device_record(self.device);
+        self.set_field_local(&record, "name", name, now_ms)
+    }
+
+    /// Makes a new Change from this Device, with the next counter, a fresh clock value and its Session.
     fn new_change(&mut self, kind: ChangeKind, now_ms: u64) -> Change {
-        let change = Change {
-            id: ChangeId { device: self.device, counter: self.next_counter },
-            hlc: self.clock.tick(now_ms),
-            kind,
+        let id = ChangeId { device: self.device, counter: self.next_counter };
+        // Same Session unless this is the first Change since the Work was opened, or there
+        // was a long pause. (A clock that jumped backwards counts as no pause.)
+        let session = match self.session {
+            Some((first, last)) if now_ms.saturating_sub(last) < SESSION_GAP_MS => first,
+            _ => id,
         };
+        self.session = Some((session, now_ms));
+        let change = Change { id, hlc: self.clock.tick(now_ms), session, kind };
         self.next_counter += 1;
         change
     }
@@ -765,6 +807,50 @@ mod test {
 
         phone.revert_local(dismiss.id, false, 4000);   // a Dismiss is a Change, so it can be reverted
         assert_eq!(phone.merge_notices().len(), 1);
+    }
+
+    #[test]
+    fn a_session_lasts_until_a_long_pause() {
+        let mut doc = Doc::new(DeviceId(1));
+        let a = doc.insert_local(0, "a", 1_000);
+        let b = doc.insert_local(1, "b", 1_000 + 60_000);                   // a minute later
+        let c = doc.insert_local(2, "c", 1_000 + 60_000 + SESSION_GAP_MS); // after a long pause
+        assert_eq!(a.session, a.id);                                         // the first Change starts it
+        assert_eq!(b.session, a.id);
+        assert_eq!(c.session, c.id);                                         // a new Session
+    }
+
+    #[test]
+    fn opening_the_work_starts_a_new_session() {
+        let mut doc = Doc::new(DeviceId(1));
+        let a = doc.insert_local(0, "a", 1_000);
+        let mut reopened = Doc::new(DeviceId(1));
+        reopened.apply(&a);
+        let b = reopened.insert_local(1, "b", 2_000); // only a second later, but the Work was reopened
+        assert_eq!(b.session, b.id);
+    }
+
+    #[test]
+    fn the_latest_device_name_wins_and_reverting_brings_the_old_one_back() {
+        let mut doc = Doc::new(DeviceId(1));
+        assert_eq!(doc.device_name(DeviceId(1)), None);
+        doc.set_device_name_local("Laptop", 1000);
+        let rename = doc.set_device_name_local("Work laptop", 2000);
+        assert_eq!(doc.device_name(DeviceId(1)), Some("Work laptop"));
+        doc.revert_local(rename.id, false, 3000);
+        assert_eq!(doc.device_name(DeviceId(1)), Some("Laptop"));
+    }
+
+    #[test]
+    fn concurrent_renames_agree_on_every_device() {
+        let (mut laptop, mut phone) = laptop_and_phone();
+        let record = device_record(DeviceId(1));
+        let a = laptop.set_field_local(&record, "name", "Laptop", 2000);
+        let b = phone.set_field_local(&record, "name", "Old laptop", 2000); // same time: Device ID decides
+        laptop.apply(&b);
+        phone.apply(&a);
+        assert_eq!(laptop.device_name(DeviceId(1)), Some("Old laptop"));
+        assert_eq!(phone.device_name(DeviceId(1)), Some("Old laptop"));
     }
 
     #[test]
