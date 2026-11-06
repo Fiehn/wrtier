@@ -11,6 +11,7 @@ enum Action {
     Sync { from: usize, to: usize },
     Revert { device: usize, pick: u16, deps: bool },
     Restore { device: usize, pick: u16 },
+    Move { device: usize, pieces: Vec<(u16, u16)>, parent: Option<u16>, side: bool, right_origin: Option<u16> },
 }
 
 // Generate a random Action.
@@ -21,6 +22,8 @@ fn action() -> impl Strategy<Value = Action> {
         (0..3usize, 0..3usize).prop_map(|(from, to)| Action::Sync { from, to }),
         (0..3usize, any::<u16>(), any::<bool>()).prop_map(|(device, pick, deps)| Action::Revert { device, pick, deps }),
         (0..3usize, any::<u16>()).prop_map(|(device, pick)| Action::Restore { device, pick }),
+        (0..3usize, prop::collection::vec((any::<u16>(), any::<u16>()), 1..4), prop::option::of(any::<u16>()), any::<bool>(), prop::option::of(any::<u16>()))
+            .prop_map(|(device, pieces, parent, side, right_origin)| Action::Move { device, pieces, parent, side, right_origin }),
     ]
 }
 
@@ -33,7 +36,7 @@ fn run(actions: &[Action]) {
     let mut all: Vec<Change> = Vec::new();
     let mut changes: Vec<Vec<Change>> = vec![vec![], vec![], vec![]];
     let skew: [u64; 3] = [0, 0, 60_000]; // each device's clock is skewed by this many ms
-    let mut now_ms = 1_000_000u64;
+    let mut now_ms: u64 = 1_000_000u64;
 
     for action in actions {
         match action {
@@ -99,6 +102,9 @@ fn run(actions: &[Action]) {
                     now_ms += 1;
                 }
             }
+            Action::Move { device, pieces, parent, side, right_origin } => {
+                continue;
+            }
         }
     }
     // sync all devices with each other
@@ -158,6 +164,7 @@ fn expected_chars(all: &[Change]) -> Vec<char> {
             ChangeKind::Delete(r) => r,
             ChangeKind::Replace { deleted, .. } => deleted,
             ChangeKind::Insert(_) | ChangeKind::Revert { .. } => continue,
+            ChangeKind::Move { .. } => continue, // Move changes do not delete characters.
         };
         for r in ranges {
             for offset in r.first.offset..r.first.offset + r.len {
@@ -172,6 +179,7 @@ fn expected_chars(all: &[Change]) -> Vec<char> {
             ChangeKind::Insert(run) => run,
             ChangeKind::Replace { inserted, .. } => inserted,
             ChangeKind::Delete(_) | ChangeKind::Revert { .. } => continue,
+            ChangeKind::Move { .. } => continue, // Move changes do not add characters to the text.
         };
         if !in_effect(c.id, &reverted_by) {
             continue;

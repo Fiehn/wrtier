@@ -66,6 +66,7 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                 ChangeKind::Delete(_) => "delete",
                 ChangeKind::Replace { .. } => "replace",
                 ChangeKind::Revert { .. } => "revert",
+                ChangeKind::Move { .. } => "move",
             },
         ],
     )?;
@@ -137,6 +138,9 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                     ],
                 )?;
             }
+        }
+        ChangeKind::Move { pieces, parent, side, right_origin, seen } => {
+            todo!("Implement saving Move changes to the database");
         }
     }
     Ok(())

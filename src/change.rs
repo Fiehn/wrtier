@@ -20,6 +20,13 @@ pub enum ChangeKind {
     Delete(Vec<CharRange>),
     Replace {deleted: Vec<CharRange>, inserted: InsertRun},
     Revert {targets: Vec<ChangeId>},
+    Move {
+        pieces: Vec<Span>, // In reading order; one anchpr per piece
+        parent: Option<CharId>, // where the first anchor goes
+        side: Side,
+        right_origin: Option<CharId>,
+        seen: Vec<(DeviceId, u32)>, // history of the move
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +35,14 @@ pub struct Change {
     pub hlc: Hlc,
     pub kind: ChangeKind,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub first: CharId,
+    pub last: CharId,
+    pub from: Option<ChangeId>, // the Move it was in when selected; None = at home
+}
+
 
 impl Change {
     pub fn order_key(&self) -> (Hlc, DeviceId) {

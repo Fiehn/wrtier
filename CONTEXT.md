@@ -151,7 +151,9 @@ _Avoid_: corruption, sync error
 - A **Comment** follows its text through **Moves**. If all its text is deleted it becomes a **Detached comment**; restoring the text reattaches it.
 - A **Comment** covers the characters it was attached to, plus any text later added strictly inside them; text added at either edge isn't covered. If part of its text is **Moved** away, the **Comment** covers both parts and stays one **Comment**.
 - Text added inside a passage on one **Device** while another **Device** **Moves** that passage ends up inside the passage at its new place.
-- When two **Devices** **Move** overlapping text, the text both moved goes with one of the two **Moves**, chosen the same way on every **Device**; the rest of each **Move** still happens, and the **Author** gets a **Merge notice**.
+- When two **Devices** **Move** overlapping text, the text both moved goes with the later of the two **Moves**; the rest of each **Move** still happens, and the **Author** gets a **Merge notice**.
+- When two **Devices** **Move** passages into each other, only the earlier **Move** happens; the later one's text stays where it was, and the **Author** gets a **Merge notice**.
+- A **Move** takes the text the **Author** saw in the selection; text that an earlier **Move** had already taken out of that passage stays where it went.
 - Text deleted on one **Device** stays deleted even if another **Device** **Moved** it.
 - A **Work**'s **History** records the name of every **Reviewer** who commented on it, so the file can be read on its own outside the **Vault**.
 - Every character in a **Work** knows which **Change** wrote it.

@@ -3,7 +3,7 @@ use crate::ids::{CharId, Side, ChangeId};
 use std::collections::HashSet;
 
 struct Node {
-    ch: char,
+    ch: Option<char>, // None = Move Anchor
     parent: Option<CharId>, // None = root
     side: Side,
     right_origin: Option<CharId>,
@@ -30,10 +30,12 @@ impl Tree {
         }
     }
 
-    fn is_visible(&self, id: CharId) -> bool { 
+    pub fn is_visible(&self, id: CharId) -> bool { 
         // A node is visible if it has not been deleted by any change that is not undone.
         if self.undone.contains(&id.change) { return false; }
+        // if a node's char is None, it is a Move Anchor and is not visible.
         if let Some(node) = self.nodes.get(&id) {
+            if node.ch.is_none() { return false; }
             for del in &node.deleted_by {
                 if !self.undone.contains(del) {
                     return false;
@@ -44,11 +46,19 @@ impl Tree {
             false
         }
     }
+    pub fn is_anchor(&self, id: CharId) -> bool {
+        if let Some(node) = self.nodes.get(&id) {
+            node.ch.is_none()
+        } else {
+            false
+        }
+    }
+
     pub fn set_undone(&mut self, undone: HashSet<ChangeId>) {
         self.undone = undone;
     }
 
-    pub fn insert_node(&mut self, id: CharId, ch: char, parent: Option<CharId>, side: Side, right_origin: Option<CharId>) {
+    pub fn insert_node(&mut self, id: CharId, ch: Option<char>, parent: Option<CharId>, side: Side, right_origin: Option<CharId>) {
         assert!(!self.nodes.contains_key(&id), "node {id} inserted twice");
         let node = Node {
             ch,
@@ -80,7 +90,7 @@ impl Tree {
     }
 
     pub fn char_of(&self, id: CharId) -> Option<char> {
-        self.nodes.get(&id).map(|n| n.ch)
+        self.nodes.get(&id).and_then(|n| n.ch)
     }
 
     pub fn delete(&mut self, id: CharId, by: ChangeId) {
@@ -121,7 +131,8 @@ impl Tree {
         for id in self.all_in_order() {
             if let Some(node) = self.nodes.get(&id) {
                 if !self.is_visible(id) { continue; }
-                result.push(node.ch);
+                // make ch not an Option<char> because we already checked that it is visible
+                result.push( node.ch.expect("visible nodes must have a char"));
             }
         }
         result
@@ -159,10 +170,11 @@ impl Tree {
         }
         let lo = lo.unwrap();
         let hi = hi.unwrap();
+        // Skip anchors and the change itself, and return the unique ChangeIds of all other nodes in between.
         let mut result: Vec<ChangeId> = order[lo + 1..hi]
             .iter()
             .map(|&id| id.change)
-            .filter(|&c| c != change)
+            .filter(|&c| c != change && self.char_of(CharId { change: c, offset: 0 }).is_some())
             .collect();
         result.sort_unstable();
         result.dedup();
@@ -172,43 +184,42 @@ impl Tree {
     // Decides where to place new text typed at a given visual index.
     // returns (parent, side, right_origin) for the new node to be inserted.
     pub fn place(&self, index: usize) -> (Option<CharId>, Side, Option<CharId>) {
-        // 1. leftOrigin = the visible node at index-1 or the root
-        // 2. rightOrigin = the node after leftOrigin in all_in_order() (also including non-visible as in deleted) or None if leftOrigin is the last visible node
-        // 3. if leftOrigin has no right child, (leftOrigin, Right, rightOrigin)
-        // 4. else return (Some(rightOrigin), Left, rightOrigin)
-        let order = self.all_in_order();
-
-        // 1. leftOrigin: the visible char before the cursor. None = the root.
-        let left_origin = if index == 0 {
+        // place(index) just becomes self.place_after(<the visible id before index>)
+        let left = if index == 0 {
             None
         } else {
-            Some(self.visible_id(index - 1).expect("index is past the end of the text"))
+            self.visible_id(index - 1)
         };
-        // 2. rightOrigin: the very next node after leftOrigin, deleted ones included.
-        let right_origin = match left_origin {
+
+        self.place_after(left)
+    }
+
+    pub fn place_after(&self, left: Option<CharId>) -> (Option<CharId>, Side, Option<CharId>) {
+        // place_after(left: Option<CharId>) contains the current logic from rightOrigin onwards, and place(index) just becomes self.place_after(<the visible id before index>). The Doc will need to choose left itself because of rule 4, and left can be an anchor.
+        let order = self.all_in_order();
+        let right_origin = match left {
             None => order.first().copied(),
             Some(l) => {
                 let pos = order.iter().position(|&id| id == l).unwrap();
                 order.get(pos + 1).copied()
             }
         };
-        // 3. and 4.
-        let has_right_children = match left_origin {
+        let has_right_children = match left {
             None => !self.root_children.is_empty(),
             Some(l) => !self.nodes[&l].right_children.is_empty(),
         };
         if !has_right_children {
-            (left_origin, Side::Right, right_origin)
+            (left, Side::Right, right_origin)
         } else {
             (right_origin, Side::Left, right_origin)
         }
     }
+
     /// Insert `text` as one run: the first char where (parent, side) says,
     /// each next char as the right child of the one before.
-    pub fn insert_run(&mut self, change: ChangeId, text: &str,
-                parent: Option<CharId>, side: Side, ro: Option<CharId>) {
+    pub fn insert_chain(&mut self, change: ChangeId, items: Vec<Option<char>>, parent: Option<CharId>, side: Side, ro: Option<CharId>) {
         let mut prev: Option<CharId> = None;
-        for (i, ch) in text.chars().enumerate() {
+        for (i, ch) in items.into_iter().enumerate() {
             let id = CharId { change, offset: i as u32 };
             match prev {
                 None => self.insert_node(id, ch, parent, side, ro),
@@ -216,6 +227,15 @@ impl Tree {
             }
             prev = Some(id);
         }
+    }
+
+    pub fn insert_run(&mut self, change: ChangeId, text: &str, parent: Option<CharId>, side: Side, ro: Option<CharId>) {
+        let items: Vec<Option<char>> = text.chars().map(Some).collect();
+        self.insert_chain(change, items, parent, side, ro);
+    }
+    pub fn insert_anchors(&mut self, change: ChangeId, count: usize, parent: Option<CharId>, side: Side, ro: Option<CharId>) {
+        let items: Vec<Option<char>> = vec![None; count];
+        self.insert_chain(change, items, parent, side, ro);
     }
 
     pub fn visible_id_ranges(&self, index: usize, len: usize) -> Vec<CharId> {
@@ -236,15 +256,15 @@ mod tests {
     fn cat_then_chat() {
         let mut t = Tree::new();
         // "cat" typed in one go: one Change, a chain of right children.
-        t.insert_node(id(1, 0), 'c', None, Side::Right, None);
-        t.insert_node(id(1, 1), 'a', Some(id(1, 0)), Side::Right, None);
-        t.insert_node(id(1, 2), 't', Some(id(1, 1)), Side::Right, None);
+        t.insert_node(id(1, 0), Some('c'), None, Side::Right, None);
+        t.insert_node(id(1, 1), Some('a'), Some(id(1, 0)), Side::Right, None);
+        t.insert_node(id(1, 2), Some('t'), Some(id(1, 1)), Side::Right, None);
         assert_eq!(t.text(), "cat");
 
         // "h" at index 1: c already has a right child (a), so h becomes a's LEFT child.
         let (parent, side, ro) = t.place(1);
         assert_eq!((parent, side, ro), (Some(id(1, 1)), Side::Left, Some(id(1, 1))));
-        t.insert_node(id(2, 0), 'h', parent, side, ro);
+        t.insert_node(id(2, 0), Some('h'), parent, side, ro);
         assert_eq!(t.text(), "chat");
     }
 
@@ -294,5 +314,34 @@ mod tests {
         t.insert_run(change(1, 2), "o", p, s, ro);
         assert_eq!(t.text(), "cot");
     }
-    
+    #[test]
+    fn anchors_are_invisible() {
+        let mut t = cat();
+        let (p, s, ro) = t.place(3);
+        t.insert_anchors(change(1, 2), 1, p, s, ro);
+        assert_eq!(t.text(), "cat");
+        assert_eq!(t.visible_ids().len(), 3);
+        assert_eq!(t.all_in_order().len(), 4); // still a node in the tree
+    }
+
+    #[test]
+    fn anchors_are_not_dependents() {
+        let mut t = cat();
+        let (p, s, ro) = t.place(1);
+        t.insert_anchors(change(1, 2), 1, p, s, ro); // an anchor between c and a
+        assert!(t.inside(change(1, 1)).is_empty());
+    }
+
+    #[test]
+    fn typing_after_an_anchor() {
+        let mut t = cat();
+        let (p, s, ro) = t.place(3);
+        let anchor = CharId { change: change(1, 2), offset: 0 };
+        t.insert_anchors(anchor.change, 1, p, s, ro);
+        let (p, s, ro) = t.place_after(Some(anchor));
+        t.insert_run(change(1, 3), "s", p, s, ro);
+        assert_eq!(t.text(), "cats");
+        assert_eq!(t.all_in_order().last().unwrap().change, change(1, 3)); // after the anchor
+    }
+
 }
