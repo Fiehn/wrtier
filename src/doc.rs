@@ -1,4 +1,4 @@
-﻿//! A Work's text as one Device sees it: the History's Changes applied to a Fugue tree,
+//! A Work's text as one Device sees it: the History's Changes applied to a Fugue tree,
 //! laid out with the Moves in effect.
 //!
 //! Everything shown is derived from the set of Changes. `refresh` recomputes it all; typing,
@@ -19,17 +19,56 @@ pub struct Doc {
     next_counter: u32,
     clock: Hlc,
     applied: HashSet<ChangeId>,                    // to avoid applying the same Change twice
-    reverted_by: HashMap<ChangeId, Vec<ChangeId>>, // a Change â†’ the Reverts that target it
+    reverted_by: HashMap<ChangeId, Vec<ChangeId>>, // a Change → the Reverts that target it
     seen: HashMap<DeviceId, u32>,                  // the highest counter applied from each Device
     moves: Vec<(Hlc, MoveInfo)>,                   // every Move applied, with its clock for sorting
-    typed_into: HashMap<CharId, Vec<CharId>>,      // a piece's anchor â†’ nodes typed or dropped into it
+    typed_into: HashMap<CharId, Vec<CharId>>,      // a piece's anchor → nodes typed or dropped into it
     dismissals: Vec<(ChangeId, NoticeKey)>,        // every Dismiss Change, and the notice it hides
     fields: HashMap<(String, String), Vec<(Hlc, ChangeId, String)>>, // (record, field) → every value set
     session: Option<(ChangeId, u64)>,              // this Device's current Session: (its first Change, time of the last)
     layout: Layout,
     // Worked out by `refresh` (or a fast path) after every Change, so reading the text doesn't redo it.
     visible: Vec<u32>, // the visible characters' tree nodes, in reading order
+    burst: Option<Burst>, // the open typing burst, if any
 }
+
+/// A typing burst: one stretch of new text at one spot, kept as a draft until it closes.
+///
+/// While open it lives only here (and, later, in the recovery file), never in the `.db`, so it
+/// can grow and shrink freely: typos fixed inside it are never recorded. It's anchored to the
+/// character before it, not to an index, so Changes merged in from other Devices don't move it
+/// and don't close it. When it closes it becomes one Change: an Insert, or a Replace if it was
+/// typed over a selection. An empty one records nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Burst {
+    pub kind: BurstKind,
+    /// Reserved when the burst opened; the Change gets it when the burst closes.
+    pub id: ChangeId,
+    /// The character the draft follows (None = the start of the text).
+    pub left: Option<CharId>,
+    /// A selection it was typed over: hidden while the burst is open, deleted when it closes.
+    pub replacing: Vec<CharId>,
+    pub draft: String,
+    pub opened_ms: u64,
+    pub last_ms: u64,
+    at: usize,     // where the draft shows in the shown text
+    hidden: usize, // how many characters of `replacing` are currently hidden
+}
+
+/// What kind of burst is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BurstKind {
+    /// New text (possibly typed over a selection): becomes an Insert, or a Replace.
+    Typing,
+    /// Backspacing or deleting forwards at one spot: the deleted characters are only hidden
+    /// until it closes, and then become one Delete, however many keys it took.
+    Deleting,
+}
+
+/// A burst closes after this long without typing...
+pub const BURST_PAUSE_MS: u64 = 5_000;
+/// ...or after this long of nonstop typing. Both are for tuning; they don't affect correctness.
+pub const BURST_MAX_MS: u64 = 60_000;
 
 /// A message for the Author about text the merge had to decide on its own.
 /// It asks for nothing and changes nothing.
@@ -67,21 +106,49 @@ impl Doc {
             session: None, // a Work just opened: the first Change starts a new Session
             layout: Layout::default(),
             visible: Vec::new(),
+            burst: None,
         }
     }
 
     // ---- Reading ----
 
+    /// The text the Author sees: the History's text, plus the open burst's draft
+    /// (minus any selection it's typed over).
     pub fn text(&self) -> String {
-        self.visible.iter().filter_map(|&node| self.tree.char_at(node)).collect()
+        let Some(burst) = &self.burst else {
+            return self.visible.iter().filter_map(|&node| self.tree.char_at(node)).collect();
+        };
+        let hidden = self.hidden_by(burst);
+        let mut text = String::new();
+        let mut shown = 0;
+        for &node in self.visible.iter().filter(|n| !hidden.contains(n)) {
+            if shown == burst.at {
+                text.push_str(&burst.draft);
+            }
+            text.extend(self.tree.char_at(node));
+            shown += 1;
+        }
+        if shown <= burst.at {
+            text.push_str(&burst.draft); // the draft is at the very end
+        }
+        text
     }
 
-    /// The number of visible characters.
+    /// The length of the text the Author sees, in characters.
     pub fn len(&self) -> usize {
-        self.visible.len()
+        match &self.burst {
+            None => self.visible.len(),
+            Some(b) => self.visible.len() - b.hidden + b.draft.chars().count(),
+        }
     }
 
-    /// The visible characters in reading order, with the piece each is drawn in.
+    /// The open typing burst, if any.
+    pub fn burst(&self) -> Option<&Burst> {
+        self.burst.as_ref()
+    }
+
+    /// The History's visible characters in reading order, with the piece each is drawn in.
+    /// (Without the open burst's draft, which has no characters in the History yet.)
     pub fn visible(&self) -> Vec<(CharId, Option<Piece>)> {
         self.visible.iter().map(|&node| (self.tree.id_of(node), self.layout.level_at(node))).collect()
     }
@@ -188,6 +255,7 @@ impl Doc {
         self.refresh_undone();
         self.layout = Layout::compute(&self.tree, &self.in_effect_moves(), &self.typed_into);
         self.visible = self.computed_visible(&self.layout);
+        self.place_burst(); // merges don't close a burst; it stays after its character
     }
 
     fn refresh_undone(&mut self) {
@@ -286,32 +354,79 @@ impl Doc {
 
     // ---- Local edits ----
 
+    /// Inserts text at once, e.g. a paste. (Typing goes through `type_text`, which drafts it first.)
     pub fn insert_local(&mut self, index: usize, text: &str, now_ms: u64) -> Change {
+        self.assert_no_burst();
         assert!(index <= self.len(), "index {index} is past the end of the text ({})", self.len());
-        let (left, into) = self.left_of(index);
-        let (parent, side, right_origin) = self.tree.place_after(left);
-        let run = InsertRun { text: text.to_string(), parent, side, right_origin, into };
-        let change = self.new_change(ChangeKind::Insert(run), now_ms);
-        self.apply_change(&change);
-
-        // Shortcut instead of `refresh`: typed text lands right after `left` in the tree, shows
-        // at exactly `index`, and belongs to the piece it was typed into. Nothing else changes.
-        let count = text.chars().count() as u32;
-        let nodes: Vec<u32> = match self.tree.index_of(CharId { change: change.id, offset: 0 }) {
-            Some(first) => (first..first + count).collect(), // a Change's nodes are consecutive
-            None => Vec::new(),                               // empty text: nothing to show
-        };
-        self.layout.insert_typed(&nodes, into.map(|a| (a.change, a.offset as usize)));
-        self.visible.splice(index..index, nodes);
-        self.debug_check();
-        change
+        let left = self.node_before(index);
+        self.commit_text(left, &[], text, None, now_ms).expect("an insertion records a Change")
     }
 
     pub fn delete_local(&mut self, index: usize, len: usize, now_ms: u64) -> Change {
+        self.assert_no_burst();
         let end = (index + len).min(self.visible.len());
         assert!(index <= end, "index {index} is past the end of the text ({})", self.len());
+        let doomed: Vec<u32> = self.visible[index..end].to_vec();
+        self.commit_text(None, &doomed, "", None, now_ms).expect("a deletion records a Change")
+    }
+
+    /// Replaces `len` characters at `index` with `text` at once, e.g. a paste over a selection:
+    /// one "replaced selection" Change. (Typing over a selection goes through `replace_text`.)
+    pub fn replace_local(&mut self, index: usize, len: usize, text: &str, now_ms: u64) -> Change {
+        self.assert_no_burst();
+        let end = (index + len).min(self.visible.len());
+        assert!(index <= end, "index {index} is past the end of the text ({})", self.len());
+        let left = self.node_before(index);
+        let doomed: Vec<u32> = self.visible[index..end].to_vec();
+        self.commit_text(left, &doomed, text, None, now_ms).expect("a replacement records a Change")
+    }
+
+    /// The one place text edits become Changes: delete `doomed` (visible nodes, in reading
+    /// order) and put `text` right after `left`, as an Insert, Delete or Replace. Returns None
+    /// if there's nothing to record. Updates what's shown directly instead of `refresh`; in
+    /// debug builds that's checked against a full recompute.
+    fn commit_text(&mut self, left: Option<u32>, doomed: &[u32], text: &str, reserved: Option<ChangeId>, now_ms: u64) -> Option<Change> {
+        let ranges = self.ranges_of(doomed);
+        if ranges.is_empty() && text.is_empty() {
+            if let Some(id) = reserved {
+                self.unreserve(id); // an empty burst records nothing, not even a gap in the counters
+            }
+            return None;
+        }
+        // Where the new text goes, worked out before anything changes.
+        let (left_id, into) = self.placement_after(left);
+        let (parent, side, right_origin) = self.tree.place_after(left_id);
+        let run = InsertRun { text: text.to_string(), parent, side, right_origin, into };
+        let kind = match (ranges.is_empty(), text.is_empty()) {
+            (true, _) => ChangeKind::Insert(run),
+            (false, true) => ChangeKind::Delete(ranges),
+            (false, false) => ChangeKind::Replace { deleted: ranges, inserted: run },
+        };
+        let change = self.new_change(reserved, kind, now_ms);
+
+        // Shortcut instead of `refresh`. A deletion moves nothing: it only hides characters.
+        // New text lands right after `left` in the tree, shows right after it on screen, and
+        // belongs to the piece it was typed into.
+        let doomed: FxHashSet<u32> = doomed.iter().copied().collect();
+        let at = self.shown_index_after(left, &doomed);
+        self.visible.retain(|n| !doomed.contains(n));
+        self.apply_change(&change);
+        let count = text.chars().count() as u32;
+        if count > 0 {
+            let first = self.tree.index_of(CharId { change: change.id, offset: 0 }).expect("just inserted");
+            let nodes: Vec<u32> = (first..first + count).collect(); // a Change's nodes are consecutive
+            self.layout.insert_typed(&nodes, into.map(|a| (a.change, a.offset as usize)));
+            self.visible.splice(at..at, nodes);
+        }
+        self.place_burst();
+        self.debug_check();
+        Some(change)
+    }
+
+    /// Visible nodes (in reading order) as ranges of consecutive characters of one Change.
+    fn ranges_of(&self, nodes: &[u32]) -> Vec<CharRange> {
         let mut ranges: Vec<CharRange> = Vec::new();
-        for &node in &self.visible[index..end] {
+        for &node in nodes {
             let id = self.tree.id_of(node);
             // Extend the last range if this character follows on in the same Change.
             if let Some(last) = ranges.last_mut() {
@@ -322,24 +437,24 @@ impl Doc {
             }
             ranges.push(CharRange { first: id, len: 1 });
         }
-        let change = self.new_change(ChangeKind::Delete(ranges), now_ms);
-        self.apply_change(&change);
+        ranges
+    }
 
-        // Shortcut instead of `refresh`: a deletion moves nothing, it only hides these characters.
-        self.visible.drain(index..end);
-        self.debug_check();
-        change
+    /// The visible node just before `index` (None = the start).
+    fn node_before(&self, index: usize) -> Option<u32> {
+        index.checked_sub(1).map(|i| self.visible[i])
     }
 
     /// Where new text at `index` goes: the node it goes after (None = the very start),
     /// and the anchor of the piece it goes into (None = the main text).
-    /// Applies the edge rule: right after the last character of a piece,
-    /// the text goes after that piece's anchor instead.
     fn left_of(&self, index: usize) -> (Option<CharId>, Option<CharId>) {
-        if index == 0 {
-            return (None, None);
-        }
-        let mut node = self.visible[index - 1];
+        self.placement_after(self.node_before(index))
+    }
+
+    /// Where new text right after `node` goes in the tree. Applies the edge rule: right after
+    /// the last character of a piece, the text goes after that piece's anchor instead.
+    fn placement_after(&self, node: Option<u32>) -> (Option<CharId>, Option<CharId>) {
+        let Some(mut node) = node else { return (None, None) };
         let mut level = self.layout.level_at(node);
         while let Some(piece) = level {
             let span = self.layout.span(piece).expect("a drawn piece has a span");
@@ -352,7 +467,208 @@ impl Doc {
         (Some(self.tree.id_of(node)), level.map(anchor_of))
     }
 
+    /// Where text placed right after `left` shows: the number of visible characters before it,
+    /// not counting `hidden` ones.
+    fn shown_index_after(&self, left: Option<u32>, hidden: &FxHashSet<u32>) -> usize {
+        let Some(left) = left else { return 0 };
+        if let Some(i) = self.visible.iter().position(|&n| n == left) {
+            return self.visible[..=i].iter().filter(|n| !hidden.contains(n)).count();
+        }
+        // The character is no longer visible (e.g. deleted on another Device): count what's
+        // shown before its place in the reading order.
+        let mut count = 0;
+        for node in self.layout.reading_nodes(&self.tree) {
+            if node == left {
+                break;
+            }
+            if self.tree.is_visible_at(node) && !hidden.contains(&node) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    // ---- Typing bursts: what the editor calls ----
+    //
+    // Positions are in the text the Author sees (`text()`), draft included. Each call returns the
+    // Changes it recorded, if any, for saving.
+
+    /// Types `text` at `index`: into the open burst if it's there, otherwise into a new burst.
+    pub fn type_text(&mut self, index: usize, text: &str, now_ms: u64) -> Vec<Change> {
+        let mut recorded: Vec<Change> = self.tick(now_ms).into_iter().collect();
+        assert!(index <= self.len(), "index {index} is past the end of the text ({})", self.len());
+        if let Some(burst) = self.burst.as_mut().filter(|b| b.kind == BurstKind::Typing) {
+            let len = burst.draft.chars().count();
+            if (burst.at..=burst.at + len).contains(&index) {
+                let at = byte_index(&burst.draft, index - burst.at);
+                burst.draft.insert_str(at, text);
+                burst.last_ms = now_ms;
+                return recorded;
+            }
+        }
+        // Somewhere else, or after deleting: typing is another kind of action.
+        recorded.extend(self.close_burst(now_ms));
+        self.open_burst(BurstKind::Typing, index, 0, text, now_ms);
+        recorded
+    }
+
+    /// Deletes `len` characters at `index`. Inside a typing burst it just shrinks the draft.
+    /// Otherwise it starts, or grows, a deletion burst: backspacing or deleting forwards at the
+    /// same spot all becomes one Delete when the burst closes.
+    pub fn delete_text(&mut self, index: usize, len: usize, now_ms: u64) -> Vec<Change> {
+        let mut recorded: Vec<Change> = self.tick(now_ms).into_iter().collect();
+        assert!(index <= self.len(), "index {index} is past the end of the text ({})", self.len());
+        let len = len.min(self.len() - index);
+        if len == 0 {
+            return recorded;
+        }
+        let end = index + len;
+        let mut rest = len; // what's left to delete after any part inside a typing draft
+        match self.burst.as_ref().map(|b| (b.kind, b.at, b.draft.chars().count())) {
+            // Right at the gap of a deletion: it grows, to the left (backspace) and/or the right.
+            Some((BurstKind::Deleting, at, _)) if index <= at && at <= end => {
+                let before = self.shown_nodes(index, at);
+                let after = self.shown_nodes(at, end);
+                let new_left = index.checked_sub(1).and_then(|i| self.shown_nodes(i, index).first().copied());
+                let ids = |nodes: &[u32]| nodes.iter().map(|&n| self.tree.id_of(n)).collect::<Vec<CharId>>();
+                let (before, after, new_left) = (ids(&before), ids(&after), new_left.map(|n| self.tree.id_of(n)));
+                let burst = self.burst.as_mut().expect("matched above");
+                if !before.is_empty() {
+                    burst.left = new_left; // the gap now starts further left
+                }
+                burst.replacing.splice(0..0, before);
+                burst.replacing.extend(after);
+                burst.last_ms = now_ms;
+                self.place_burst();
+                return recorded;
+            }
+            // In a typing burst: the part inside the draft just leaves the draft.
+            Some((BurstKind::Typing, at, draft_len)) => {
+                let (start, stop) = (index.max(at), end.min(at + draft_len));
+                let inside = stop.saturating_sub(start);
+                if inside > 0 {
+                    let burst = self.burst.as_mut().expect("matched above");
+                    let (a, b) = (byte_index(&burst.draft, start - at), byte_index(&burst.draft, stop - at));
+                    burst.draft.replace_range(a..b, "");
+                    burst.last_ms = now_ms;
+                }
+                if inside == len {
+                    return recorded; // all inside: the burst stays open
+                }
+                // It reaches past the draft (e.g. backspacing past its start): close the typing
+                // burst and start a deletion for the rest. With the part inside the draft gone,
+                // the rest starts at `index` in every case.
+                rest = len - inside;
+                recorded.extend(self.close_burst(now_ms));
+            }
+            // A deletion somewhere else: that one is done.
+            Some(_) => recorded.extend(self.close_burst(now_ms)),
+            None => {}
+        }
+        self.open_burst(BurstKind::Deleting, index, rest, "", now_ms);
+        recorded
+    }
+
+    /// The visible nodes at positions start..end of the shown text, skipping what the open burst
+    /// hides. Only used when no draft is showing.
+    fn shown_nodes(&self, start: usize, end: usize) -> Vec<u32> {
+        let hidden = self.burst.as_ref().map(|b| self.hidden_by(b)).unwrap_or_default();
+        self.visible.iter().copied().filter(|n| !hidden.contains(n)).skip(start).take(end - start).collect()
+    }
+
+    /// Types `text` over the selection of `len` characters at `index`. Within the open burst
+    /// it edits the draft; otherwise it opens a burst that will record a "replaced selection".
+    pub fn replace_text(&mut self, index: usize, len: usize, text: &str, now_ms: u64) -> Vec<Change> {
+        if len == 0 {
+            return self.type_text(index, text, now_ms);
+        }
+        let mut recorded: Vec<Change> = self.tick(now_ms).into_iter().collect();
+        if let Some(burst) = self.burst.as_mut().filter(|b| b.kind == BurstKind::Typing) {
+            let draft_len = burst.draft.chars().count();
+            if index >= burst.at && index + len <= burst.at + draft_len {
+                let (a, b) = (byte_index(&burst.draft, index - burst.at), byte_index(&burst.draft, index + len - burst.at));
+                burst.draft.replace_range(a..b, text);
+                burst.last_ms = now_ms;
+                return recorded;
+            }
+        }
+        recorded.extend(self.close_burst(now_ms));
+        assert!(index + len <= self.len(), "the selection reaches past the end of the text ({})", self.len());
+        self.open_burst(BurstKind::Typing, index, len, text, now_ms);
+        recorded
+    }
+
+    /// The cursor moved: leaving the open burst closes it.
+    pub fn cursor_moved(&mut self, index: usize, now_ms: u64) -> Option<Change> {
+        if let Some(change) = self.tick(now_ms) {
+            return Some(change);
+        }
+        let burst = self.burst.as_ref()?;
+        if (burst.at..=burst.at + burst.draft.chars().count()).contains(&index) {
+            return None;
+        }
+        self.close_burst(now_ms)
+    }
+
+    /// Call regularly: closes the burst after a pause, or after a long stretch of nonstop typing.
+    pub fn tick(&mut self, now_ms: u64) -> Option<Change> {
+        let burst = self.burst.as_ref()?;
+        let paused = now_ms.saturating_sub(burst.last_ms) >= BURST_PAUSE_MS;
+        let too_long = now_ms.saturating_sub(burst.opened_ms) >= BURST_MAX_MS;
+        if paused || too_long { self.close_burst(now_ms) } else { None }
+    }
+
+    /// Closes the open burst (also when another kind of action starts, or the Work closes),
+    /// recording its Change. Its time is set now.
+    pub fn close_burst(&mut self, now_ms: u64) -> Option<Change> {
+        let burst = self.burst.take()?;
+        let left = burst.left.map(|id| self.tree.index_of(id).expect("a burst's character stays in the tree"));
+        let replacing: FxHashSet<u32> = burst.replacing.iter().filter_map(|&id| self.tree.index_of(id)).collect();
+        let doomed: Vec<u32> = self.visible.iter().copied().filter(|n| replacing.contains(n)).collect();
+        self.commit_text(left, &doomed, &burst.draft, Some(burst.id), now_ms)
+    }
+
+    /// Opens a burst at `index` (no burst may be open), hiding the `replacing` characters there.
+    fn open_burst(&mut self, kind: BurstKind, index: usize, replacing: usize, text: &str, now_ms: u64) {
+        let left = self.node_before(index).map(|n| self.tree.id_of(n));
+        let replacing: Vec<CharId> = self.visible[index..index + replacing].iter().map(|&n| self.tree.id_of(n)).collect();
+        let id = self.reserve_id();
+        self.burst = Some(Burst {
+            kind, id, left, replacing,
+            draft: text.to_string(),
+            opened_ms: now_ms,
+            last_ms: now_ms,
+            at: index,
+            hidden: 0,
+        });
+        self.place_burst();
+    }
+
+    /// Works out where the open burst shows, from the character it follows.
+    fn place_burst(&mut self) {
+        let Some(burst) = &self.burst else { return };
+        let hidden = self.hidden_by(burst);
+        let left = burst.left.map(|id| self.tree.index_of(id).expect("a burst's character stays in the tree"));
+        let at = self.shown_index_after(left, &hidden);
+        let burst = self.burst.as_mut().expect("checked above");
+        burst.at = at;
+        burst.hidden = hidden.len();
+    }
+
+    /// The visible nodes the burst's selection hides.
+    fn hidden_by(&self, burst: &Burst) -> FxHashSet<u32> {
+        burst.replacing.iter()
+            .filter_map(|&id| self.tree.index_of(id))
+            .filter(|&n| self.tree.is_visible_at(n))
+            .collect()
+    }
+
+    fn assert_no_burst(&self) {
+        assert!(self.burst.is_none(), "close the typing burst first: another kind of action closes it");
+    }
+
     pub fn move_local(&mut self, from: usize, len: usize, to: usize, now_ms: u64) -> Change {
+        self.assert_no_burst();
         assert!(len > 0, "len must be greater than 0");
         assert!(from + len <= self.len(), "from + len must be less than or equal to the text length");
         assert!(to <= from || to >= from + len, "to must be less than or equal to from or greater than or equal to from + len");
@@ -416,9 +732,24 @@ impl Doc {
         self.set_field_local(&record, "name", name, now_ms)
     }
 
-    /// Makes a new Change from this Device, with the next counter, a fresh clock value and its Session.
-    fn new_change(&mut self, kind: ChangeKind, now_ms: u64) -> Change {
+    /// Takes the next Change counter for this Device.
+    fn reserve_id(&mut self) -> ChangeId {
         let id = ChangeId { device: self.device, counter: self.next_counter };
+        self.next_counter += 1;
+        id
+    }
+
+    /// Gives back a reserved ID that was never used, if nothing has taken a counter since.
+    fn unreserve(&mut self, id: ChangeId) {
+        if self.next_counter == id.counter + 1 {
+            self.next_counter = id.counter;
+        }
+    }
+
+    /// Makes a new Change from this Device: a reserved ID or the next one, a fresh clock
+    /// value, and its Session.
+    fn new_change(&mut self, reserved: Option<ChangeId>, kind: ChangeKind, now_ms: u64) -> Change {
+        let id = reserved.unwrap_or_else(|| self.reserve_id());
         // Same Session unless this is the first Change since the Work was opened, or there
         // was a long pause. (A clock that jumped backwards counts as no pause.)
         let session = match self.session {
@@ -426,17 +757,21 @@ impl Doc {
             _ => id,
         };
         self.session = Some((session, now_ms));
-        let change = Change { id, hlc: self.clock.tick(now_ms), session, kind };
-        self.next_counter += 1;
-        change
+        Change { id, hlc: self.clock.tick(now_ms), session, kind }
     }
 
     /// Makes a new Change and applies it the general way.
     fn commit_local(&mut self, kind: ChangeKind, now_ms: u64) -> Change {
-        let change = self.new_change(kind, now_ms);
+        self.assert_no_burst();
+        let change = self.new_change(None, kind, now_ms);
         self.apply(&change);
         change
     }
+}
+
+/// The byte position of the `chars`-th character of `s` (or its end).
+fn byte_index(s: &str, chars: usize) -> usize {
+    s.char_indices().nth(chars).map_or(s.len(), |(i, _)| i)
 }
 
 #[cfg(test)]
@@ -807,6 +1142,220 @@ mod test {
 
         phone.revert_local(dismiss.id, false, 4000);   // a Dismiss is a Change, so it can be reverted
         assert_eq!(phone.merge_notices().len(), 1);
+    }
+
+    // ---- Typing bursts ----
+
+    /// The Changes' kinds and texts, for short asserts.
+    fn summary(changes: &[Change]) -> Vec<String> {
+        changes.iter().map(|c| match &c.kind {
+            ChangeKind::Insert(run) => format!("insert {}", run.text),
+            ChangeKind::Delete(ranges) => format!("delete {}", ranges.iter().map(|r| r.len).sum::<u32>()),
+            ChangeKind::Replace { deleted, inserted } => {
+                format!("replace {} with {}", deleted.iter().map(|r| r.len).sum::<u32>(), inserted.text)
+            }
+            other => format!("{other:?}"),
+        }).collect()
+    }
+
+    #[test]
+    fn a_typo_fixed_inside_a_burst_is_never_recorded() {
+        let mut doc = Doc::new(DeviceId(1));
+        let mut recorded = doc.type_text(0, "teh", 1000);
+        recorded.extend(doc.delete_text(1, 2, 1100));   // "t"
+        recorded.extend(doc.type_text(1, "he", 1200));  // "the"
+        assert_eq!(doc.text(), "the");
+        assert!(recorded.is_empty(), "nothing is recorded while the burst is open");
+        recorded.extend(doc.close_burst(1300));
+        assert_eq!(summary(&recorded), ["insert the"]);
+    }
+
+    #[test]
+    fn a_pause_or_a_long_stretch_closes_the_burst() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.type_text(0, "a", 0);
+        assert!(doc.tick(BURST_PAUSE_MS - 1).is_none());
+        let closed = doc.type_text(1, "b", BURST_PAUSE_MS); // typing again after a pause
+        assert_eq!(summary(&closed), ["insert a"]);
+
+        // Nonstop typing, one key a second: the burst closes after a minute anyway.
+        let start = 1_000_000;
+        let mut doc = Doc::new(DeviceId(1));
+        let mut recorded = Vec::new();
+        for second in 0..=BURST_MAX_MS / 1000 {
+            let at = doc.len();
+            recorded.extend(doc.type_text(at, "x", start + second * 1000));
+        }
+        assert_eq!(recorded.len(), 1);
+    }
+
+    #[test]
+    fn backspacing_past_the_start_closes_the_burst_and_starts_a_deletion() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "abc", 1000);
+        doc.type_text(3, "XY", 2000);                       // "abcXY"
+        let mut recorded = doc.delete_text(2, 2, 2100);     // "cX": past the burst's start
+        assert_eq!(doc.text(), "abY");
+        assert_eq!(summary(&recorded), ["insert Y"]);       // the typing is recorded...
+        assert_eq!(doc.burst().unwrap().kind, BurstKind::Deleting); // ...and a deletion has started
+        recorded.extend(doc.close_burst(2200));
+        assert_eq!(summary(&recorded), ["insert Y", "delete 1"]);
+
+        // Deleting the whole burst and more records only the deletion.
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "abc", 1000);
+        doc.type_text(3, "XY", 2000);
+        let mut recorded = doc.delete_text(2, 3, 2100);     // "cXY"
+        recorded.extend(doc.close_burst(2200));
+        assert_eq!(doc.text(), "ab");
+        assert_eq!(summary(&recorded), ["delete 1"]);
+    }
+
+    #[test]
+    fn holding_backspace_is_one_deletion() {
+        let mut doc = abcdef();
+        let mut recorded = Vec::new();
+        for (i, at) in [5, 4, 3].into_iter().enumerate() {
+            recorded.extend(doc.delete_text(at, 1, 2000 + i as u64 * 100)); // backspace, backspace, backspace
+        }
+        assert_eq!(doc.text(), "abc");                      // gone from the screen at once...
+        assert!(recorded.is_empty());                       // ...but not recorded yet
+        recorded.extend(doc.close_burst(3000));
+        assert_eq!(summary(&recorded), ["delete 3"]);
+        assert_eq!(doc.text(), "abc");
+    }
+
+    #[test]
+    fn backspace_and_forward_delete_at_one_spot_are_one_deletion() {
+        let mut doc = abcdef();
+        let mut recorded = doc.delete_text(2, 1, 2000);     // backspace "c": "abdef", gap at 2
+        recorded.extend(doc.delete_text(2, 1, 2100));       // forward delete "d": "abef"
+        recorded.extend(doc.delete_text(1, 1, 2200));       // backspace "b": "aef"
+        recorded.extend(doc.close_burst(2300));
+        assert_eq!(doc.text(), "aef");
+        assert_eq!(summary(&recorded), ["delete 3"]);
+    }
+
+    #[test]
+    fn typing_after_deleting_is_another_change() {
+        let mut doc = abcdef();
+        let mut recorded = doc.delete_text(5, 1, 2000);     // backspace "f"
+        recorded.extend(doc.delete_text(4, 1, 2100));       // backspace "e"
+        recorded.extend(doc.type_text(4, "XY", 2200));      // then type: the deletion is done
+        assert_eq!(summary(&recorded), ["delete 2"]);
+        recorded.extend(doc.close_burst(2300));
+        assert_eq!(summary(&recorded), ["delete 2", "insert XY"]);
+        assert_eq!(doc.text(), "abcdXY");
+    }
+
+    #[test]
+    fn deleting_somewhere_else_closes_the_first_deletion() {
+        let mut doc = abcdef();
+        let mut recorded = doc.delete_text(5, 1, 2000);     // "f"
+        recorded.extend(doc.delete_text(0, 1, 2100));       // "a", far away
+        recorded.extend(doc.close_burst(2200));
+        assert_eq!(summary(&recorded), ["delete 1", "delete 1"]);
+        assert_eq!(doc.text(), "bcde");
+    }
+
+    #[test]
+    fn a_deletion_burst_survives_merges() {
+        let (mut laptop, mut phone) = laptop_and_phone();     // "abcdef"
+        laptop.delete_text(3, 1, 2000);                        // backspace "d": "abcef"
+        let front = phone.insert_local(0, "12", 2000);
+        laptop.apply(&front);
+        assert_eq!(laptop.text(), "12abcef");
+        laptop.delete_text(4, 1, 2100);                        // backspace "c", still at the gap
+        let closed = laptop.close_burst(2200).unwrap();
+        assert_eq!(summary(&[closed.clone()]), ["delete 2"]);
+        phone.apply(&closed);
+        assert_eq!(laptop.text(), "12abef");
+        assert_eq!(phone.text(), "12abef");
+    }
+
+    #[test]
+    fn an_empty_burst_records_nothing_and_keeps_no_gap() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.type_text(0, "oops", 1000);
+        doc.delete_text(0, 4, 1100);
+        assert!(doc.close_burst(1200).is_none());
+        let next = doc.insert_local(0, "a", 1300);
+        assert_eq!(next.id.counter, 1); // the reserved counter was given back
+    }
+
+    #[test]
+    fn a_bursts_id_is_reserved_when_it_opens() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.type_text(0, "a", 1000);
+        let reserved = doc.burst().unwrap().id;
+        let closed = doc.close_burst(5000).unwrap();
+        assert_eq!(closed.id, reserved);
+        assert_eq!(closed.hlc, Hlc(5000)); // its time is set when it closes
+    }
+
+    #[test]
+    fn merges_dont_close_a_burst_and_it_stays_after_its_character() {
+        let (mut laptop, mut phone) = laptop_and_phone();     // "abcdef"
+        laptop.type_text(3, "XY", 2000);                       // drafting after "c"
+        let front = phone.insert_local(0, "123", 2000);        // the phone types elsewhere...
+        let after_c = phone.insert_local(6, "Q", 2001);        // ...and right after "c" too
+        laptop.apply(&front);
+        laptop.apply(&after_c);
+        assert!(laptop.burst().is_some(), "merging didn't close the burst");
+        assert_eq!(laptop.text(), "123abcXYQdef");             // the draft is still right after "c"
+        let closed = laptop.close_burst(3000).unwrap();
+        assert_eq!(laptop.text(), "123abcXYQdef");             // closing changes nothing on screen
+        phone.apply(&closed);
+        assert_eq!(phone.text(), "123abcXYQdef");
+    }
+
+    #[test]
+    fn a_burst_survives_its_character_being_deleted_elsewhere() {
+        let (mut laptop, mut phone) = laptop_and_phone();     // "abcdef"
+        laptop.type_text(3, "XY", 2000);                       // after "c"
+        let gone = phone.delete_local(1, 2, 2000);             // the phone deletes "bc"
+        laptop.apply(&gone);
+        assert_eq!(laptop.text(), "aXYdef");
+        let closed = laptop.close_burst(3000).unwrap();
+        phone.apply(&closed);
+        assert_eq!(laptop.text(), "aXYdef");
+        assert_eq!(phone.text(), "aXYdef");
+    }
+
+    #[test]
+    fn typing_over_a_selection_is_one_replaced_selection() {
+        let mut doc = abcdef();
+        doc.replace_text(1, 3, "XY", 2000);                    // over "bcd"
+        assert_eq!(doc.text(), "aXYef");
+        assert_eq!(doc.len(), 5);
+        doc.type_text(3, "Z", 2100);                           // keep typing
+        let closed = doc.close_burst(2200).into_iter().collect::<Vec<_>>();
+        assert_eq!(summary(&closed), ["replace 3 with XYZ"]);
+        assert_eq!(doc.text(), "aXYZef");
+    }
+
+    #[test]
+    fn a_paste_over_a_selection_is_one_change_too() {
+        let mut doc = abcdef();
+        let change = doc.replace_local(1, 3, "XY", 2000);
+        assert_eq!(summary(&[change]), ["replace 3 with XY"]);
+        assert_eq!(doc.text(), "aXYef");
+    }
+
+    #[test]
+    fn moving_the_cursor_out_of_the_burst_closes_it() {
+        let mut doc = abcdef();
+        doc.type_text(3, "XY", 2000);                          // "abcXYdef", draft at 3..5
+        assert!(doc.cursor_moved(5, 2100).is_none());          // still at its end
+        assert!(doc.cursor_moved(1, 2200).is_some());          // left it
+    }
+
+    #[test]
+    #[should_panic(expected = "close the typing burst first")]
+    fn other_actions_need_the_burst_closed_first() {
+        let mut doc = abcdef();
+        doc.type_text(3, "XY", 2000);
+        doc.move_local(0, 1, 6, 2100);
     }
 
     #[test]

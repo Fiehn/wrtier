@@ -1,4 +1,4 @@
-﻿use crate::change::{Change, ChangeKind, InsertRun, CharRange, NoticeKey};
+use crate::change::{Change, ChangeKind, InsertRun, CharRange, NoticeKey};
 use super::fugue::Tree;
 use crate::ids::{ChangeId, DeviceId, Hlc, CharId};
 use std::collections::HashSet;
@@ -15,7 +15,7 @@ pub struct Doc {
     reverted_by: HashMap<ChangeId, Vec<ChangeId>>, // to track which changes have been reverted by which other changes
     seen: HashMap<DeviceId, u32>, // to track the highest counter seen from each device
     moves: Vec<(Hlc, MoveInfo)>, // to track the moves that have been applied, in order of their HLC
-    typed_into: HashMap<CharId, Vec<CharId>>, // a piece's anchor â†’ nodes typed or dropped into it
+    typed_into: HashMap<CharId, Vec<CharId>>, // a piece's anchor → nodes typed or dropped into it
     dismissals: Vec<(ChangeId, NoticeKey)>,   // every Dismiss Change, and the notice it hides
     session: Option<(ChangeId, u64)>,         // this Device's current Session: (its first Change, time of the last)
     layout: Layout,

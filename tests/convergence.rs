@@ -1,4 +1,4 @@
-﻿use proptest::prelude::*;
+use proptest::prelude::*;
 use wrtier::change::Change;
 use wrtier::doc::Doc;
 use wrtier::ids::DeviceId;
@@ -246,7 +246,7 @@ fn expected_chars(all: &[Change]) -> Vec<char> {
         }
     }
 
-    // Each character â†’ the Changes that deleted it.
+    // Each character → the Changes that deleted it.
     let mut deleted_by: HashMap<CharId, Vec<ChangeId>> = HashMap::new();
     for c in all {
         let ranges = match &c.kind {
