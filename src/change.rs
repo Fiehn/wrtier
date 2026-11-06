@@ -53,9 +53,14 @@ pub fn milestone_record(milestone: ChangeId) -> String {
     format!("milestone/{milestone}")
 }
 
+/// The record describing a Session, e.g. that it came from an External edit.
+pub fn session_record(session: ChangeId) -> String {
+    format!("session/{session}")
+}
+
 /// Records that aren't part of the Work's content: returning to a Milestone leaves them alone.
 pub fn is_meta_record(record: &str) -> bool {
-    record.starts_with("device/") || record.starts_with("milestone/")
+    record.starts_with("device/") || record.starts_with("milestone/") || record.starts_with("session/")
 }
 
 /// Names a Merge notice the same way on every Device, by the Moves involved.
@@ -65,6 +70,9 @@ pub enum NoticeKey {
     Overlap { later: ChangeId, earlier: ChangeId },
     /// A Move would have put text inside itself, so it was skipped and its text stayed where it was.
     Loop { skipped: ChangeId },
+    /// The Text file was edited outside the app, but the version it was written from couldn't be
+    /// found, so the edit was compared against the current text instead. Named by its Session.
+    UnknownTextFile { session: ChangeId },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

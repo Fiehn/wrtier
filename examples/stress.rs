@@ -192,6 +192,17 @@ fn run(n: usize) {
         })
         .collect();
 
+    // An External edit: one word changed in the middle of the Text file.
+    let version = doc.version();
+    let written = doc.committed_text();
+    let middle = written.char_indices().nth(written.chars().count() / 2).map_or(0, |(i, _)| i);
+    let edited = format!("{}EDITED{}", &written[..middle], &written[middle..]);
+    now += 1_000;
+    let start = Instant::now();
+    let imported = doc.import_text(Some(&version), &edited, now);
+    let import_time = start.elapsed();
+    assert!(!imported.is_empty());
+
     // Opening from a real file: SQLite reading included.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("work.db");
@@ -202,9 +213,9 @@ fn run(n: usize) {
     assert_eq!(loaded.len(), len, "the file opens to the same text");
 
     println!(
-        "{:>7} Changes {:>8} chars | write {:>7.0} ms | open {:>6.1} ms (from file {:>6.1} ms) | keystroke {} | delete {} | move {} | revert {} | from another Device {}",
+        "{:>7} Changes {:>8} chars | write {:>7.0} ms | open {:>6.1} ms (from file {:>6.1} ms) | keystroke {} | delete {} | move {} | revert {} | from another Device {} | External edit {:.1} ms",
         n, len, ms(write_time), ms(open_time), ms(file_time),
-        summary(keystrokes), summary(deletes), summary(moves), summary(reverts), summary(remote),
+        summary(keystrokes), summary(deletes), summary(moves), summary(reverts), summary(remote), ms(import_time),
     );
 }
 

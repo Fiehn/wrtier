@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 rustc-hash = "2"  # fast hashing for the tree's lookup tables; no protection against crafted input needed here
+similar = "2"     # diffing an edited Text file against the version the app wrote
+sha2 = "0.10"     # recognising Text file contents the app wrote itself
 
 [dev-dependencies]
 proptest = "1"

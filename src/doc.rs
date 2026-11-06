@@ -6,7 +6,8 @@
 //! such shortcut is checked against a full recompute. `crate::reference::doc` is the first,
 //! simple version; this one must behave identically (`tests/against_reference.rs`).
 
-use crate::change::{device_record, is_meta_record, milestone_record, Change, ChangeKind, InsertRun, CharRange, NoticeKey, Span};
+use crate::change::{device_record, is_meta_record, milestone_record, session_record, Change, ChangeKind, InsertRun, CharRange, NoticeKey, Span};
+use crate::text_file;
 use crate::fugue::Tree;
 use crate::ids::{ChangeId, DeviceId, Hlc, CharId};
 use crate::layout::{Layout, MoveInfo, Piece};
@@ -29,6 +30,7 @@ pub struct Doc {
     content_set: HashSet<ChangeId>,                // the same, for lookups
     milestones: Vec<(ChangeId, Hlc, String, Vec<(DeviceId, u32)>)>, // every Milestone: id, time, name, what it holds
     session: Option<(ChangeId, u64)>,              // this Device's current Session: (its first Change, time of the last)
+    sessions: HashMap<ChangeId, Vec<ChangeId>>,    // every Session → its Changes
     layout: Layout,
     // Worked out by `refresh` (or a fast path) after every Change, so reading the text doesn't redo it.
     visible: Vec<u32>, // the visible characters' tree nodes, in reading order
@@ -134,6 +136,7 @@ impl Doc {
             content_set: HashSet::new(),
             milestones: Vec::new(),
             session: None, // a Work just opened: the first Change starts a new Session
+            sessions: HashMap::new(),
             layout: Layout::default(),
             visible: Vec::new(),
             burst: None,
@@ -191,17 +194,32 @@ impl Doc {
     }
 
     /// The Merge notices the Author hasn't dismissed, worked out from the History.
-    /// Every Device gets the same list, in the fixed Change order.
+    /// Every Device gets the same list, in the same order.
     pub fn merge_notices(&self) -> Vec<MergeNotice> {
-        let overlaps = self.layout.contested_text().iter()
-            .map(|(later, earlier, chars)| (NoticeKey::Overlap { later: *later, earlier: *earlier }, chars));
-        let loops = self.layout.skipped().iter()
-            .map(|(skipped, chars)| (NoticeKey::Loop { skipped: *skipped }, chars));
-        overlaps.chain(loops)
+        let node_set = |chars: &[CharId]| -> FxHashSet<u32> { chars.iter().filter_map(|&id| self.tree.index_of(id)).collect() };
+        let mut found: Vec<(NoticeKey, FxHashSet<u32>)> = Vec::new();
+        for (later, earlier, chars) in self.layout.contested_text() {
+            found.push((NoticeKey::Overlap { later: *later, earlier: *earlier }, node_set(chars)));
+        }
+        for (skipped, chars) in self.layout.skipped() {
+            found.push((NoticeKey::Loop { skipped: *skipped }, node_set(chars)));
+        }
+        // External edits compared against the current text because no written version was found:
+        // they point at the text that edit wrote.
+        let mut unknown: Vec<ChangeId> = self.fields.keys()
+            .filter(|(record, field)| field == "base" && self.field(record, "base") == Some("unknown"))
+            .filter_map(|(record, _)| record.strip_prefix("session/")?.parse().ok())
+            .collect();
+        unknown.sort();
+        for session in unknown {
+            let changes: FxHashSet<ChangeId> = self.sessions.get(&session).into_iter().flatten().copied().collect();
+            let nodes = self.visible.iter().copied().filter(|&n| changes.contains(&self.tree.change_at(n))).collect();
+            found.push((NoticeKey::UnknownTextFile { session }, nodes));
+        }
+        found.into_iter()
             .filter(|(key, _)| !self.is_dismissed(*key))
             .map(|(key, involved)| {
                 // Walk the visible text so the characters come out in reading order.
-                let involved: FxHashSet<u32> = involved.iter().filter_map(|&id| self.tree.index_of(id)).collect();
                 let nodes: Vec<u32> = self.visible.iter().copied().filter(|n| involved.contains(n)).collect();
                 MergeNotice {
                     key,
@@ -210,6 +228,23 @@ impl Doc {
                 }
             })
             .collect()
+    }
+
+    /// This Device's ID.
+    pub fn device(&self) -> DeviceId {
+        self.device
+    }
+
+    /// The version this Device has: the highest Change counter it has applied from each Device.
+    pub fn version(&self) -> Vec<(DeviceId, u32)> {
+        let mut version: Vec<(DeviceId, u32)> = self.seen.iter().map(|(&d, &c)| (d, c)).collect();
+        version.sort();
+        version
+    }
+
+    /// The History's text, without the open burst's draft: what the Text file holds.
+    pub fn committed_text(&self) -> String {
+        self.visible.iter().filter_map(|&node| self.tree.char_at(node)).collect()
     }
 
     /// The current value of a record's field: the latest in the fixed Change order among the
@@ -331,6 +366,7 @@ impl Doc {
         }
         let seen = self.seen.entry(change.id.device).or_insert(0);
         *seen = (*seen).max(change.id.counter);
+        self.sessions.entry(change.session).or_default().push(change.id);
         self.clock.observe(change.hlc);
         if change.id.device == self.device {
             // A Change of ours, e.g. loaded from the file: never reuse its counter.
@@ -501,17 +537,40 @@ impl Doc {
     /// Where new text right after `node` goes in the tree. Applies the edge rule: right after
     /// the last character of a piece, the text goes after that piece's anchor instead.
     fn placement_after(&self, node: Option<u32>) -> (Option<CharId>, Option<CharId>) {
+        self.placement_after_in(&self.layout, node)
+    }
+
+    /// The same, for the text as laid out by `layout` (e.g. an older version of it).
+    fn placement_after_in(&self, layout: &Layout, node: Option<u32>) -> (Option<CharId>, Option<CharId>) {
         let Some(mut node) = node else { return (None, None) };
-        let mut level = self.layout.level_at(node);
+        let mut level = layout.level_at(node);
         while let Some(piece) = level {
-            let span = self.layout.span(piece).expect("a drawn piece has a span");
+            let span = layout.span(piece).expect("a drawn piece has a span");
             if self.tree.id_of(node) != span.last {
                 break;
             }
             node = self.tree.index_of(anchor_of(piece)).expect("a drawn piece has an anchor");
-            level = self.layout.level_at(node);
+            level = layout.level_at(node);
         }
         (Some(self.tree.id_of(node)), level.map(anchor_of))
+    }
+
+    /// The pieces of a Move of `nodes` (consecutive visible nodes of the text laid out by
+    /// `layout`): one per run of nodes drawn in the same place.
+    fn pieces_of(&self, layout: &Layout, nodes: &[u32]) -> Vec<Span> {
+        let mut groups: Vec<(Option<Piece>, Span)> = Vec::new();
+        for &node in nodes {
+            let (id, level) = (self.tree.id_of(node), layout.level_at(node));
+            if let Some((last_level, span)) = groups.last_mut() {
+                if *last_level == level {
+                    span.last = id;
+                    continue;
+                }
+            }
+            // `from` is the anchor of the piece this text is drawn in (None = the main text).
+            groups.push((level, Span { first: id, last: id, from: level.map(anchor_of) }));
+        }
+        groups.into_iter().map(|(_, span)| span).collect()
     }
 
     /// Where text placed right after `left` shows: the number of visible characters before it,
@@ -722,19 +781,7 @@ impl Doc {
         assert!(to <= self.len(), "to {to} is past the end of the text ({})", self.len());
 
         // One piece per run of selected characters drawn in the same place.
-        let mut groups: Vec<(Option<Piece>, Span)> = Vec::new();
-        for &node in &self.visible[from..from + len] {
-            let (id, level) = (self.tree.id_of(node), self.layout.level_at(node));
-            if let Some((last_level, span)) = groups.last_mut() {
-                if *last_level == level {
-                    span.last = id;
-                    continue;
-                }
-            }
-            // `from` is the anchor of the piece this text is drawn in (None = the main text).
-            groups.push((level, Span { first: id, last: id, from: level.map(anchor_of) }));
-        }
-        let pieces: Vec<Span> = groups.into_iter().map(|(_, span)| span).collect();
+        let pieces = self.pieces_of(&self.layout, &self.visible[from..from + len]);
 
         let (left, into) = self.left_of(to);
         let (parent, side, right_origin) = self.tree.place_after(left);
@@ -850,15 +897,109 @@ impl Doc {
     /// The text if only the Changes `member` accepts had ever happened: Reverts outside the set
     /// don't count, and nor do deletions or Moves outside it.
     fn text_among(&self, member: &dyn Fn(ChangeId) -> bool) -> String {
+        let (_, nodes) = self.view_among(member);
+        nodes.into_iter().filter_map(|n| self.tree.char_at(n)).collect()
+    }
+
+    /// The layout and the visible nodes (in reading order) if only the Changes `member` accepts
+    /// had ever happened.
+    fn view_among(&self, member: &dyn Fn(ChangeId) -> bool) -> (Layout, Vec<u32>) {
         let in_effect = |id: ChangeId| member(id) && self.is_in_effect_among(id, member);
         let mut moves: Vec<(Hlc, MoveInfo)> = self.moves.iter().filter(|(_, m)| in_effect(m.id)).cloned().collect();
         moves.sort_by_key(|(hlc, m)| (*hlc, m.id.device));
         let moves: Vec<MoveInfo> = moves.into_iter().map(|(_, m)| m).collect();
         let layout = Layout::compute(&self.tree, &moves, &self.typed_into);
-        layout.reading_nodes(&self.tree).into_iter()
+        let nodes = layout.reading_nodes(&self.tree).into_iter()
             .filter(|&n| in_effect(self.tree.change_at(n)) && !self.tree.deleters_at(n).iter().any(|&d| in_effect(d)))
-            .filter_map(|n| self.tree.char_at(n))
-            .collect()
+            .collect();
+        (layout, nodes)
+    }
+
+    // ---- External edits ----
+
+    /// Records an edit made to the Text file outside the app.
+    ///
+    /// `base` is the version the file was written from (the highest Change counter it held from
+    /// each Device). The file is compared with the text of that version, not the current text,
+    /// so edits made in the app since then are kept, and the External edit merges like Changes
+    /// from an offline Device. None if no written version is known: then it's compared with the
+    /// current text, and the Author gets a Merge notice.
+    ///
+    /// A block deleted in one place and found unchanged in another becomes a Move, so its
+    /// History goes with it. Everything else becomes one deletion and insertions. All of it is
+    /// one new Session, labelled "External edit". Returns the Changes recorded.
+    pub fn import_text(&mut self, base: Option<&[(DeviceId, u32)]>, file_text: &str, now_ms: u64) -> Vec<Change> {
+        self.assert_no_burst();
+        let known = base.is_some();
+        let base: Vec<(DeviceId, u32)> = base.map_or_else(|| self.version(), |b| b.to_vec());
+        let (layout, nodes) = {
+            let base = &base;
+            self.view_among(&|c| holds(base, c))
+        };
+        let old: Vec<char> = nodes.iter().filter_map(|&n| self.tree.char_at(n)).collect();
+        // Editors may add a byte order mark or Windows line endings; the Work's text has neither.
+        let new: Vec<char> = file_text.strip_prefix('\u{feff}').unwrap_or(file_text).replace("\r\n", "\n").chars().collect();
+        let plan = text_file::plan(&old, &new);
+        if plan.hunks.is_empty() {
+            return Vec::new(); // nothing was edited outside the app
+        }
+
+        self.session = None; // an External edit is a Session of its own
+        let mut recorded: Vec<Change> = Vec::new();
+        // Deleted outright: one deletion.
+        let doomed: Vec<u32> = plan.deleted.iter().flat_map(|&(s, l)| nodes[s..s + l].iter().copied()).collect();
+        if !doomed.is_empty() {
+            let kind = ChangeKind::Delete(self.ranges_of(&doomed));
+            recorded.push(self.import_change(kind, now_ms));
+        }
+        // Each hunk's new text, in order: inserted text and moved blocks, placed one after the
+        // other, starting right after the unchanged text before the hunk (as it was in `base`).
+        for (h, hunk) in plan.hunks.iter().enumerate() {
+            let mut parts: Vec<(usize, Option<(usize, usize)>)> = plan.inserted.iter()
+                .filter(|&&(ih, ..)| ih == h)
+                .map(|&(_, start, len)| (start, None))
+                .chain(plan.moved.iter().filter(|m| m.hunk == h).map(|m| (m.new_start, Some((m.old_start, m.len)))))
+                .collect();
+            parts.sort_by_key(|&(start, _)| start);
+            let (mut left, into) = self.placement_after_in(&layout, hunk.old_start.checked_sub(1).map(|i| nodes[i]));
+            for (start, moved) in parts {
+                let (parent, side, right_origin) = self.tree.place_after(left);
+                match moved {
+                    None => {
+                        let len = plan.inserted.iter().find(|&&(_, s, _)| s == start).expect("listed above").2;
+                        let text: String = new[start..start + len].iter().collect();
+                        let change = self.import_change(ChangeKind::Insert(InsertRun { text, parent, side, right_origin, into }), now_ms);
+                        left = Some(CharId { change: change.id, offset: len as u32 - 1 });
+                        recorded.push(change);
+                    }
+                    Some((old_start, len)) => {
+                        let pieces = self.pieces_of(&layout, &nodes[old_start..old_start + len]);
+                        let count = pieces.len() as u32;
+                        // It only knew `base`: it takes text from Moves made since, like an offline Device would.
+                        let kind = ChangeKind::Move { pieces, parent, side, right_origin, seen: base.clone(), into };
+                        let change = self.import_change(kind, now_ms);
+                        left = Some(CharId { change: change.id, offset: count - 1 }); // after its last anchor
+                        recorded.push(change);
+                    }
+                }
+            }
+        }
+        // Label the Session, for the History view (and the Merge notice if the version was unknown).
+        let record = session_record(recorded[0].session);
+        recorded.push(self.import_change(ChangeKind::SetField { record: record.clone(), field: "source".into(), value: "External edit".into() }, now_ms));
+        if !known {
+            recorded.push(self.import_change(ChangeKind::SetField { record, field: "base".into(), value: "unknown".into() }, now_ms));
+        }
+        self.session = None; // what's typed next is a new Session
+        self.refresh();
+        recorded
+    }
+
+    /// Makes and applies one Change of an External edit (the text is worked out once, at the end).
+    fn import_change(&mut self, kind: ChangeKind, now_ms: u64) -> Change {
+        let change = self.new_change(None, kind, now_ms);
+        self.apply_change(&change);
+        change
     }
 
     /// Like `is_in_effect`, counting only Reverts that `member` accepts.
@@ -1499,6 +1640,92 @@ mod test {
         let mut doc = abcdef();
         doc.type_text(3, "XY", 2000);
         doc.move_local(0, 1, 6, 2100);
+    }
+
+    // ---- External edits ----
+
+    #[test]
+    fn an_external_edit_becomes_changes_that_reproduce_the_file() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "The rain had stopped.", 1000);
+        let version = doc.version();
+        let recorded = doc.import_text(Some(&version), "The rain had eased.", 2000);
+        assert_eq!(doc.text(), "The rain had eased.");
+        let kinds: Vec<String> = summary(&recorded).into_iter().filter(|s| !s.starts_with("SetField")).collect();
+        assert_eq!(kinds, ["delete 7", "insert eased"]); // one word for one word: readable
+    }
+
+    #[test]
+    fn a_moved_line_keeps_its_characters() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "one\ntwo\nthree\n", 1000);
+        let mut before: Vec<CharId> = doc.visible().iter().map(|&(id, _)| id).collect();
+        let version = doc.version();
+        let recorded = doc.import_text(Some(&version), "two\nthree\none\n", 2000);
+        assert_eq!(doc.text(), "two\nthree\none\n");
+        assert!(recorded.iter().any(|c| matches!(c.kind, ChangeKind::Move { .. })));
+        // Same characters, so their History (and later their Comments) go with them.
+        let mut after: Vec<CharId> = doc.visible().iter().map(|&(id, _)| id).collect();
+        before.sort();
+        after.sort();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn edits_made_in_the_app_since_the_file_was_written_are_kept() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "The rain had stopped.\n", 1000);
+        let written = doc.version();                           // the Text file holds this version
+        doc.insert_local(22, "Gulls circled.\n", 2000);        // then the app goes on
+        // Meanwhile the file was edited in another editor, starting from what was written.
+        doc.import_text(Some(&written), "The rain had eased.\n", 3000);
+        assert_eq!(doc.text(), "The rain had eased.\nGulls circled.\n");
+    }
+
+    #[test]
+    fn an_unknown_version_gives_a_merge_notice() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "The rain had stopped.", 1000);
+        let recorded = doc.import_text(None, "The rain had eased.", 2000);
+        assert_eq!(doc.text(), "The rain had eased.");
+        let notices = doc.merge_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].key, NoticeKey::UnknownTextFile { session: recorded[0].session });
+        assert_eq!(notices[0].text, "eased");
+        doc.dismiss_local(notices[0].key, 3000);
+        assert!(doc.merge_notices().is_empty());
+    }
+
+    #[test]
+    fn an_external_edit_is_a_labelled_session_of_its_own() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "abc", 1000);
+        let version = doc.version();
+        let recorded = doc.import_text(Some(&version), "xbc", 1001);
+        let session = recorded[0].session;
+        assert!(recorded.iter().all(|c| c.session == session));
+        assert_ne!(session, ChangeId { device: DeviceId(1), counter: 1 }); // not the typing's Session
+        assert_eq!(doc.field(&session_record(session), "source"), Some("External edit"));
+        let next = doc.insert_local(0, "y", 1002);                       // only a moment later...
+        assert_ne!(next.session, session);                               // ...but a new Session
+    }
+
+    #[test]
+    fn an_unchanged_file_records_nothing() {
+        let mut doc = abcdef();
+        let version = doc.version();
+        assert!(doc.import_text(Some(&version), "abcdef", 2000).is_empty());
+        doc.insert_local(6, "g", 3000);                                  // the app moved on, the file didn't
+        assert!(doc.import_text(Some(&version), "abcdef", 4000).is_empty());
+        assert_eq!(doc.text(), "abcdefg");
+    }
+
+    #[test]
+    fn windows_line_endings_and_a_byte_order_mark_are_ignored() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "one\ntwo\n", 1000);
+        let version = doc.version();
+        assert!(doc.import_text(Some(&version), "\u{feff}one\r\ntwo\r\n", 2000).is_empty());
     }
 
     // ---- Milestones ----

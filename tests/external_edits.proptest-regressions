@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b6c387b341d8262ea38b081cab5a1c167e5435fa23d2f8a6367bc6545850f50d # shrinks to history = [Insert { at: 12530, text: "a" }, Insert { at: 0, text: "aa" }, Insert { at: 35404, text: "a a" }, Move { from: 9478, len: 3, to: 41846 }, Insert { at: 2296, text: " a" }, Insert { at: 1662, text: " a" }, Insert { at: 56998, text: "a \n" }], later = [], edits = [InsertLine { at: 52424, text: " " }, InsertLine { at: 8109, text: " " }, DeleteLine { at: 27986 }]

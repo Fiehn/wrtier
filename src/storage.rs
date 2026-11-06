@@ -1,6 +1,6 @@
 ﻿use std::error::Error;
 use std::path::Path;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use crate::change::{Change, ChangeKind, CharRange, InsertRun, NoticeKey, Span};
 use crate::doc::Doc;
 use crate::ids::{ChangeId, CharId, Side, DeviceId, Hlc};
@@ -203,6 +203,32 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
+    if version < 8 {
+        // Text files: every one the app writes is recorded with the version it was built from.
+        // And `dismissals` accepts a third kind of notice; SQLite can't change a CHECK in place,
+        // so the table is rebuilt.
+        conn.execute_batch("
+        BEGIN;
+        CREATE TABLE text_files (
+            hash     TEXT PRIMARY KEY,  -- SHA-256 of the file's contents
+            version  TEXT NOT NULL,     -- what it was built from: 'device:counter' per Device, comma-separated
+            device   TEXT NOT NULL,     -- which Device wrote it
+            written  INTEGER NOT NULL,  -- when, in ms since 1970: the latest is the one to compare with
+            time     TEXT NOT NULL      -- readable copy
+        );
+        CREATE TABLE dismissals_new (
+            change      TEXT PRIMARY KEY REFERENCES changes(id),
+            notice      TEXT NOT NULL CHECK (notice IN ('overlap', 'loop', 'unknown_text_file')),
+            move        TEXT NOT NULL, -- overlap: the later Move; loop: the skipped Move; unknown_text_file: the Session
+            other_move  TEXT           -- overlap: the earlier Move; otherwise NULL
+        );
+        INSERT INTO dismissals_new SELECT change, notice, move, other_move FROM dismissals;
+        DROP TABLE dismissals;
+        ALTER TABLE dismissals_new RENAME TO dismissals;
+        PRAGMA user_version = 8;
+        COMMIT;
+        ")?;
+    }
     Ok(())
 }
 /// One row in `insertions`. Insert and Replace both write one.
@@ -326,6 +352,7 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
             let (kind, mv, other) = match notice {
                 NoticeKey::Overlap { later, earlier } => ("overlap", later, Some(earlier)),
                 NoticeKey::Loop { skipped } => ("loop", skipped, None),
+                NoticeKey::UnknownTextFile { session } => ("unknown_text_file", session, None),
             };
             conn.execute(
                 "INSERT OR IGNORE INTO dismissals (change, notice, move, other_move) VALUES (?1, ?2, ?3, ?4)",
@@ -453,6 +480,7 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
         let key = match (notice.as_str(), other) {
             ("overlap", Some(other)) => NoticeKey::Overlap { later: mv, earlier: other.parse()? },
             ("loop", None) => NoticeKey::Loop { skipped: mv },
+            ("unknown_text_file", None) => NoticeKey::UnknownTextFile { session: mv },
             (notice, other) => return Err(format!("Invalid dismissal: {notice} {other:?}").into()),
         };
         dismissals.insert(change, key);
@@ -661,13 +689,85 @@ fn merge_attached(conn: &Connection) -> Result<()> {
         return Err(Box::new(SameIdDifferentContent { ids: differing }));
     }
 
-    // 2. Copy everything `main` doesn't have yet, in one transaction.
+    // 2. Copy everything `main` doesn't have yet, in one transaction. (Text file records too:
+    //    the same contents may be recorded by both, with any version that produced them.)
     let tx = conn.unchecked_transaction()?;
     for (table, _, _, columns) in TABLES {
         tx.execute(&format!("INSERT OR IGNORE INTO main.{table} ({columns}) SELECT {columns} FROM other.{table}"), [])?;
     }
+    let columns = "hash, version, device, written, time";
+    tx.execute(&format!("INSERT OR IGNORE INTO main.text_files ({columns}) SELECT {columns} FROM other.text_files"), [])?;
     tx.commit()?;
     Ok(())
+}
+
+// ---- The Text file ----
+
+/// SHA-256 of a Text file's contents, as hex.
+fn text_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A version as stored: "device:counter" per Device, comma-separated (readable, and sorted).
+fn version_to_str(version: &[(DeviceId, u32)]) -> String {
+    version.iter().map(|&(device, counter)| ChangeId { device, counter }.to_string()).collect::<Vec<_>>().join(",")
+}
+
+fn version_from_str(s: &str) -> Result<Vec<(DeviceId, u32)>> {
+    s.split(',').filter(|p| !p.is_empty()).map(|p| {
+        let id: ChangeId = p.parse()?;
+        Ok((id.device, id.counter))
+    }).collect()
+}
+
+/// Writes the Work's text to its Text file, and records the file's hash and the version it was
+/// built from, so the app recognises it later (on any Device, also in Conflict copies).
+/// The file is written next to itself first and then renamed over it, so a crash never leaves
+/// half a file.
+pub fn write_text_file(db: &Path, text_file: &Path, doc: &Doc, now_ms: u64) -> Result<()> {
+    let text = doc.committed_text();
+    let conn = Connection::open(db)?;
+    migrate(&conn)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO text_files (hash, version, device, written, time)
+         VALUES (?1, ?2, ?3, ?4, datetime(?4 / 1000, 'unixepoch'))",
+        params![text_hash(&text), version_to_str(&doc.version()), doc.device().to_string(), now_ms as i64],
+    )?;
+    drop(conn); // recorded before the file exists, so a file the app wrote is always recognised
+    let partial = text_file.with_extension("typ.writing");
+    std::fs::write(&partial, &text)?;
+    std::fs::rename(&partial, text_file)?;
+    Ok(())
+}
+
+/// Reads a Text file (or a Conflict copy of one). If it holds text the app wrote, on any
+/// Device, there's nothing to do. Otherwise it was edited outside the app: the difference from
+/// the version last written is recorded as Changes in `doc` and saved. Returns those Changes.
+pub fn import_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -> Result<Vec<Change>> {
+    let text = std::fs::read_to_string(text_file)?;
+    let conn = Connection::open(db)?;
+    migrate(&conn)?;
+    let known: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM text_files WHERE hash = ?1)", [text_hash(&text)], |r| r.get(0))?;
+    if known {
+        return Ok(Vec::new()); // the app wrote exactly this
+    }
+    let last: Option<String> = conn
+        .query_row("SELECT version FROM text_files ORDER BY written DESC, device DESC LIMIT 1", [], |r| r.get(0))
+        .optional()?;
+    drop(conn);
+    let base = last.map(|v| version_from_str(&v)).transpose()?;
+    let changes = doc.import_text(base.as_deref(), &text, now_ms);
+    save(db, &changes, doc)?;
+    Ok(changes)
+}
+
+/// Keeps a Work's Text file in step: records an External edit if there is one, then writes the
+/// current text. Returns the Changes the External edit became (empty if there was none).
+pub fn sync_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -> Result<Vec<Change>> {
+    let changes = if text_file.exists() { import_text_file(db, text_file, doc, now_ms)? } else { Vec::new() };
+    write_text_file(db, text_file, doc, now_ms)?;
+    Ok(changes)
 }
 
 #[cfg(test)]
@@ -679,7 +779,7 @@ mod test {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
     }
 
     #[test]
@@ -842,6 +942,57 @@ mod test {
         let conn = Connection::open(&path).unwrap();
         let text: String = conn.query_row("SELECT text FROM history WHERE kind = 'milestone'", [], |r| r.get(0)).unwrap();
         assert_eq!(text, "Draft 2, sent to editor");
+    }
+
+    #[test]
+    fn the_app_recognises_its_own_text_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, typ) = (dir.path().join("work.db"), dir.path().join("work.typ"));
+        let mut doc = Doc::new(DeviceId(1));
+        let typed = doc.insert_local(0, "The rain had stopped.\n", 1000);
+        save(&db, &[typed], &doc).unwrap();
+        write_text_file(&db, &typ, &doc, 1500).unwrap();
+        assert_eq!(std::fs::read_to_string(&typ).unwrap(), "The rain had stopped.\n");
+        assert!(sync_text_file(&db, &typ, &mut doc, 2000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_external_edit_is_recorded_saved_and_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, typ) = (dir.path().join("work.db"), dir.path().join("work.typ"));
+        let mut doc = Doc::new(DeviceId(1));
+        let typed = doc.insert_local(0, "The rain had stopped.\n", 1000);
+        save(&db, &[typed.clone()], &doc).unwrap();
+        write_text_file(&db, &typ, &doc, 1500).unwrap();
+        let more = doc.insert_local(22, "Gulls circled.\n", 2000); // the app goes on, unwritten
+        save(&db, &[more], &doc).unwrap();
+
+        std::fs::write(&typ, "The rain had eased.\n").unwrap(); // edited in vim
+        let recorded = sync_text_file(&db, &typ, &mut doc, 3000).unwrap();
+        assert!(!recorded.is_empty());
+        assert_eq!(doc.text(), "The rain had eased.\nGulls circled.\n");
+        assert_eq!(std::fs::read_to_string(&typ).unwrap(), doc.text()); // rewritten with both
+        let (_, reopened) = load(&db, DeviceId(1)).unwrap();
+        assert_eq!(reopened.text(), doc.text());                         // and saved
+        assert!(sync_text_file(&db, &typ, &mut doc, 4000).unwrap().is_empty()); // recognised now
+    }
+
+    #[test]
+    fn a_text_file_written_on_another_device_is_recognised_after_a_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let (laptop_db, phone_db) = (dir.path().join("laptop.db"), dir.path().join("phone.db"));
+        let copy = dir.path().join("work.sync-conflict.typ");
+        let mut laptop = Doc::new(DeviceId(1));
+        let mut phone = Doc::new(DeviceId(2));
+        let base = laptop.insert_local(0, "abc", 1000);
+        phone.apply(&base);
+        let theirs = phone.insert_local(3, "def", 2000);
+        save(&laptop_db, &[base.clone()], &laptop).unwrap();
+        save(&phone_db, &[base, theirs], &phone).unwrap();
+        write_text_file(&phone_db, &copy, &phone, 2500).unwrap(); // the phone's Text file, as a Conflict copy
+        merge(&laptop_db, &phone_db).unwrap();
+        let (_, mut laptop) = load(&laptop_db, DeviceId(1)).unwrap();
+        assert!(import_text_file(&laptop_db, &copy, &mut laptop, 3000).unwrap().is_empty());
     }
 
     #[test]
