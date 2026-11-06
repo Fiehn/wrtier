@@ -14,7 +14,7 @@ use wrtier::doc::Doc;
 use wrtier::ids::DeviceId;
 use wrtier::storage::{self, Probe};
 use crate::recovery::{self, Recovery};
-use crate::work::{undoable, Op, OpenWork, WorkState};
+use crate::work::{undoable, Op, OpenWork, Whereabouts, WorkState};
 use wrtier::change::Change;
 use wrtier::ids::ChangeId;
 
@@ -37,6 +37,21 @@ pub struct Vault {
     recovered: HashMap<String, (Vec<ChangeId>, String)>,
     /// Why Syncthing couldn't be told to ignore SQLite's temporary files, if it couldn't.
     ignore_problem: Option<String>,
+    /// Open Works that were renamed (here or elsewhere): old ID → new ID, so edits still on
+    /// their way under the old ID find them.
+    aliases: HashMap<String, String>,
+    /// `vault.db` as this Vault last wrote or read it: if it changes, another Device's settings arrived.
+    vault_stamp: Option<(std::time::SystemTime, u64)>,
+}
+
+mod moves;
+mod settings;
+pub use moves::TrashedWork;
+pub use settings::Settings;
+
+fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 /// Syncthing must never sync SQLite's temporary `-journal` files (Phase 0c). Its ignore
@@ -181,6 +196,8 @@ impl Vault {
             recovery_dir: recovery_dir.to_path_buf(),
             recovered: HashMap::new(),
             ignore_problem: ignore_journals(root).err(),
+            aliases: HashMap::new(),
+            vault_stamp: file_stamp(&file),
         };
         vault.absorb_vault_copies(&mut Vec::new()); // any left are reported when the Works are listed
         Ok(Opened::Vault(vault))
@@ -197,13 +214,22 @@ impl Vault {
 
     pub fn set_device_name(&mut self, name: &str, now_ms: u64) -> Result<(), String> {
         let change = self.vault_doc.set_device_name_local(name, now_ms);
-        storage::save(&self.root.join(VAULT_FILE), &[change], &self.vault_doc).map_err(err)
+        self.save_vault(&[change])
     }
 
-    /// Merges Conflict copies of `vault.db` into it.
+    /// Saves Changes to `vault.db` (and notes that this was our own write).
+    fn save_vault(&mut self, changes: &[Change]) -> Result<(), String> {
+        let file = self.root.join(VAULT_FILE);
+        storage::save(&file, changes, &self.vault_doc).map_err(err)?;
+        self.vault_stamp = file_stamp(&file);
+        Ok(())
+    }
+
+    /// Merges Conflict copies of `vault.db` into it, and reads it again if it changed (another
+    /// Device's settings or name arrived).
     fn absorb_vault_copies(&mut self, problems: &mut Vec<SyncProblem>) {
         let file = self.root.join(VAULT_FILE);
-        let mut merged = false;
+        let mut merged = file_stamp(&file) != self.vault_stamp;
         for copy in conflict_copies(&file) {
             match storage::merge(&file, &copy) {
                 Ok(()) => {
@@ -217,7 +243,10 @@ impl Vault {
         }
         if merged {
             match storage::load(&file, self.device) {
-                Ok((_, doc)) => self.vault_doc = doc,
+                Ok((_, doc)) => {
+                    self.vault_doc = doc;
+                    self.vault_stamp = file_stamp(&file);
+                }
                 Err(e) => problems.push(self.problem(&file, e.to_string())),
             }
         }
@@ -245,45 +274,11 @@ impl Vault {
     /// A Work's `.db` and `.typ` from its ID. The ID comes from the interface, so it must stay
     /// inside the Vault.
     fn paths(&self, id: &str) -> Result<(PathBuf, PathBuf), String> {
-        let parts: Vec<&str> = id.split('/').collect();
-        let bad = |p: &&str| p.is_empty() || *p == "." || *p == ".." || p.contains(['\\', ':']);
-        if parts.iter().any(bad) {
-            return Err(format!("not a Work in this Vault: {id:?}"));
-        }
-        let (name, folders) = parts.split_last().expect("split gives at least one part");
-        let dir = folders.iter().fold(self.root.clone(), |dir, part| dir.join(part));
-        // Not `with_extension`: a name like "Draft 1.5" has a dot of its own.
-        Ok((dir.join(format!("{name}.db")), dir.join(format!("{name}.typ"))))
+        paths_under(&self.root, id)
     }
 
     fn walk(&self) -> Files {
-        fn walk_dir(dir: &Path, top: bool, files: &mut Files) {
-            let Ok(entries) = std::fs::read_dir(dir) else { return };
-            for entry in entries.flatten() {
-                let (path, name) = (entry.path(), entry.file_name().to_string_lossy().into_owned());
-                let Ok(kind) = entry.file_type() else { continue };
-                if kind.is_dir() {
-                    // Syncthing's own folders (.stfolder, .stversions with old copies of every
-                    // file), a Work's images, and the Style library, themes and fonts.
-                    let skip = name.starts_with('.') || name.ends_with(".images") || (top && NOT_WORKS.contains(&name.as_str()));
-                    if !skip {
-                        walk_dir(&path, false, files);
-                    }
-                } else if kind.is_file() {
-                    if conflicts::main_of(&path).is_some() {
-                        files.copies.push(path);
-                    } else if name.ends_with(".db") && !(top && name == VAULT_FILE) {
-                        files.dbs.push(path);
-                    } else if name.ends_with(".typ") {
-                        files.typs.push(path);
-                    }
-                }
-            }
-        }
-        let mut files = Files::default();
-        walk_dir(&self.root, true, &mut files);
-        files.copies.sort();
-        files
+        walk_works(&self.root)
     }
 
     /// Every Work in the Vault, after absorbing any Conflict copies.
@@ -539,6 +534,22 @@ impl Vault {
     /// Makes a new, empty Work and opens it. `id` is its name, or a path inside the Vault
     /// ("Short stories/Rain"), whose folders are made if they don't exist yet.
     pub fn create_work(&mut self, id: &str, now_ms: u64) -> Result<OpenedWork, String> {
+        let id = self.free_name(id)?;
+        let (db, typ) = self.paths(&id)?;
+        if let Some(dir) = db.parent() {
+            std::fs::create_dir_all(dir).map_err(err)?;
+        }
+        // Its first Change, which tells this Work apart wherever it's moved (see `OpenWork::identity`).
+        let mut doc = Doc::new(self.device);
+        let created = doc.set_field_local("work", "created", &now_ms.to_string(), now_ms);
+        storage::save(&db, &[created], &doc).map_err(err)?;
+        storage::write_text_file(&db, &typ, &doc, now_ms).map_err(err)?;
+        self.open_work(&id, now_ms)
+    }
+
+    /// Checks a name the Author typed for a Work (see `check_name`), and that no Work or file
+    /// has it yet. Returns it tidied (spaces around the slashes removed).
+    fn free_name(&self, id: &str) -> Result<String, String> {
         let parts: Vec<&str> = id.split('/').map(str::trim).collect();
         for (i, part) in parts.iter().enumerate() {
             check_name(part, i == 0 && parts.len() > 1, i == 0 && parts.len() == 1)?;
@@ -551,18 +562,13 @@ impl Vault {
         if db.exists() || typ.exists() {
             return Err(format!("There's already a Work called {id}."));
         }
-        if let Some(dir) = db.parent() {
-            std::fs::create_dir_all(dir).map_err(err)?;
-        }
-        let doc = Doc::new(self.device);
-        storage::save(&db, &[], &doc).map_err(err)?;
-        storage::write_text_file(&db, &typ, &doc, now_ms).map_err(err)?;
-        self.open_work(&id, now_ms)
+        Ok(id)
     }
 
     /// Runs `f` on an open Work. If the engine panics, that Work's state in memory may be
     /// half-updated: it's thrown away (never saved) and the Work is reopened from disk.
     fn with_work<T>(&mut self, id: &str, now_ms: u64, f: impl FnOnce(&mut OpenWork, Option<&str>) -> Result<T, String>) -> Result<T, String> {
+        let id = &self.current_id(id);
         let name = self.device_name();
         let work = self.works.get_mut(id).ok_or_else(|| format!("{id} isn't open."))?;
         match catch_unwind(AssertUnwindSafe(|| f(work, name.as_deref()))) {
@@ -611,27 +617,51 @@ impl Vault {
     /// writes Text files when due. Returns the Works whose state the editor should hear about.
     pub fn tick(&mut self, now_ms: u64) -> Vec<(String, WorkState)> {
         let ids: Vec<String> = self.works.keys().cloned().collect();
+        let mut before = HashMap::new();
+        for id in &ids {
+            let _ = self.with_work(id, now_ms, |w, _| {
+                before.insert(id.clone(), w.state(Vec::new()));
+                w.tick(now_ms);
+                Ok(())
+            });
+        }
+        // A History that disappeared from under an open tab: find where it went.
+        self.follow_lost();
         let mut changed = Vec::new();
         for id in ids {
-            let result = self.with_work(&id, now_ms, |w, _| {
-                let before = w.state(Vec::new());
-                w.tick(now_ms);
-                let after = w.state(Vec::new());
-                Ok((after != before).then_some(after))
-            });
-            if let Ok(Some(state)) = result {
-                changed.push((id, state));
+            let current = self.current_id(&id);
+            let Some(work) = self.works.get_mut(&current) else { continue };
+            let state = work.state(Vec::new());
+            if Some(&state) != before.get(&id) {
+                changed.push((id, state)); // under the ID the editor knows it by
+            }
+            if matches!(work.whereabouts, Some(Whereabouts::Renamed { .. })) {
+                work.whereabouts = None; // said once
             }
         }
         changed
     }
 
+    /// An open Work's ID now, following renames.
+    fn current_id(&self, id: &str) -> String {
+        let mut id = id.to_string();
+        while let Some(next) = self.aliases.get(&id) {
+            if *next == id { break; }
+            id = next.clone();
+        }
+        id
+    }
+
     pub fn close_work(&mut self, id: &str, now_ms: u64) {
+        let id = &self.current_id(id);
+        // One whose History went to the trash is saved there, so restoring it brings back everything.
+        self.save_into_trash(id);
         let _ = self.with_work(id, now_ms, |w, _| {
             w.close(now_ms);
             Ok(())
         });
         self.works.remove(id);
+        self.aliases.retain(|_, to| to != id);
     }
 
     /// Quitting, or opening another Vault: every open Work is closed and saved.
@@ -689,9 +719,70 @@ fn check_name(name: &str, top_folder: bool, top_file: bool) -> Result<(), String
     Ok(())
 }
 
+/// A Work's `.db` and `.typ` from its ID, under `base` (the Vault, or its trash). The ID comes
+/// from the interface, so it must stay inside.
+fn paths_under(base: &Path, id: &str) -> Result<(PathBuf, PathBuf), String> {
+    let parts: Vec<&str> = id.split('/').collect();
+    let bad = |p: &&str| p.is_empty() || *p == "." || *p == ".." || p.contains(['\\', ':']);
+    if parts.iter().any(bad) {
+        return Err(format!("not a Work in this Vault: {id:?}"));
+    }
+    let (name, folders) = parts.split_last().expect("split gives at least one part");
+    let dir = folders.iter().fold(base.to_path_buf(), |dir, part| dir.join(part));
+    // Not `with_extension`: a name like "Draft 1.5" has a dot of its own.
+    Ok((dir.join(format!("{name}.db")), dir.join(format!("{name}.typ"))))
+}
+
+/// The Histories, Text files and Conflict copies under `root` (the Vault, or its trash).
+fn walk_works(root: &Path) -> Files {
+    fn walk_dir(dir: &Path, top: bool, files: &mut Files) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let (path, name) = (entry.path(), entry.file_name().to_string_lossy().into_owned());
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() {
+                // Syncthing's own folders (.stfolder, .stversions with old copies of every
+                // file), the trash, a Work's images, and the Style library, themes and fonts.
+                let skip = name.starts_with('.') || name.ends_with(".images") || (top && NOT_WORKS.contains(&name.as_str()));
+                if !skip {
+                    walk_dir(&path, false, files);
+                }
+            } else if kind.is_file() {
+                if conflicts::main_of(&path).is_some() {
+                    files.copies.push(path);
+                } else if name.ends_with(".db") && !(top && name == VAULT_FILE) {
+                    files.dbs.push(path);
+                } else if name.ends_with(".typ") {
+                    files.typs.push(path);
+                }
+            }
+        }
+    }
+    let mut files = Files::default();
+    walk_dir(root, true, &mut files);
+    files.copies.sort();
+    files
+}
+
 /// A file's name without its extension.
 fn name_of(path: &Path) -> String {
     path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// What tests of the Vault's parts share.
+#[cfg(test)]
+mod tests_support {
+    use super::*;
+
+    pub const ME: DeviceId = DeviceId(1);
+
+    /// Opens (making it a Vault if needed) `root`, with recovery files in a hidden folder in it.
+    pub fn open(root: &Path) -> Vault {
+        match Vault::open(root, ME, true, &root.join(".recovery")).unwrap() {
+            Opened::Vault(v) => v,
+            Opened::NotAVault => panic!("asked to create it"),
+        }
+    }
 }
 
 #[cfg(test)]

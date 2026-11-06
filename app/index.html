@@ -12,21 +12,33 @@
     <div id="app">
       <aside id="sidebar">
         <header>
-          <button id="choose-vault" type="button">Open Vault…</button>
+          <div class="row">
+            <button id="choose-vault" type="button">Open Vault…</button>
+            <button id="open-settings" type="button" title="Settings" hidden>Settings</button>
+          </div>
           <div id="vault-root" class="muted"></div>
-          <button id="new-work" type="button" hidden>New Work…</button>
+          <div id="vault-actions" class="row" hidden>
+            <button id="new-work" type="button">New Work…</button>
+            <button id="open-switcher" type="button" title="Ctrl+O">Find… <kbd>Ctrl+O</kbd></button>
+          </div>
         </header>
         <ul id="works"></ul>
+        <details id="trash" hidden>
+          <summary>Trash</summary>
+          <ul id="trash-list"></ul>
+          <button id="empty-trash" type="button" class="link">Empty the trash…</button>
+        </details>
       </aside>
 
       <main>
         <div id="problems" hidden></div>
         <div id="error" hidden></div>
-        <h1 id="work-title"></h1>
+        <nav id="tabbar"></nav>
         <div id="notice" hidden></div>
+        <div id="moved" hidden></div>
         <div id="status" hidden></div>
-        <div id="editor"></div>
-        <p id="empty" class="muted">Open a Vault, then choose a Work on the left.</p>
+        <div id="panes"></div>
+        <p id="empty" class="muted">Open a Vault, then choose a Work on the left, or press Ctrl+O.</p>
       </main>
     </div>
 
@@ -42,18 +54,6 @@
       </form>
     </dialog>
 
-    <dialog id="ask-new-work">
-      <form method="dialog">
-        <p>What's the new Work called?</p>
-        <p class="muted">Put it in a folder with a slash, e.g. <code>Short stories/Rain</code>.</p>
-        <input id="new-work-name" required maxlength="200" autocomplete="off" />
-        <menu>
-          <button type="button" data-close="cancel">Cancel</button>
-          <button value="create">Create</button>
-        </menu>
-      </form>
-    </dialog>
-
     <dialog id="ask-name">
       <form method="dialog">
         <p>What should this device be called?</p>
@@ -61,6 +61,57 @@
         <input id="name-input" required maxlength="100" autocomplete="off" />
         <menu>
           <button value="ok">Save</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="ask-text">
+      <form method="dialog">
+        <p id="ask-text-question"></p>
+        <p class="muted">Put a Work in a folder with a slash, e.g. <code>Short stories/Rain</code>.</p>
+        <input id="ask-text-input" required maxlength="200" autocomplete="off" />
+        <menu>
+          <button type="button" data-close="cancel">Cancel</button>
+          <button value="ok" id="ask-text-ok">OK</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="ask-confirm">
+      <form method="dialog">
+        <p id="ask-confirm-text"></p>
+        <menu>
+          <button type="button" data-close="cancel">Cancel</button>
+          <button value="yes" id="ask-confirm-yes">Yes</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="switcher">
+      <form method="dialog">
+        <input id="switcher-input" placeholder="Find a Work…" autocomplete="off" />
+        <ul id="switcher-list"></ul>
+      </form>
+    </dialog>
+
+    <dialog id="settings">
+      <form method="dialog">
+        <h2>Settings</h2>
+        <label>Theme
+          <select id="theme">
+            <option value="system">Follow the system</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
+        <label class="here"><input type="checkbox" id="theme-here" /> Only on this device</label>
+        <label>Editor font size
+          <input id="font-size" type="number" min="10" max="40" />
+        </label>
+        <label class="here"><input type="checkbox" id="font-size-here" /> Only on this device</label>
+        <p class="muted">Settings are kept in the Vault, so every device that opens it uses them, unless it has its own.</p>
+        <menu>
+          <button value="done">Done</button>
         </menu>
       </form>
     </dialog>

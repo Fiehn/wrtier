@@ -48,6 +48,7 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 **Editor**
 
 - CodeMirror 6 with a Formatted view (markup hidden except at the cursor, with hover tooltips on desktop) and a Raw view toggle.
+- The Formatted view gets its markup positions from a small parser in the editor for the prose part of Typst (headings, emphasis, strong, comments, escapes, line breaks, function calls), so formatting keeps up with every keystroke. Where it disagrees with Typst it only shows raw markup; compiling always uses Typst itself. If that happens too often, Typst's own parser compiled to WebAssembly can take its place, since both only give the editor markup positions.
 - Story element chips, Reviewer-coloured Comment highlights, and optional "who/when" colouring by Session.
 - The platform's built-in spellcheck can be switched on or off.
 - Moving text in the editor: dragging a selection is a Move, and so is cutting text and then pasting exactly that text in the same Work. Until the paste, the cut text is only hidden (like a deletion burst, but it doesn't close on a pause); any other edit, pasting different text, pasting in another Work or closing the Work records the cut as a deletion. Keyboard shortcuts for moving paragraphs come in Phase 6.
@@ -72,7 +73,9 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 
 - On desktop: Vault browser and Chapter list on the left (dragging a Chapter is a Move), the editor with tabs in the middle, and a Page preview / Comments / History panel on the right.
 - The Vault browser lists every History in the Vault except `vault.db`, plus Text files without one, which become Works when opened. It hides a file only when it's sure the file isn't a Work (some other program's database). A History from a newer version of the app, or a file that can't be read right now, is listed with the reason and is a Sync problem. Conflict copies are never listed. Whether a file is a History is decided in one place in the engine, next to the storage version.
-- Renaming a Work in the app renames its `.db`, `.typ` and `.images/` together. A Text file without a History whose exact contents some History in the Vault recorded writing is a leftover from a Work renamed outside the app: it's listed as "left over from" that Work, with an option to delete it, never offered as a new Work.
+- Deleting a Work moves its `.db`, `.typ` and `.images/` into a `.trash/` folder in the Vault (hidden from the Vault browser, but synced), so it can be restored from any Device, Android included. The trash is emptied only by hand.
+- Renaming a Work in the app renames its `.db`, `.typ` and `.images/` together.
+- A Work open on one Device that's renamed or trashed on another is followed, never recreated at its old path: the tab finds its History again by the Work's first Change (every Work has one; a new Work records a "created" Change). Renamed: the tab moves along, with a line saying so. In `.trash/`: saving pauses, with Restore or Close. Gone entirely: saving pauses, with "Save what's here as a new Work" or Close. Nothing typed is lost meanwhile; the recovery file holds it. A Text file without a History whose exact contents some History in the Vault recorded writing is a leftover from a Work renamed outside the app: it's listed as "left over from" that Work, with an option to delete it, never offered as a new Work.
 - Quick switcher (Ctrl+O), focus mode, and word counts per Work and per Chapter.
 - On the phone: one screen at a time, with a bottom bar to switch screens.
 - Themes: light, dark or follow the system, plus CSS themes in the Vault's `themes/` folder. Which theme is used and the editor font size are Vault settings, and a Device can override any of them for itself.
@@ -173,6 +176,8 @@ Phase 1 is officially done. No terminal harness is needed.
 - Syncthing may deliver another Device's Text file before its `.db`. Every Text file ends with a comment line naming the version it was written from, so such a file waits until its Changes arrive instead of being taken for an External edit, and an External edit is compared against exactly the version it started from ([ADR 0010](adr/0010-text-files-name-the-version-they-were-written-from.md)). The line is never part of the Work's text.
 - Changes from outside while a Work is open (Syncthing replacing the `.db`, Conflict copies, the Text file edited in another editor) are noticed within about a second. They're taken in through the editor's own queue, in order with the Author's typing, so the editor gets patches and the cursor and any open burst stay where they are. Changes this Device saved that are missing from a `.db` Syncthing delivered are saved into it again. An edit to the Text file waits until no typing burst is open (at most a few seconds).
 - An unexpected panic in the engine doesn't close the app: the affected Work's in-memory state is thrown away unsaved and the Work is reopened from its `.db` and the recovery file, with a message to the Author. Other open Works are untouched.
+
+On Debian the app is built on the machine itself and installed as a `.deb` (Tauri can't build it from Windows); `docs/debian.md` lists the packages, the build, and the WebKitGTK rendering workaround.
 
 *Done when:* you can write a short story on Windows and Debian, edit its Text file in vim, sync both machines through Syncthing with offline edits on each, and nothing is lost.
 

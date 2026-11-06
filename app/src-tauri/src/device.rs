@@ -3,6 +3,7 @@
 //! another computer), never in the Vault.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use wrtier::ids::DeviceId;
 
@@ -12,13 +13,42 @@ pub struct DeviceState {
     dir: PathBuf,
     pub device: DeviceId,
     pub last_vault: Option<PathBuf>,
+    /// The tabs open in each Vault (by its folder), to open again next time.
+    pub layouts: HashMap<String, Layout>,
+    /// Where the window was, and how big.
+    pub window: Option<WindowPlace>,
 }
 
-/// How it's stored: plain JSON, so it can be read and fixed by hand.
+/// The tabs open in a Vault, which one is in front, and where the cursor was in each Work.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Layout {
+    pub tabs: Vec<String>,
+    pub active: Option<String>,
+    /// Work ID → cursor position (UTF-16, as the editor counts).
+    #[serde(default)]
+    pub cursors: HashMap<String, usize>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct WindowPlace {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub maximized: bool,
+}
+
+/// How it's stored: plain JSON, so it can be read and fixed by hand. (Fields added later have
+/// defaults, so a file from an older version still reads.)
 #[derive(Serialize, Deserialize)]
 struct Stored {
     device_id: String,
     last_vault: Option<PathBuf>,
+    #[serde(default)]
+    layouts: HashMap<String, Layout>,
+    #[serde(default)]
+    window: Option<WindowPlace>,
 }
 
 impl DeviceState {
@@ -29,15 +59,17 @@ impl DeviceState {
         let path = dir.join(FILE);
         if let Ok(json) = std::fs::read_to_string(&path) {
             let parsed = serde_json::from_str::<Stored>(&json).map_err(|e| e.to_string())
-                .and_then(|s| Ok((s.device_id.parse::<DeviceId>()?, s.last_vault)));
+                .and_then(|s| Ok((s.device_id.parse::<DeviceId>()?, s)));
             match parsed {
-                Ok((device, last_vault)) => return Ok(DeviceState { dir: dir.to_path_buf(), device, last_vault }),
+                Ok((device, s)) => {
+                    return Ok(DeviceState { dir: dir.to_path_buf(), device, last_vault: s.last_vault, layouts: s.layouts, window: s.window });
+                }
                 Err(_) => {
                     let _ = std::fs::rename(&path, dir.join(format!("{FILE}.damaged")));
                 }
             }
         }
-        let state = DeviceState { dir: dir.to_path_buf(), device: new_device_id()?, last_vault: None };
+        let state = DeviceState { dir: dir.to_path_buf(), device: new_device_id()?, last_vault: None, layouts: HashMap::new(), window: None };
         state.save()?;
         Ok(state)
     }
@@ -45,7 +77,12 @@ impl DeviceState {
     /// Written next to itself and renamed over the old file, so a crash never leaves half of it.
     pub fn save(&self) -> Result<(), String> {
         std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
-        let stored = Stored { device_id: self.device.to_string(), last_vault: self.last_vault.clone() };
+        let stored = Stored {
+            device_id: self.device.to_string(),
+            last_vault: self.last_vault.clone(),
+            layouts: self.layouts.clone(),
+            window: self.window,
+        };
         let json = serde_json::to_string_pretty(&stored).map_err(|e| e.to_string())?;
         let (path, partial) = (self.dir.join(FILE), self.dir.join(format!("{FILE}.writing")));
         std::fs::write(&partial, json).map_err(|e| e.to_string())?;
@@ -89,6 +126,22 @@ mod tests {
         state.last_vault = Some(PathBuf::from("C:/Writing"));
         state.save().unwrap();
         assert_eq!(DeviceState::load_or_create(dir.path()).unwrap().last_vault, Some(PathBuf::from("C:/Writing")));
+    }
+
+    #[test]
+    fn tabs_and_the_window_are_remembered_and_older_files_still_read() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file from before tabs were remembered.
+        std::fs::write(dir.path().join(FILE), r#"{ "device_id": "0000002a", "last_vault": null }"#).unwrap();
+        let mut state = DeviceState::load_or_create(dir.path()).unwrap();
+        assert_eq!(state.device, DeviceId(42));
+        let layout = Layout { tabs: vec!["Rain".into()], active: Some("Rain".into()), cursors: [("Rain".to_string(), 12)].into() };
+        state.layouts.insert("C:/Writing".into(), layout.clone());
+        state.window = Some(WindowPlace { x: 10, y: 20, width: 1200, height: 800, maximized: false });
+        state.save().unwrap();
+        let again = DeviceState::load_or_create(dir.path()).unwrap();
+        assert_eq!(again.layouts["C:/Writing"], layout);
+        assert_eq!(again.window, state.window);
     }
 
     #[test]

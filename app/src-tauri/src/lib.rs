@@ -184,6 +184,98 @@ fn delete_leftover(state: State<AppState>, id: String) -> Result<(), String> {
     with_app(&state, |app| open_vault_of(app)?.delete_leftover(&id))
 }
 
+/// Renames a Work; an open one keeps its tab. Returns its new ID.
+#[tauri::command]
+fn rename_work(state: State<AppState>, id: String, name: String) -> Result<String, String> {
+    with_app(&state, |app| open_vault_of(app)?.rename_work(&id, &name))
+}
+
+/// Moves a Work to the Vault's trash.
+#[tauri::command]
+fn trash_work(state: State<AppState>, id: String) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.trash_work(&id, now_ms()))
+}
+
+#[tauri::command]
+fn list_trash(state: State<AppState>) -> Result<Vec<vault::TrashedWork>, String> {
+    with_app(&state, |app| Ok(open_vault_of(app)?.list_trash()))
+}
+
+/// Puts a Work back from the trash. Returns the ID it has now.
+#[tauri::command]
+fn restore_work(state: State<AppState>, id: String) -> Result<String, String> {
+    with_app(&state, |app| open_vault_of(app)?.restore_work(&id))
+}
+
+/// Restores the Work of an open tab that went to the trash on another Device.
+#[tauri::command]
+fn restore_open(state: State<AppState>, id: String) -> Result<String, String> {
+    with_app(&state, |app| open_vault_of(app)?.restore_open(&id))
+}
+
+#[tauri::command]
+fn empty_trash(state: State<AppState>) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.empty_trash())
+}
+
+/// Closes a tab whose Work is gone from the Vault, dropping what was typed since.
+#[tauri::command]
+fn discard_work(state: State<AppState>, id: String) -> Result<(), String> {
+    with_app(&state, |app| {
+        open_vault_of(app)?.discard_work(&id);
+        Ok(())
+    })
+}
+
+/// Saves the text of a tab whose Work is gone as a new Work.
+#[tauri::command]
+fn save_as_new(state: State<AppState>, id: String, name: String) -> Result<OpenedWork, String> {
+    with_app(&state, |app| open_vault_of(app)?.save_as_new(&id, &name, now_ms()))
+}
+
+#[tauri::command]
+fn get_settings(state: State<AppState>) -> Result<vault::Settings, String> {
+    with_app(&state, |app| Ok(open_vault_of(app)?.settings()))
+}
+
+/// Sets a Vault setting for every Device, or (`here`) only for this one.
+#[tauri::command]
+fn set_setting(state: State<AppState>, name: String, value: String, here: bool) -> Result<vault::Settings, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_setting(&name, &value, here, now_ms()))
+}
+
+/// The tabs that were open in this Vault on this Device last time.
+#[tauri::command]
+fn get_layout(state: State<AppState>) -> Result<device::Layout, String> {
+    with_app(&state, |app| {
+        let key = open_vault_of(app)?.root.display().to_string();
+        Ok(app.device.layouts.get(&key).cloned().unwrap_or_default())
+    })
+}
+
+#[tauri::command]
+fn save_layout(state: State<AppState>, layout: device::Layout) -> Result<(), String> {
+    with_app(&state, |app| {
+        let key = open_vault_of(app)?.root.display().to_string();
+        app.device.layouts.insert(key, layout);
+        app.device.save()
+    })
+}
+
+/// Where the window is, for next time. A maximized window keeps the size it had before.
+fn remember_window(window: &tauri::Window, device: &mut DeviceState) {
+    let maximized = window.is_maximized().unwrap_or(false);
+    let mut place = device.window.unwrap_or(device::WindowPlace { x: 100, y: 100, width: 1280, height: 800, maximized });
+    place.maximized = maximized;
+    if !maximized {
+        if let (Ok(position), Ok(size)) = (window.outer_position(), window.outer_size()) {
+            (place.x, place.y, place.width, place.height) = (position.x, position.y, size.width, size.height);
+        }
+    }
+    device.window = Some(place);
+    let _ = device.save();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -192,6 +284,14 @@ pub fn run() {
             // Device state lives outside the Vault, in this Device's local app data.
             let local = app.path().app_local_data_dir()?;
             let device = DeviceState::load_or_create(&local)?;
+            // The window where it was last time (if that's still on a screen, the system keeps it so).
+            if let (Some(place), Some(window)) = (device.window, app.get_webview_window("main")) {
+                let _ = window.set_size(tauri::PhysicalSize::new(place.width, place.height));
+                let _ = window.set_position(tauri::PhysicalPosition::new(place.x, place.y));
+                if place.maximized {
+                    let _ = window.maximize();
+                }
+            }
             app.manage(AppState(Mutex::new(App { device, vault: None, recovery_dir: local.join("recovery") })));
             start_timer(app.handle().clone());
             Ok(())
@@ -204,6 +304,7 @@ pub fn run() {
                     if let Some(vault) = app.vault.as_mut() {
                         vault.close_all(now_ms());
                     }
+                    remember_window(window, &mut app.device);
                     Ok(())
                 });
             }
@@ -221,6 +322,18 @@ pub fn run() {
             edit,
             leave_work,
             work_text,
+            rename_work,
+            trash_work,
+            list_trash,
+            restore_work,
+            restore_open,
+            empty_trash,
+            discard_work,
+            save_as_new,
+            get_settings,
+            set_setting,
+            get_layout,
+            save_layout,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

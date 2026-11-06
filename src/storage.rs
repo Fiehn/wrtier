@@ -856,6 +856,15 @@ pub fn import_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64)
     })
 }
 
+/// A History's first Change, in the fixed Change order. It never changes, so it tells which
+/// Work a `.db` is, wherever it was moved or renamed. None for a History with no Changes.
+/// Read-only.
+pub fn first_change(db: &Path) -> Result<Option<ChangeId>> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    let id: Option<String> = conn.query_row("SELECT id FROM changes ORDER BY hlc, device LIMIT 1", [], |r| r.get(0)).optional()?;
+    Ok(id.map(|id| id.parse::<ChangeId>()).transpose()?)
+}
+
 /// Did this History record writing a Text file with exactly `text`, on any Device?
 /// Read-only. Used to recognise a Text file left behind when its Work was renamed.
 pub fn wrote_text(db: &Path, text: &str) -> Result<bool> {
@@ -1300,6 +1309,19 @@ mod test {
         let missing = dir.path().join("missing.db");
         assert!(matches!(probe(&missing), Probe::Unreadable(_)));
         assert!(!missing.exists(), "probing never creates a file");
+    }
+
+    #[test]
+    fn a_history_is_known_by_its_first_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("work.db");
+        let mut doc = Doc::new(DeviceId(1));
+        save(&db, &[], &doc).unwrap();
+        assert_eq!(first_change(&db).unwrap(), None);
+        let first = doc.insert_local(0, "abc", 1000);
+        save(&db, std::slice::from_ref(&first), &doc).unwrap();
+        save(&db, &[doc.insert_local(3, "d", 2000)], &doc).unwrap();
+        assert_eq!(first_change(&db).unwrap(), Some(first.id));
     }
 
     #[test]

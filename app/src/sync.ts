@@ -37,7 +37,11 @@ export type WorkState = {
   /** What taking it in brought (only in the answer to that request). */
   tookIn: string | null;
   syncProblem: string | null;
+  /** The Work's History moved away underneath the tab (on another Device). */
+  moved: Whereabouts | null;
 };
+
+export type Whereabouts = { kind: "renamed"; to: string } | { kind: "trashed" } | { kind: "gone" };
 
 /** Marks the editor's own changes from Rust, so they aren't sent back. */
 export const fromHistory = Annotation.define<boolean>();
@@ -99,7 +103,8 @@ export class WorkSync {
   private outside = 0;
 
   constructor(
-    readonly id: string,
+    /** The Work's ID; it changes when the Work is renamed. */
+    public id: string,
     private view: EditorView,
     private events: SyncEvents,
   ) {}

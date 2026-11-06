@@ -1,0 +1,341 @@
+//! Renaming and trashing Works, and following an open Work whose History moved underneath it
+//! (renamed or trashed on another Device).
+//!
+//! A deleted Work goes to `.trash/` inside the Vault: hidden from the Vault browser, but synced,
+//! so it can be restored from any Device. A Work is known by its first Change, which never
+//! changes, so an open tab finds its History again wherever it went.
+
+use super::*;
+
+/// The Vault's trash folder.
+pub const TRASH: &str = ".trash";
+
+/// A Work in the trash.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct TrashedWork {
+    /// Its path inside the trash, without the extension (where it goes back to when restored).
+    pub id: String,
+    pub name: String,
+}
+
+/// A Work's files, from its `.db`: the History, the Text file, and the images folder.
+fn work_files(db: &Path) -> [PathBuf; 3] {
+    let stem = db.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    [db.to_path_buf(), db.with_file_name(format!("{stem}.typ")), db.with_file_name(format!("{stem}.images"))]
+}
+
+/// Moves a Work's files from `from` to `to` (both `.db` paths), making folders as needed. The
+/// History goes first: if anything stops halfway, the Text file left behind is recognised as
+/// a leftover of the Work at its new place.
+fn move_work(from: &Path, to: &Path) -> Result<(), String> {
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir).map_err(err)?;
+    }
+    for (a, b) in work_files(from).iter().zip(work_files(to).iter()) {
+        if a.exists() {
+            std::fs::rename(a, b).map_err(err)?;
+        }
+    }
+    Ok(())
+}
+
+/// `id`, or `id (2)`, `id (3)`… : the first that no Work under `base` has.
+fn free_id(base: &Path, id: &str) -> Result<String, String> {
+    for n in 1.. {
+        let candidate = if n == 1 { id.to_string() } else { format!("{id} ({n})") };
+        let (db, typ) = paths_under(base, &candidate)?;
+        if !db.exists() && !typ.exists() {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("some number is free")
+}
+
+impl Vault {
+    fn trash_root(&self) -> PathBuf {
+        self.root.join(TRASH)
+    }
+
+    /// Renames a Work (possibly into another folder). An open Work keeps its tab, its undo and
+    /// any open burst. Returns the new ID.
+    pub fn rename_work(&mut self, id: &str, new_name: &str) -> Result<String, String> {
+        let id = &self.current_id(id);
+        let (db, _) = self.paths(id)?;
+        if !db.exists() {
+            return Err(format!("{id} isn't in the Vault anymore."));
+        }
+        let new_id = self.free_name(new_name)?;
+        let (new_db, new_typ) = self.paths(&new_id)?;
+        if let Some(work) = self.works.get_mut(id) {
+            work.save();
+        }
+        move_work(&db, &new_db)?;
+        if let Some(mut work) = self.works.remove(id) {
+            work.relocate(new_db, new_typ, Recovery::for_work(&self.recovery_dir, &self.root, &new_id));
+            self.works.insert(new_id.clone(), work);
+            self.aliases.insert(id.clone(), new_id.clone());
+        }
+        Ok(new_id)
+    }
+
+    /// Moves a Work to the trash (closing it first if it's open).
+    pub fn trash_work(&mut self, id: &str, now_ms: u64) -> Result<(), String> {
+        let id = &self.current_id(id);
+        if self.works.contains_key(id) {
+            self.close_work(id, now_ms);
+        }
+        let (db, _) = self.paths(id)?;
+        if !db.exists() {
+            return Err(format!("{id} isn't in the Vault anymore."));
+        }
+        let trash_id = free_id(&self.trash_root(), id)?;
+        let (trash_db, _) = paths_under(&self.trash_root(), &trash_id)?;
+        move_work(&db, &trash_db)
+    }
+
+    /// The Works in the trash.
+    pub fn list_trash(&self) -> Vec<TrashedWork> {
+        let trash = self.trash_root();
+        let mut works: Vec<TrashedWork> = walk_works(&trash).dbs.iter().map(|db| {
+            let relative = db.strip_prefix(&trash).unwrap_or(db);
+            let path = relative.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+            let id = path.strip_suffix(".db").unwrap_or(&path).to_string();
+            TrashedWork { id, name: name_of(db) }
+        }).collect();
+        works.sort_by_key(|w| w.id.to_lowercase());
+        works
+    }
+
+    /// Puts a Work back from the trash where it was (as "Rain (2)" if that name is taken now).
+    /// A tab still open on it follows it back. Returns its ID.
+    pub fn restore_work(&mut self, trash_id: &str) -> Result<String, String> {
+        let (trash_db, _) = paths_under(&self.trash_root(), trash_id)?;
+        if !trash_db.exists() {
+            return Err(format!("{trash_id} isn't in the trash anymore."));
+        }
+        let id = free_id(&self.root, trash_id)?;
+        let (db, _) = self.paths(&id)?;
+        move_work(&trash_db, &db)?;
+        self.follow_lost();
+        Ok(id)
+    }
+
+    /// Restores the History of an open tab whose Work went to the trash on another Device.
+    pub fn restore_open(&mut self, id: &str) -> Result<String, String> {
+        let id = self.current_id(id);
+        let Some(Whereabouts::Trashed { db }) = self.works.get(&id).and_then(|w| w.whereabouts.clone()) else {
+            return Err(format!("{id} isn't in the trash."));
+        };
+        let trash = self.trash_root();
+        let relative = db.strip_prefix(&trash).map_err(err)?;
+        let path = relative.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+        self.restore_work(path.strip_suffix(".db").unwrap_or(&path))?;
+        Ok(self.current_id(&id))
+    }
+
+    /// Deletes everything in the trash, for good.
+    pub fn empty_trash(&mut self) -> Result<(), String> {
+        let trash = self.trash_root();
+        if trash.exists() {
+            std::fs::remove_dir_all(&trash).map_err(err)?;
+        }
+        Ok(())
+    }
+
+    /// Open Works whose History is no longer where their tab has it: find where it went, by its
+    /// first Change. Renamed: the tab follows. In the trash or gone: saving stays paused (the
+    /// recovery file holds what's typed meanwhile).
+    pub(super) fn follow_lost(&mut self) {
+        // A History that's back where its tab has it (restored): saving goes on as before.
+        for work in self.works.values_mut() {
+            if !work.is_lost() && matches!(work.whereabouts, Some(Whereabouts::Trashed { .. } | Whereabouts::Gone)) {
+                work.whereabouts = None;
+            }
+        }
+        let lost: Vec<String> = self.works.iter().filter(|(_, w)| w.is_lost()).map(|(id, _)| id.clone()).collect();
+        if lost.is_empty() {
+            return;
+        }
+        // Every History in the Vault and in its trash, by first Change (the Vault's own win).
+        let trash = self.trash_root();
+        let mut found: HashMap<ChangeId, PathBuf> = HashMap::new();
+        for db in walk_works(&trash).dbs.into_iter().chain(self.walk().dbs) {
+            if let Ok(Some(first)) = storage::first_change(&db) {
+                found.insert(first, db);
+            }
+        }
+        for id in lost {
+            let place = self.works[&id].identity().and_then(|first| found.get(&first)).cloned();
+            match place {
+                Some(db) if db.starts_with(&trash) => {
+                    self.works.get_mut(&id).expect("listed above").whereabouts = Some(Whereabouts::Trashed { db });
+                }
+                Some(db) => {
+                    let new_id = self.id_of(&db);
+                    if new_id != id && self.works.contains_key(&new_id) {
+                        continue; // (can't be: a Work is open in one tab at most)
+                    }
+                    let typ = db.with_extension("typ");
+                    let recovery = Recovery::for_work(&self.recovery_dir, &self.root, &new_id);
+                    let mut work = self.works.remove(&id).expect("listed above");
+                    work.relocate(db, typ, recovery);
+                    work.whereabouts = (new_id != id).then(|| Whereabouts::Renamed { to: new_id.clone() });
+                    self.works.insert(new_id.clone(), work);
+                    if new_id != id {
+                        self.aliases.insert(id, new_id);
+                    }
+                }
+                None => self.works.get_mut(&id).expect("listed above").whereabouts = Some(Whereabouts::Gone),
+            }
+        }
+    }
+
+    /// Before closing a tab whose Work went to the trash: point it at the trashed History, so
+    /// what was typed since is saved there and comes back if the Work is restored.
+    pub(super) fn save_into_trash(&mut self, id: &str) {
+        let Some(work) = self.works.get_mut(id) else { return };
+        let Some(Whereabouts::Trashed { db }) = work.whereabouts.clone() else { return };
+        let typ = db.with_extension("typ");
+        let recovery = Recovery::for_work(&self.recovery_dir, &self.root, &format!("{TRASH}/{id}"));
+        work.relocate(db, typ, recovery);
+    }
+
+    /// Closes a tab whose Work is gone from the Vault, dropping what was typed since.
+    pub fn discard_work(&mut self, id: &str) {
+        let id = self.current_id(id);
+        if let Some(mut work) = self.works.remove(&id) {
+            work.discard();
+        }
+        self.aliases.retain(|_, to| *to != id);
+    }
+
+    /// Saves the text of a tab whose Work is gone as a new Work, and closes that tab.
+    pub fn save_as_new(&mut self, id: &str, new_name: &str, now_ms: u64) -> Result<OpenedWork, String> {
+        let id = self.current_id(id);
+        let text = self.works.get(&id).map(|w| w.text()).ok_or_else(|| format!("{id} isn't open."))?;
+        let opened = self.create_work(new_name, now_ms)?;
+        self.edit(&opened.id, vec![Op::Paste { from: 0, to: 0, text }], now_ms)?;
+        self.discard_work(&id);
+        Ok(OpenedWork { text: self.works[&opened.id].text(), ..opened })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests_support::*;
+    use super::*;
+    use crate::work::{Op, Origin};
+
+    fn typing(from: usize, text: &str) -> Op {
+        Op::Type { from, to: from, text: text.into(), origin: Origin::Input }
+    }
+
+    #[test]
+    fn renaming_an_open_work_keeps_its_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "abc")], 2000).unwrap(); // a burst is open
+        let new_id = vault.rename_work("Rain", "Short stories/Rain").unwrap();
+        assert_eq!(new_id, "Short stories/Rain");
+        assert!(!root.join("Rain.db").exists() && root.join("Short stories/Rain.db").exists());
+        // Edits still on their way under the old ID find it.
+        vault.edit("Rain", vec![typing(3, "d")], 2100).unwrap();
+        vault.close_work("Short stories/Rain", 3000);
+        assert_eq!(storage::load(&root.join("Short stories/Rain.db"), ME).unwrap().1.text(), "abcd");
+        assert!(!root.join("Rain.db").exists(), "never recreated at the old place");
+    }
+
+    #[test]
+    fn a_trashed_work_can_be_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "abc")], 2000).unwrap();
+        vault.trash_work("Rain", 3000).unwrap();
+        assert!(vault.list(4000).entries.is_empty(), "the browser doesn't show the trash");
+        assert_eq!(vault.list_trash(), vec![TrashedWork { id: "Rain".into(), name: "Rain".into() }]);
+        vault.create_work("Rain", 5000).unwrap(); // the name was taken meanwhile
+        assert_eq!(vault.restore_work("Rain").unwrap(), "Rain (2)");
+        assert_eq!(vault.open_work("Rain (2)", 6000).unwrap().text, "abc");
+        vault.trash_work("Rain (2)", 7000).unwrap();
+        vault.empty_trash().unwrap();
+        assert!(vault.list_trash().is_empty());
+    }
+
+    #[test]
+    fn a_tab_follows_its_work_renamed_on_another_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "abc")], 2000).unwrap();
+        vault.tick(9000); // saved
+        // Syncthing carries out the other Device's rename here.
+        std::fs::rename(root.join("Rain.db"), root.join("Storm.db")).unwrap();
+        std::fs::rename(root.join("Rain.typ"), root.join("Storm.typ")).unwrap();
+        let changed = vault.tick(10_000);
+        let (_, state) = changed.iter().find(|(id, _)| id == "Rain").expect("the editor hears about it");
+        assert_eq!(state.moved, Some(Whereabouts::Renamed { to: "Storm".into() }));
+        vault.edit("Rain", vec![typing(3, "!")], 11_000).unwrap();
+        vault.close_work("Storm", 12_000);
+        assert_eq!(storage::load(&root.join("Storm.db"), ME).unwrap().1.text(), "abc!");
+        assert!(!root.join("Rain.db").exists());
+    }
+
+    #[test]
+    fn a_tab_whose_work_was_trashed_elsewhere_pauses_and_can_restore_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "abc")], 2000).unwrap();
+        vault.tick(9000);
+        std::fs::create_dir_all(root.join(TRASH)).unwrap();
+        std::fs::rename(root.join("Rain.db"), root.join(".trash/Rain.db")).unwrap();
+        std::fs::rename(root.join("Rain.typ"), root.join(".trash/Rain.typ")).unwrap();
+        vault.tick(10_000);
+        assert!(matches!(vault.works["Rain"].whereabouts, Some(Whereabouts::Trashed { .. })));
+        vault.edit("Rain", vec![typing(3, "d")], 11_000).unwrap();
+        vault.tick(20_000); // the burst closes, but nothing is saved: the History isn't there
+        assert!(!root.join("Rain.db").exists(), "never recreated at the old place");
+        assert_eq!(vault.restore_open("Rain").unwrap(), "Rain");
+        vault.close_work("Rain", 21_000);
+        assert_eq!(storage::load(&root.join("Rain.db"), ME).unwrap().1.text(), "abcd");
+    }
+
+    #[test]
+    fn closing_a_tab_whose_work_was_trashed_saves_into_the_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Rain", 1000).unwrap();
+        vault.tick(2000);
+        std::fs::create_dir_all(root.join(TRASH)).unwrap();
+        std::fs::rename(root.join("Rain.db"), root.join(".trash/Rain.db")).unwrap();
+        vault.tick(3000);
+        vault.edit("Rain", vec![typing(0, "late")], 4000).unwrap();
+        vault.close_work("Rain", 5000);
+        assert_eq!(storage::load(&root.join(".trash/Rain.db"), ME).unwrap().1.text(), "late");
+    }
+
+    #[test]
+    fn a_tab_whose_work_is_gone_can_save_it_as_a_new_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "abc")], 2000).unwrap();
+        vault.tick(9000);
+        std::fs::remove_file(root.join("Rain.db")).unwrap();
+        vault.tick(10_000);
+        assert_eq!(vault.works["Rain"].whereabouts, Some(Whereabouts::Gone));
+        let opened = vault.save_as_new("Rain", "Rain again", 11_000).unwrap();
+        assert_eq!(opened.text, "abc");
+        assert!(!vault.works.contains_key("Rain"));
+        vault.close_work("Rain again", 12_000);
+        assert_eq!(storage::load(&root.join("Rain again.db"), ME).unwrap().1.text(), "abc");
+    }
+}

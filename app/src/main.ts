@@ -1,9 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Compartment, EditorState } from "@codemirror/state";
-import { EditorView, dropCursor, keymap } from "@codemirror/view";
-import { history, standardKeymap } from "@codemirror/commands";
-import { WorkSync, type WorkState } from "./sync";
+import { type WorkState } from "./sync";
+import { Tabs, type Layout, type OpenedWork } from "./tabs";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -21,63 +19,12 @@ type EntryKind =
 type Entry = { id: string; name: string } & EntryKind;
 type SyncProblem = { path: string; reason: string };
 type Listing = { entries: Entry[]; problems: SyncProblem[] };
-type OpenedWork = { id: string; name: string; text: string; problems: SyncProblem[]; notice: string | null };
+type TrashedWork = { id: string; name: string };
+type Settings = { theme: "system" | "light" | "dark"; fontSize: number; themeHere: boolean; fontSizeHere: boolean };
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
-// ---- The editor ----
-
-/** The Work in the editor, if any. */
-let current: WorkSync | null = null;
-const historyCompartment = new Compartment();
-
-/** Ctrl+Z and redo: the sync decides between the editor's own undo (inside a draft) and the History's. */
-const undoKeys = keymap.of([
-  { key: "Mod-z", run: () => current?.undo() ?? true, preventDefault: true },
-  { key: "Mod-Shift-z", run: () => current?.redo() ?? true, preventDefault: true },
-  { key: "Mod-y", run: () => current?.redo() ?? true, preventDefault: true },
-]);
-
-function editorState(text: string, editable: boolean) {
-  return EditorState.create({
-    doc: text,
-    extensions: [
-      EditorView.lineWrapping,
-      EditorState.readOnly.of(!editable),
-      EditorView.editable.of(editable),
-      historyCompartment.of(history()),
-      undoKeys,
-      // Only the basics: no shortcuts that move lines, which would bypass Moves.
-      keymap.of(standardKeymap),
-      dropCursor(),
-      EditorView.updateListener.of((update) => {
-        for (const tr of update.transactions) current?.track(tr);
-      }),
-    ],
-  });
-}
-
-const editor = new EditorView({ parent: $("editor"), state: editorState("", false) });
-
-/** The burst closed: its undo steps are gone (it's a Change now; Ctrl+Z reverts it). */
-function clearUndoSteps() {
-  editor.dispatch({ effects: historyCompartment.reconfigure([]) });
-  editor.dispatch({ effects: historyCompartment.reconfigure(history()) });
-}
-
-function showWorkState(state: WorkState) {
-  const el = $("status");
-  const lines = [state.saveError, state.textFileProblem, state.recoveryProblem, state.syncProblem]
-    .filter((line): line is string => line !== null);
-  el.textContent = lines.join("\n");
-  el.hidden = lines.length === 0;
-  if (state.tookIn) {
-    $("notice").textContent = state.tookIn;
-    $("notice").hidden = false;
-  }
-}
-
-// ---- Messages ----
+// ---- Messages and dialogs ----
 
 function showError(e: unknown) {
   const el = $("error");
@@ -120,7 +67,66 @@ function ask(dialog: HTMLDialogElement): Promise<string> {
   });
 }
 
+/** Asks for a name (of a Work); null if cancelled. */
+async function askText(question: string, initial = "", ok = "OK"): Promise<string | null> {
+  $("ask-text-question").textContent = question;
+  $("ask-text-ok").textContent = ok;
+  const input = $<HTMLInputElement>("ask-text-input");
+  input.value = initial;
+  input.select();
+  return (await ask($<HTMLDialogElement>("ask-text"))) === "ok" ? input.value : null;
+}
+
+async function confirmAsk(text: string, yes: string): Promise<boolean> {
+  $("ask-confirm-text").textContent = text;
+  $("ask-confirm-yes").textContent = yes;
+  return (await ask($<HTMLDialogElement>("ask-confirm"))) === "yes";
+}
+
+/** Runs something the Author asked for, showing any error. */
+function act(run: () => Promise<unknown>) {
+  clearError();
+  run().catch(showError);
+}
+
+// ---- Tabs ----
+
+const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $("status"), moved: $("moved") }, {
+  changed: () => {
+    $("empty").hidden = tabs.active !== null;
+    rememberSoon();
+    highlightOpen();
+  },
+  error: showError,
+  askName: (question, initial) => askText(question, initial),
+});
+
+/** The tabs (and cursors) are remembered for next time, a moment after they change. */
+let rememberTimer: number | undefined;
+function rememberSoon() {
+  clearTimeout(rememberTimer);
+  rememberTimer = window.setTimeout(remember, 500);
+}
+function remember() {
+  if (!vaultOpen) return;
+  invoke("save_layout", { layout: tabs.layout() }).catch(showError);
+}
+
+async function openWork(id: string, cursor?: number) {
+  if (tabs.has(id)) return tabs.activate(id);
+  const work = await invoke<OpenedWork>("open_work", { id });
+  await tabs.add(work, cursor);
+  if (work.problems.length > 0) showProblems(work.problems);
+  await refreshList(); // a Text file may have become a Work
+}
+
+// The Rust side's timer closed a burst, saved, or noticed a change from outside.
+void listen<{ id: string; state: WorkState }>("work-status", (event) => tabs.status(event.payload.id, event.payload.state));
+
 // ---- The Vault ----
+
+let vaultOpen = false;
+let entries: Entry[] = [];
 
 async function askDeviceName(suggested: string) {
   const input = $<HTMLInputElement>("name-input");
@@ -139,7 +145,8 @@ async function askDeviceName(suggested: string) {
 
 async function openVault(path: string) {
   clearError();
-  await closeCurrent();
+  await tabs.closeAll();
+  vaultOpen = false;
   let opened = await invoke<VaultOpened>("open_vault", { path, create: false });
   if (opened.status === "notAVault") {
     $("ask-create-path").textContent = path;
@@ -148,10 +155,21 @@ async function openVault(path: string) {
   }
   if (opened.status !== "opened") return;
   $("vault-root").textContent = opened.root;
-  $("new-work").hidden = false;
-  showWork(null);
+  $("vault-actions").hidden = false;
+  $("open-settings").hidden = false;
   if (opened.deviceName === null) await askDeviceName(opened.suggestedName);
+  applySettings(await invoke<Settings>("get_settings"));
   await refreshList();
+  // The tabs that were open here last time, each with its cursor where it was.
+  const layout = await invoke<Layout>("get_layout");
+  for (const id of layout.tabs) {
+    try {
+      await openWork(id, layout.cursors[id]);
+    } catch {
+      // renamed or gone since: just not reopened
+    }
+  }
+  if (layout.active && tabs.has(layout.active)) await tabs.activate(layout.active);
   vaultOpen = true;
 }
 
@@ -164,115 +182,128 @@ const labels: Record<Entry["kind"], string> = {
   blocked: "",
 };
 
+function small(text: string) {
+  const el = document.createElement("small");
+  el.textContent = text;
+  return el;
+}
+
+function actionButton(label: string, title: string, run: () => Promise<unknown>) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "link";
+  b.textContent = label;
+  b.title = title;
+  b.addEventListener("click", () => act(run));
+  return b;
+}
+
 async function refreshList() {
   const listing = await invoke<Listing>("list_works");
+  entries = listing.entries;
   showProblems(listing.problems);
   const list = $("works");
   list.replaceChildren();
-  for (const entry of listing.entries) {
+  for (const entry of entries) {
     const item = document.createElement("li");
-    item.className = entry.kind + (entry.id === current?.id ? " open" : "");
+    item.className = entry.kind;
+    item.dataset.id = entry.id;
     const name = document.createElement("button");
     name.type = "button";
+    name.className = "entry-name";
     name.textContent = entry.id;
     name.disabled = entry.kind === "newer" || entry.kind === "unreadable" || entry.kind === "leftover" || entry.kind === "blocked";
-    name.addEventListener("click", () => openWork(entry.id));
+    name.addEventListener("click", () => act(() => openWork(entry.id)));
     item.append(name);
     const note =
       entry.kind === "leftover" ? `Text file left over from ${entry.of}`
       : entry.kind === "blocked" ? entry.reason
       : labels[entry.kind];
-    if (note) {
-      const small = document.createElement("small");
-      small.textContent = note;
-      item.append(small);
+    if (note) item.append(small(note));
+    const actions = document.createElement("span");
+    actions.className = "entry-actions";
+    if (entry.kind === "work") {
+      actions.append(
+        actionButton("Rename", `Rename ${entry.id}`, () => renameWork(entry.id)),
+        actionButton("Trash", `Move ${entry.id} to the trash`, () => trashWork(entry.id)),
+      );
+    } else if (entry.kind === "leftover") {
+      actions.append(actionButton("Delete it", "Delete the leftover Text file", async () => {
+        await invoke("delete_leftover", { id: entry.id });
+        await refreshList();
+      }));
     }
-    if (entry.kind === "leftover") {
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "link";
-      remove.textContent = "Delete it";
-      remove.addEventListener("click", async () => {
-        try {
-          await invoke("delete_leftover", { id: entry.id });
-          await refreshList();
-        } catch (e) {
-          showError(e);
-        }
-      });
-      item.append(remove);
-    }
+    item.append(actions);
+    list.append(item);
+  }
+  highlightOpen();
+  await refreshTrash();
+}
+
+function highlightOpen() {
+  for (const item of $("works").querySelectorAll<HTMLElement>("li")) {
+    item.classList.toggle("open", item.dataset.id === tabs.active);
+  }
+}
+
+async function newWork(name?: string) {
+  const id = name ?? (await askText("What's the new Work called?", "", "Create"));
+  if (id === null) return;
+  await tabs.add(await invoke<OpenedWork>("create_work", { id }));
+  await refreshList();
+}
+
+async function renameWork(id: string) {
+  const name = await askText(`Rename ${id} to:`, id, "Rename");
+  if (name === null || name === id) return;
+  const renamed = await invoke<string>("rename_work", { id, name });
+  tabs.renamed(id, renamed);
+  await refreshList();
+}
+
+async function trashWork(id: string) {
+  await tabs.close(id); // saved first
+  await invoke("trash_work", { id });
+  await refreshList();
+}
+
+async function refreshTrash() {
+  const trashed = await invoke<TrashedWork[]>("list_trash");
+  $("trash").hidden = trashed.length === 0;
+  const list = $("trash-list");
+  list.replaceChildren();
+  for (const work of trashed) {
+    const item = document.createElement("li");
+    item.append(document.createTextNode(work.id + " "));
+    item.append(actionButton("Restore", `Put ${work.id} back`, async () => {
+      await invoke("restore_work", { id: work.id });
+      await refreshList();
+    }));
     list.append(item);
   }
 }
 
-// ---- Works ----
+$("empty-trash").addEventListener("click", () => act(async () => {
+  if (!(await confirmAsk("Delete everything in the trash for good, on every Device? This can't be undone.", "Empty the trash"))) return;
+  await invoke("empty_trash");
+  await refreshList();
+}));
 
-function showWork(work: OpenedWork | null) {
-  $("work-title").textContent = work?.name ?? "";
-  $("empty").hidden = work !== null;
-  $("editor").hidden = work === null;
-  $("status").hidden = true;
-  $("notice").textContent = work?.notice ?? "";
-  $("notice").hidden = !work?.notice;
-  current = work === null ? null : new WorkSync(work.id, editor, {
-    state: showWorkState,
-    burstClosed: clearUndoSteps,
-    error: showError,
-  });
-  editor.setState(editorState(work?.text ?? "", work !== null));
-  if (work !== null) editor.focus();
-}
+$("choose-vault").addEventListener("click", () => act(async () => {
+  const path = await invoke<string | null>("pick_folder");
+  if (path) await openVault(path);
+}));
 
-/** Closes the Work in the editor: everything typed reaches Rust, is saved, and the Text file written. */
-async function closeCurrent() {
-  if (current === null) return;
-  const closing = current;
-  await closing.idle();
-  current = null;
-  try {
-    await invoke("close_work", { id: closing.id });
-  } catch (e) {
-    showError(e);
-  }
-}
-
-async function openWork(id: string) {
-  if (id === current?.id) return;
-  clearError();
-  try {
-    await closeCurrent();
-    const work = await invoke<OpenedWork>("open_work", { id });
-    showWork(work);
-    if (work.problems.length > 0) showProblems(work.problems);
-    await refreshList(); // a Text file may have become a Work
-  } catch (e) {
-    showError(e);
-  }
-}
-
-$("new-work").addEventListener("click", async () => {
-  const input = $<HTMLInputElement>("new-work-name");
-  input.value = "";
-  if ((await ask($<HTMLDialogElement>("ask-new-work"))) !== "create") return;
-  clearError();
-  try {
-    await closeCurrent();
-    showWork(await invoke<OpenedWork>("create_work", { id: input.value }));
-    await refreshList();
-  } catch (e) {
-    showWork(null);
-    showError(e);
-  }
-});
+$("new-work").addEventListener("click", () => act(() => newWork()));
 
 // The Vault list follows what Syncthing brings (new Works, Conflict copies of Works that
-// aren't open): every 10 seconds, and whenever the window gets focus.
-let vaultOpen = false;
+// aren't open): every 10 seconds, and whenever the window gets focus. The tabs and cursors are
+// remembered then too.
 async function refreshQuietly() {
   if (!vaultOpen || document.querySelector("dialog[open]")) return;
   try {
     await refreshList();
+    remember();
   } catch (e) {
     showError(e);
   }
@@ -281,37 +312,120 @@ setInterval(refreshQuietly, 10_000);
 window.addEventListener("focus", refreshQuietly);
 
 // Leaving the window: the Text file is brought up to date for other programs.
-window.addEventListener("blur", async () => {
-  const work = current;
-  if (work === null) return;
-  await work.idle();
-  try {
-    showWorkState(await invoke<WorkState>("leave_work", { id: work.id }));
-  } catch (e) {
-    showError(e);
-  }
+window.addEventListener("blur", () => {
+  remember();
+  void tabs.leave();
 });
 
-// The Rust side's timer closed a burst or saved something.
-void listen<{ id: string; state: WorkState }>("work-status", (event) => {
-  if (event.payload.id === current?.id) current.status(event.payload.state);
-});
+// ---- Quick switcher (Ctrl+O) ----
 
-$("choose-vault").addEventListener("click", async () => {
-  try {
-    const path = await invoke<string | null>("pick_folder");
-    if (path) await openVault(path);
-  } catch (e) {
-    showError(e);
+/** Does `query` appear in `text`, in order (not necessarily together)? */
+function matches(text: string, query: string) {
+  let i = 0;
+  const t = text.toLowerCase();
+  for (const c of query.toLowerCase()) {
+    i = t.indexOf(c, i);
+    if (i === -1) return false;
+    i++;
+  }
+  return true;
+}
+
+let switcherChoice = 0;
+function fillSwitcher() {
+  const query = $<HTMLInputElement>("switcher-input").value.trim();
+  const found = entries.filter((e) => (e.kind === "work" || e.kind === "newWork") && matches(e.id, query)).slice(0, 12);
+  const list = $("switcher-list");
+  list.replaceChildren();
+  const choices: { label: string; run: () => Promise<unknown> }[] = found.map((e) => ({ label: e.id, run: () => openWork(e.id) }));
+  if (query && !found.some((e) => e.id.toLowerCase() === query.toLowerCase())) {
+    choices.push({ label: `Create “${query}”`, run: () => newWork(query) });
+  }
+  switcherChoice = Math.min(switcherChoice, Math.max(choices.length - 1, 0));
+  choices.forEach((choice, i) => {
+    const item = document.createElement("li");
+    item.textContent = choice.label;
+    item.classList.toggle("chosen", i === switcherChoice);
+    item.addEventListener("click", () => {
+      $<HTMLDialogElement>("switcher").close();
+      act(choice.run);
+    });
+    list.append(item);
+  });
+  return choices;
+}
+
+async function openSwitcher() {
+  if (!vaultOpen) return;
+  const dialog = $<HTMLDialogElement>("switcher");
+  const input = $<HTMLInputElement>("switcher-input");
+  input.value = "";
+  switcherChoice = 0;
+  fillSwitcher();
+  dialog.showModal();
+  input.focus();
+}
+
+$("switcher-input").addEventListener("input", () => {
+  switcherChoice = 0;
+  fillSwitcher();
+});
+$("switcher-input").addEventListener("keydown", (e) => {
+  const choices = fillSwitcher();
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    switcherChoice = (switcherChoice + (e.key === "ArrowDown" ? 1 : choices.length - 1)) % Math.max(choices.length, 1);
+    fillSwitcher();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    $<HTMLDialogElement>("switcher").close();
+    const choice = choices[switcherChoice];
+    if (choice) act(choice.run);
   }
 });
+$("open-switcher").addEventListener("click", () => void openSwitcher());
 
-window.addEventListener("DOMContentLoaded", async () => {
-  showWork(null);
-  try {
-    const { lastVault } = await invoke<{ lastVault: string | null }>("startup");
-    if (lastVault) await openVault(lastVault);
-  } catch (e) {
-    showError(e);
+// App-wide keys: Ctrl+O finds a Work, Ctrl+W closes the tab in front.
+window.addEventListener("keydown", (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && !e.shiftKey && e.key.toLowerCase() === "o") {
+    e.preventDefault();
+    void openSwitcher();
+  } else if (mod && !e.shiftKey && e.key.toLowerCase() === "w" && tabs.active) {
+    e.preventDefault();
+    act(() => tabs.close(tabs.active!));
   }
-});
+}, { capture: true });
+
+// ---- Settings ----
+
+function applySettings(settings: Settings) {
+  const root = document.documentElement;
+  if (settings.theme === "system") delete root.dataset.theme;
+  else root.dataset.theme = settings.theme;
+  root.style.setProperty("--editor-font-size", `${settings.fontSize}px`);
+  $<HTMLSelectElement>("theme").value = settings.theme;
+  $<HTMLInputElement>("theme-here").checked = settings.themeHere;
+  $<HTMLInputElement>("font-size").value = String(settings.fontSize);
+  $<HTMLInputElement>("font-size-here").checked = settings.fontSizeHere;
+}
+
+function setting(name: string, value: string, here: boolean) {
+  act(async () => applySettings(await invoke<Settings>("set_setting", { name, value, here })));
+}
+
+$("theme").addEventListener("change", () => setting("theme", $<HTMLSelectElement>("theme").value, $<HTMLInputElement>("theme-here").checked));
+$("theme-here").addEventListener("change", () => setting("theme", $<HTMLSelectElement>("theme").value, $<HTMLInputElement>("theme-here").checked));
+$("font-size").addEventListener("change", () => setting("fontSize", $<HTMLInputElement>("font-size").value, $<HTMLInputElement>("font-size-here").checked));
+$("font-size-here").addEventListener("change", () => setting("fontSize", $<HTMLInputElement>("font-size").value, $<HTMLInputElement>("font-size-here").checked));
+$("open-settings").addEventListener("click", () => act(async () => {
+  applySettings(await invoke<Settings>("get_settings")); // another Device may have changed them
+  await ask($<HTMLDialogElement>("settings"));
+}));
+
+// ---- Start ----
+
+window.addEventListener("DOMContentLoaded", () => act(async () => {
+  const { lastVault } = await invoke<{ lastVault: string | null }>("startup");
+  if (lastVault) await openVault(lastVault);
+}));

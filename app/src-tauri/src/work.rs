@@ -103,6 +103,20 @@ pub struct WorkState {
     pub took_in: Option<String>,
     /// A Conflict copy that couldn't be taken in, if any.
     pub sync_problem: Option<String>,
+    /// The Work's History moved away underneath the open tab (on another Device), if it did.
+    pub moved: Option<Whereabouts>,
+}
+
+/// Where a Work's History went when it disappeared from under an open tab.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Whereabouts {
+    /// Renamed or moved inside the Vault: the tab follows it to its new ID.
+    Renamed { to: String },
+    /// Moved to the trash: saving pauses until it's restored or the tab is closed.
+    Trashed { db: PathBuf },
+    /// Nowhere in the Vault: saving pauses.
+    Gone,
 }
 
 /// When a file was last modified, and its size: if either changes, someone else wrote it.
@@ -152,6 +166,9 @@ pub struct OpenWork {
     copies_tried: HashSet<PathBuf>,
     took_in: Option<String>,
     sync_problem: Option<String>,
+    /// The Work's first Change: how it's found again if it's renamed elsewhere.
+    identity: Option<ChangeId>,
+    pub whereabouts: Option<Whereabouts>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -170,6 +187,8 @@ impl OpenWork {
         let positions = Positions::new(&doc.text());
         let (db_stamp, typ_stamp) = (stamp(&db), stamp(&typ));
         OpenWork {
+            identity: storage::first_change(&db).ok().flatten(),
+            whereabouts: None,
             mine,
             db_stamp,
             typ_stamp,
@@ -209,7 +228,39 @@ impl OpenWork {
             outside: self.outside,
             took_in: None,
             sync_problem: self.sync_problem.clone(),
+            moved: self.whereabouts.clone(),
         }
+    }
+
+    /// The Work's first Change (see `storage::first_change`).
+    pub fn identity(&self) -> Option<ChangeId> {
+        self.identity
+    }
+
+    /// Has its History disappeared from where this tab has it (renamed, trashed or deleted
+    /// elsewhere)? Then nothing is saved: saving would create a new, broken History there.
+    pub fn is_lost(&self) -> bool {
+        !self.db.exists()
+    }
+
+    /// Drops the open Work without saving (its History is gone and the Author chose to close
+    /// it): its recovery file goes too.
+    pub fn discard(&mut self) {
+        let _ = self.recovery.clear();
+    }
+
+    /// Points the open Work at its History's new place (renamed here or on another Device).
+    /// Its recovery file moves along.
+    pub fn relocate(&mut self, db: PathBuf, typ: PathBuf, recovery: Recovery) {
+        let _ = self.recovery.clear();
+        self.recovery = recovery;
+        self.db = db;
+        self.typ = typ;
+        self.db_stamp = stamp(&self.db);
+        self.typ_stamp = stamp(&self.typ);
+        self.copies_tried.clear();
+        self.text_file_behind = true;
+        self.keep_recovery(true);
     }
 
     /// Updates the recovery file with what's only in memory. `flush`: also make sure it's on the
@@ -454,8 +505,11 @@ impl OpenWork {
 
     /// Saves Changes not saved yet. If that fails they stay here and are tried again.
     pub fn save(&mut self) {
-        if self.unsaved.is_empty() {
-            return;
+        if self.unsaved.is_empty() || self.is_lost() {
+            return; // (lost: the recovery file keeps them until the History is found again)
+        }
+        if self.identity.is_none() {
+            self.identity = self.unsaved.first().map(|c| c.id); // a Work's very first Change
         }
         match storage::save(&self.db, &self.unsaved, &self.doc) {
             Ok(()) => {
@@ -501,6 +555,9 @@ impl OpenWork {
 
     /// Takes in what changed outside the app, in order with the editor's edits (`Op::Sync`).
     fn take_in(&mut self, now_ms: u64) -> Result<(), String> {
+        if self.is_lost() {
+            return Ok(()); // the Vault looks for where it went
+        }
         let mut from: BTreeSet<wrtier::ids::DeviceId> = BTreeSet::new();
         let mut problems: Vec<String> = Vec::new();
         // Conflict copies of the History merge in first (that works with a burst open).
@@ -590,7 +647,7 @@ impl OpenWork {
     /// edit made in another program, taken in at the next `Sync`), or one written from Changes
     /// that haven't arrived yet (it's newer).
     fn write_text_file(&mut self, now_ms: u64) {
-        if !self.text_file_behind || !self.unsaved.is_empty() || self.typ_newer || stamp(&self.typ) != self.typ_stamp {
+        if !self.text_file_behind || !self.unsaved.is_empty() || self.typ_newer || stamp(&self.typ) != self.typ_stamp || self.is_lost() {
             return;
         }
         match storage::write_text_file(&self.db, &self.typ, &self.doc, now_ms) {

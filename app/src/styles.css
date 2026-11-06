@@ -1,3 +1,4 @@
+/* The theme follows the Vault setting: light, dark, or the system's (no data-theme). */
 :root {
   --bg: #fbfaf7;
   --panel: #f1efe9;
@@ -9,11 +10,12 @@
   --warn-text: #6b4a10;
   --error-bg: #f8dfdc;
   --error-text: #7a221a;
+  --editor-font-size: 17px;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #1c1b19;
     --panel: #24231f;
     --text: #e8e4dc;
@@ -26,6 +28,20 @@
     --error-text: #f2b8b0;
     color-scheme: dark;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #1c1b19;
+  --panel: #24231f;
+  --text: #e8e4dc;
+  --muted: #9a958b;
+  --line: #36342f;
+  --accent: #8fb0d8;
+  --warn-bg: #3a2f17;
+  --warn-text: #f1d49a;
+  --error-bg: #3d1f1b;
+  --error-text: #f2b8b0;
+  color-scheme: dark;
 }
 
 * {
@@ -48,6 +64,20 @@ body {
   height: 100%;
 }
 
+.row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+kbd {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* ---- The Vault browser ---- */
+
 #sidebar {
   background: var(--panel);
   border-right: 1px solid var(--line);
@@ -59,41 +89,45 @@ body {
   margin-bottom: 12px;
 }
 
-#new-work {
-  margin-top: 10px;
-}
-
 #vault-root {
-  margin-top: 6px;
+  margin: 6px 0 10px;
   font-size: 12px;
   word-break: break-all;
 }
 
-#works {
+#works,
+#trash-list {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
 #works li {
-  padding: 4px 0;
+  padding: 2px 0;
+  position: relative;
 }
 
-#works li > button:first-child {
+.entry-name {
   all: unset;
   cursor: pointer;
   display: block;
   padding: 4px 6px;
   border-radius: 4px;
+  overflow-wrap: anywhere;
 }
 
-#works li > button:first-child:hover:not(:disabled) {
+.entry-name:hover:not(:disabled) {
   background: var(--line);
 }
 
-#works li > button:first-child:disabled {
+.entry-name:disabled {
   cursor: default;
   color: var(--muted);
+}
+
+#works li.open > .entry-name {
+  background: var(--line);
+  font-weight: 600;
 }
 
 #works small {
@@ -103,25 +137,91 @@ body {
   font-size: 12px;
 }
 
+/* Rename and Trash show when the pointer is on the entry (always on touch screens). */
+.entry-actions {
+  display: block;
+  padding: 0 0 2px;
+  visibility: hidden;
+}
+
+#works li:hover .entry-actions,
+#works li:focus-within .entry-actions {
+  visibility: visible;
+}
+
+@media (hover: none) {
+  .entry-actions {
+    visibility: visible;
+  }
+}
+
+#trash {
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+#trash summary {
+  cursor: pointer;
+}
+
+#trash-list li {
+  padding: 3px 0 3px 6px;
+}
+
+/* ---- Tabs and the editor ---- */
+
 main {
   overflow-y: auto;
-  padding: 24px 40px;
+  padding: 12px 40px 24px;
 }
 
-#work-title {
-  font-size: 20px;
-  font-weight: 600;
-  margin: 0 0 12px;
+#tabbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 14px;
 }
 
-#editor .cm-editor {
+#tabbar:empty {
+  display: none;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  color: var(--muted);
+}
+
+.tab.active {
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.tab button {
+  border: none;
+  background: none;
+  padding: 6px 4px 6px 10px;
+}
+
+.tab .tab-close {
+  padding: 6px 8px 6px 4px;
+  color: var(--muted);
+}
+
+.editor .cm-editor {
   font-family: Georgia, "Iowan Old Style", serif;
-  font-size: 17px;
+  font-size: var(--editor-font-size);
   line-height: 1.6;
   max-width: 44em;
 }
 
-#editor .cm-editor.cm-focused {
+.editor .cm-editor.cm-focused {
   outline: none;
 }
 
@@ -138,9 +238,25 @@ main {
   margin-bottom: 10px;
 }
 
-#works li.open > button:first-child {
-  background: var(--line);
-  font-weight: 600;
+#moved {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+#moved[hidden] {
+  display: none;
+}
+
+#moved p {
+  margin: 0;
+  flex-basis: 100%;
 }
 
 #problems,
@@ -192,19 +308,23 @@ button.link {
   font-size: 12px;
 }
 
+/* ---- Dialogs ---- */
+
 dialog {
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--line);
   border-radius: 8px;
-  max-width: 420px;
+  max-width: 440px;
+  width: calc(100% - 32px);
 }
 
 dialog::backdrop {
   background: rgb(0 0 0 / 0.35);
 }
 
-dialog input {
+dialog input,
+dialog select {
   font: inherit;
   width: 100%;
   padding: 6px 8px;
@@ -214,10 +334,53 @@ dialog input {
   color: var(--text);
 }
 
+dialog input[type="checkbox"] {
+  width: auto;
+}
+
 dialog menu {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   padding: 0;
   margin: 16px 0 0;
+}
+
+dialog h2 {
+  font-size: 17px;
+  margin: 0 0 12px;
+}
+
+#settings label {
+  display: block;
+  margin-top: 10px;
+}
+
+#settings label.here {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+#switcher {
+  margin-top: 12vh;
+}
+
+#switcher-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+#switcher-list li {
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#switcher-list li.chosen,
+#switcher-list li:hover {
+  background: var(--line);
 }
