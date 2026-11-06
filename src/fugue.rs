@@ -91,6 +91,16 @@ impl Tree {
         self.index_of(id).and_then(|i| self.char_at(i))
     }
 
+    /// The Change that wrote the node at an array index.
+    pub fn change_at(&self, index: u32) -> ChangeId {
+        self.changes[self.nodes[index as usize].change as usize]
+    }
+
+    /// The Changes that deleted the node at an array index (empty if none did).
+    pub fn deleters_at(&self, index: u32) -> &[ChangeId] {
+        if self.nodes[index as usize].deleted { &self.deleted_by[&index] } else { &[] }
+    }
+
     pub fn char_at(&self, index: u32) -> Option<char> {
         self.nodes[index as usize].ch
     }

@@ -37,11 +37,25 @@ pub enum ChangeKind {
     /// The latest value in the fixed Change order wins; older values stay in the History,
     /// and reverting this Change brings the previous value back.
     SetField { record: String, field: String, value: String },
+    /// A named point in the History: exactly the Changes the naming Device had seen, as the
+    /// highest counter it had from each Device. Rename it with a field on `milestone_record`;
+    /// delete it by reverting this Change.
+    Milestone { name: String, seen: Vec<(DeviceId, u32)> },
 }
 
 /// The record holding a Device's own settings, such as its readable name.
 pub fn device_record(device: DeviceId) -> String {
     format!("device/{device}")
+}
+
+/// The record holding a Milestone's settings, such as a new name.
+pub fn milestone_record(milestone: ChangeId) -> String {
+    format!("milestone/{milestone}")
+}
+
+/// Records that aren't part of the Work's content: returning to a Milestone leaves them alone.
+pub fn is_meta_record(record: &str) -> bool {
+    record.starts_with("device/") || record.starts_with("milestone/")
 }
 
 /// Names a Merge notice the same way on every Device, by the Moves involved.

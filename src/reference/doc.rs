@@ -206,6 +206,7 @@ impl Doc {
                 self.dismissals.push((change.id, *notice));
             }
             ChangeKind::SetField { .. } => {} // fields aren't part of what the reference checks
+            ChangeKind::Milestone { .. } => {} // nor are Milestones (returning to one is a Revert)
         }
     }
 

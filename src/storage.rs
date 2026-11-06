@@ -161,6 +161,48 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
+    if version < 7 {
+        // Milestones, and the readable view rebuilt so a Milestone row shows its name.
+        conn.execute_batch("
+        BEGIN;
+        CREATE TABLE milestones (
+            change  TEXT PRIMARY KEY REFERENCES changes(id),
+            name    TEXT NOT NULL        -- the name it was given (renames are fields)
+        );
+        CREATE TABLE milestone_seen (    -- what it holds: the highest counter seen from each Device
+            change  TEXT NOT NULL REFERENCES changes(id),
+            device  TEXT NOT NULL,
+            counter INTEGER NOT NULL,
+            PRIMARY KEY (change, device)
+        );
+        DROP VIEW history;
+        CREATE VIEW history AS
+        SELECT
+            c.time                          AS time,
+            COALESCE(names.name, c.device)  AS device,
+            COALESCE(c.session, c.id)       AS session,
+            c.kind                          AS kind,
+            COALESCE(
+                i.text,
+                (SELECT group_concat(d.deleted_text, '') FROM deletions d WHERE d.change = c.id),
+                (SELECT group_concat(p.moved_text, ' | ') FROM move_pieces p WHERE p.change = c.id),
+                (SELECT f.record || ' ' || f.field || ' = ' || f.value FROM fields f WHERE f.change = c.id),
+                (SELECT m.name FROM milestones m WHERE m.change = c.id)
+            )                               AS text,
+            c.id                            AS id
+        FROM changes c
+        LEFT JOIN insertions i ON i.change = c.id
+        LEFT JOIN (
+            SELECT substr(f.record, 8) AS device, f.value AS name, MAX(fc.hlc) AS hlc
+            FROM fields f JOIN changes fc ON fc.id = f.change
+            WHERE f.record LIKE 'device/%' AND f.field = 'name'
+            GROUP BY f.record
+        ) names ON names.device = c.device
+        ORDER BY c.hlc, c.device;
+        PRAGMA user_version = 7;
+        COMMIT;
+        ")?;
+    }
     Ok(())
 }
 /// One row in `insertions`. Insert and Replace both write one.
@@ -197,6 +239,7 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                 ChangeKind::Move { .. } => "move",
                 ChangeKind::Dismiss { .. } => "dismiss",
                 ChangeKind::SetField { .. } => "field",
+                ChangeKind::Milestone { .. } => "milestone",
             },
             change.session.to_string(),
         ],
@@ -294,6 +337,18 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                 "INSERT OR IGNORE INTO fields (change, record, field, value) VALUES (?1, ?2, ?3, ?4)",
                 params![change.id.to_string(), record, field, value],
             )?;
+        }
+        ChangeKind::Milestone { name, seen } => {
+            conn.execute(
+                "INSERT OR IGNORE INTO milestones (change, name) VALUES (?1, ?2)",
+                params![change.id.to_string(), name],
+            )?;
+            for (device, counter) in seen {
+                conn.execute(
+                    "INSERT OR IGNORE INTO milestone_seen (change, device, counter) VALUES (?1, ?2, ?3)",
+                    params![change.id.to_string(), device.to_string(), counter],
+                )?;
+            }
         }
     }
     Ok(())
@@ -412,6 +467,23 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
         fields.insert(change, (row.get(1)?, row.get(2)?, row.get(3)?));
     }
 
+    // Pass 3f: Milestones: their names, and what each holds.
+    let mut milestone_names: HashMap<ChangeId, String> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT change, name FROM milestones")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        milestone_names.insert(column(row, 0)?.parse()?, row.get(1)?);
+    }
+    let mut milestone_seen: HashMap<ChangeId, Vec<(DeviceId, u32)>> = HashMap::new();
+    // Device IDs are fixed-width hex, so sorting the text sorts the numbers too.
+    let mut stmt = conn.prepare("SELECT change, device, counter FROM milestone_seen ORDER BY change, device")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let change: ChangeId = column(row, 0)?.parse()?;
+        let device: DeviceId = column(row, 1)?.parse()?;
+        milestone_seen.entry(change).or_default().push((device, row.get(2)?));
+    }
+
     // Pass 4: read every change
     let mut stmt = conn.prepare(
         "SELECT c.id, c.hlc, c.kind, i.text, i.parent, i.side, i.right_origin, i.into_anchor, c.session
@@ -455,6 +527,12 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
             "field" => {
                 let (record, field, value) = fields.remove(&id).ok_or(format!("Missing field for change {}", id))?;
                 ChangeKind::SetField { record, field, value }
+            }
+            "milestone" => {
+                let name = milestone_names.remove(&id).ok_or(format!("Missing Milestone name for change {}", id))?;
+                // A Milestone made before its Device had seen anything holds nothing; that's not an error.
+                let seen = milestone_seen.remove(&id).unwrap_or_default();
+                ChangeKind::Milestone { name, seen }
             }
             other => return Err(format!("Unknown change kind: {}", other).into()),
         };
@@ -524,6 +602,8 @@ const TABLES: &[(&str, &str, &str, &str)] = &[
     ("move_seen", "change", "change, device, counter", "change, device, counter"),
     ("dismissals", "change", "change, notice, move, other_move", "change, notice, move, other_move"),
     ("fields", "change", "change, record, field, value", "change, record, field, value"),
+    ("milestones", "change", "change, name", "change, name"),
+    ("milestone_seen", "change", "change, device, counter", "change, device, counter"),
 ];
 
 /// Two copies of a History hold the same Change ID with different content. That can only
@@ -599,7 +679,7 @@ mod test {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
     }
 
     #[test]
@@ -743,6 +823,25 @@ mod test {
             laptop("insert", "The rain had stopped."),
             laptop("delete", "stopped"),
         ]);
+    }
+
+    #[test]
+    fn milestones_round_trip_and_read_well() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work.db");
+        let (mut doc, mut changes) = named_history();
+        let draft = doc.make_milestone_local("Draft 2, sent to editor", 4000);
+        changes.push(draft.clone());
+        changes.push(doc.insert_local(0, "Later. ", 5000));
+        save(&path, &changes, &doc).unwrap();
+        let (loaded, loaded_doc) = load(&path, DeviceId(1)).unwrap();
+        assert_eq!(loaded, changes);
+        assert_eq!(loaded_doc.milestones()[0].name, "Draft 2, sent to editor");
+        assert_eq!(loaded_doc.text_at_milestone(draft.id), "The rain had .");
+
+        let conn = Connection::open(&path).unwrap();
+        let text: String = conn.query_row("SELECT text FROM history WHERE kind = 'milestone'", [], |r| r.get(0)).unwrap();
+        assert_eq!(text, "Draft 2, sent to editor");
     }
 
     #[test]

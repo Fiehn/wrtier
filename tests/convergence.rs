@@ -14,6 +14,8 @@ enum Action {
     Move { device: usize, from: u16, len: u8, to: u16 },
     Dismiss { device: usize, pick: u16 },
     Rename { device: usize, name: u8 },
+    Mark { device: usize },
+    Return { device: usize, pick: u16 },
 }
 
 // Generate a random Action.
@@ -28,6 +30,8 @@ fn action() -> impl Strategy<Value = Action> {
             .prop_map(|(device, from, len, to)| Action::Move { device, from, len, to }),
         (0..3usize, any::<u16>()).prop_map(|(device, pick)| Action::Dismiss { device, pick }),
         (0..3usize, 0..4u8).prop_map(|(device, name)| Action::Rename { device, name }),
+        (0..3usize).prop_map(|device| Action::Mark { device }),
+        (0..3usize, any::<u16>()).prop_map(|(device, pick)| Action::Return { device, pick }),
     ]
 }
 
@@ -39,6 +43,8 @@ fn run(actions: &[Action]) {
     ];
     let mut all: Vec<Change> = Vec::new();
     let mut changes: Vec<Vec<Change>> = vec![vec![], vec![], vec![]];
+    // Every Milestone made, with the Changes its Device had at that moment.
+    let mut marked: Vec<(wrtier::ids::ChangeId, Vec<Change>)> = Vec::new();
     let skew: [u64; 3] = [0, 0, 60_000]; // each device's clock is skewed by this many ms
     let mut now_ms: u64 = 1_000_000u64;
 
@@ -157,6 +163,28 @@ fn run(actions: &[Action]) {
                 changes[*device].push(change);
                 now_ms += 1;
             }
+            Action::Mark { device } => {
+                let snapshot = changes[*device].clone();
+                let change = docs[*device].make_milestone_local("Draft", now_ms - skew[*device]);
+                assert_eq!(docs[*device].text_at_milestone(change.id), docs[*device].text(), "a new Milestone is the text now");
+                marked.push((change.id, snapshot));
+                all.push(change.clone());
+                changes[*device].push(change);
+                now_ms += 1;
+            }
+            Action::Return { device, pick } => {
+                let milestones = docs[*device].milestones();
+                if milestones.is_empty() {
+                    continue;
+                }
+                let milestone = milestones[*pick as usize % milestones.len()].id;
+                if let Some(change) = docs[*device].return_to_milestone_local(milestone, &[], now_ms - skew[*device]) {
+                    assert_eq!(docs[*device].text(), docs[*device].text_at_milestone(milestone), "returning gives the Milestone's text");
+                    all.push(change.clone());
+                    changes[*device].push(change);
+                    now_ms += 1;
+                }
+            }
         }
     }
     // sync all devices with each other
@@ -190,6 +218,17 @@ fn run(actions: &[Action]) {
         let expected = expected_name(&all, DeviceId(named));
         for doc in &docs {
             assert_eq!(doc.device_name(DeviceId(named)), expected.as_deref(), "name of Device {named}");
+        }
+    }
+    // Every Milestone's text, on every Device, is the text of a Work rebuilt from only the
+    // Changes its Device had when it was made.
+    for (milestone, snapshot) in &marked {
+        let mut snapshot = snapshot.clone();
+        snapshot.sort_by_key(|c| c.order_key());
+        let mut rebuilt = Doc::new(DeviceId(9));
+        rebuilt.apply_all(&snapshot);
+        for doc in &docs {
+            assert_eq!(doc.text_at_milestone(*milestone), rebuilt.text(), "text at Milestone {milestone}");
         }
     }
 }
@@ -253,7 +292,7 @@ fn expected_chars(all: &[Change]) -> Vec<char> {
             ChangeKind::Delete(r) => r,
             ChangeKind::Replace { deleted, .. } => deleted,
             ChangeKind::Insert(_) | ChangeKind::Revert { .. } => continue,
-            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } => continue, // they don't delete characters
+            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } | ChangeKind::Milestone { .. } => continue, // they don't delete characters
         };
         for r in ranges {
             for offset in r.first.offset..r.first.offset + r.len {
@@ -268,7 +307,7 @@ fn expected_chars(all: &[Change]) -> Vec<char> {
             ChangeKind::Insert(run) => run,
             ChangeKind::Replace { inserted, .. } => inserted,
             ChangeKind::Delete(_) | ChangeKind::Revert { .. } => continue,
-            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } => continue, // they don't add characters
+            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } | ChangeKind::Milestone { .. } => continue, // they don't add characters
         };
         if !in_effect(c.id, &reverted_by) {
             continue;

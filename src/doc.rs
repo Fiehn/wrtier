@@ -6,7 +6,7 @@
 //! such shortcut is checked against a full recompute. `crate::reference::doc` is the first,
 //! simple version; this one must behave identically (`tests/against_reference.rs`).
 
-use crate::change::{device_record, Change, ChangeKind, InsertRun, CharRange, NoticeKey, Span};
+use crate::change::{device_record, is_meta_record, milestone_record, Change, ChangeKind, InsertRun, CharRange, NoticeKey, Span};
 use crate::fugue::Tree;
 use crate::ids::{ChangeId, DeviceId, Hlc, CharId};
 use crate::layout::{Layout, MoveInfo, Piece};
@@ -25,6 +25,9 @@ pub struct Doc {
     typed_into: HashMap<CharId, Vec<CharId>>,      // a piece's anchor → nodes typed or dropped into it
     dismissals: Vec<(ChangeId, NoticeKey)>,        // every Dismiss Change, and the notice it hides
     fields: HashMap<(String, String), Vec<(Hlc, ChangeId, String)>>, // (record, field) → every value set
+    content: Vec<(ChangeId, Hlc)>,                 // every Change to the Work's content, as applied
+    content_set: HashSet<ChangeId>,                // the same, for lookups
+    milestones: Vec<(ChangeId, Hlc, String, Vec<(DeviceId, u32)>)>, // every Milestone: id, time, name, what it holds
     session: Option<(ChangeId, u64)>,              // this Device's current Session: (its first Change, time of the last)
     layout: Layout,
     // Worked out by `refresh` (or a fast path) after every Change, so reading the text doesn't redo it.
@@ -81,6 +84,30 @@ pub struct MergeNotice {
     pub text: String,
 }
 
+/// A named point in the History the Author can return to or compare against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Milestone {
+    pub id: ChangeId,
+    pub hlc: Hlc,
+    pub name: String,
+    /// What it holds: the highest Change counter the naming Device had seen from each Device.
+    pub seen: Vec<(DeviceId, u32)>,
+}
+
+/// What returning to a Milestone would do, for the Revert preview.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReturnPreview {
+    /// Every content Change that isn't part of the Milestone: all of them get reverted.
+    pub reverts: Vec<ChangeId>,
+    /// Those made before the Milestone on another Device that the naming Device hadn't seen yet.
+    pub made_earlier_elsewhere: Vec<ChangeId>,
+}
+
+/// Does a Milestone holding `seen` include `change`?
+fn holds(seen: &[(DeviceId, u32)], change: ChangeId) -> bool {
+    seen.iter().any(|&(d, c)| d == change.device && change.counter <= c)
+}
+
 /// A new Session starts after this long without a Change from this Device (to be tuned in use).
 pub const SESSION_GAP_MS: u64 = 30 * 60 * 1000;
 
@@ -103,6 +130,9 @@ impl Doc {
             typed_into: HashMap::new(),
             dismissals: Vec::new(),
             fields: HashMap::new(),
+            content: Vec::new(),
+            content_set: HashSet::new(),
+            milestones: Vec::new(),
             session: None, // a Work just opened: the first Change starts a new Session
             layout: Layout::default(),
             visible: Vec::new(),
@@ -244,7 +274,7 @@ impl Doc {
         self.apply_change(change);
         match &change.kind {
             // Dismissing a notice or setting a field changes no text: nothing to recompute.
-            ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } => self.debug_check(),
+            ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } | ChangeKind::Milestone { .. } => self.debug_check(),
             _ if new => self.refresh(),
             _ => {} // already had it
         }
@@ -306,6 +336,19 @@ impl Doc {
             // A Change of ours, e.g. loaded from the file: never reuse its counter.
             self.next_counter = self.next_counter.max(change.id.counter + 1);
         }
+        // Is it part of the Work's content (what a Milestone captures and returning reverts)?
+        // A Revert is content if anything it reverts is; Device names, Milestones and dismissed
+        // notices aren't.
+        let is_content = match &change.kind {
+            ChangeKind::Insert(_) | ChangeKind::Delete(_) | ChangeKind::Replace { .. } | ChangeKind::Move { .. } => true,
+            ChangeKind::Revert { targets } => targets.iter().any(|t| self.content_set.contains(t)),
+            ChangeKind::SetField { record, .. } => !is_meta_record(record),
+            ChangeKind::Dismiss { .. } | ChangeKind::Milestone { .. } => false,
+        };
+        if is_content {
+            self.content.push((change.id, change.hlc));
+            self.content_set.insert(change.id);
+        }
         match &change.kind {
             ChangeKind::Insert(run) => {
                 self.tree.insert_run(change.id, &run.text, run.parent, run.side, run.right_origin);
@@ -340,6 +383,10 @@ impl Doc {
             ChangeKind::SetField { record, field, value } => {
                 // Changes nothing in the text; field() picks the latest value in effect.
                 self.fields.entry((record.clone(), field.clone())).or_default().push((change.hlc, change.id, value.clone()));
+            }
+            ChangeKind::Milestone { name, seen } => {
+                // Changes nothing in the text; milestones() lists them.
+                self.milestones.push((change.id, change.hlc, name.clone(), seen.clone()));
             }
         }
     }
@@ -724,6 +771,102 @@ impl Doc {
     pub fn set_field_local(&mut self, record: &str, field: &str, value: &str, now_ms: u64) -> Change {
         let kind = ChangeKind::SetField { record: record.to_string(), field: field.to_string(), value: value.to_string() };
         self.commit_local(kind, now_ms)
+    }
+
+    // ---- Milestones ----
+
+    /// Names the current point in the History: exactly the Changes this Device has seen.
+    pub fn make_milestone_local(&mut self, name: &str, now_ms: u64) -> Change {
+        let mut seen: Vec<(DeviceId, u32)> = self.seen.iter().map(|(&d, &c)| (d, c)).collect();
+        seen.sort();
+        self.commit_local(ChangeKind::Milestone { name: name.to_string(), seen }, now_ms)
+    }
+
+    pub fn rename_milestone_local(&mut self, milestone: ChangeId, name: &str, now_ms: u64) -> Change {
+        self.set_field_local(&milestone_record(milestone), "name", name, now_ms)
+    }
+
+    /// The Milestones that haven't been deleted (reverted), in the fixed Change order,
+    /// with their current names.
+    pub fn milestones(&self) -> Vec<Milestone> {
+        let mut list: Vec<Milestone> = self.milestones.iter()
+            .filter(|(id, ..)| self.is_in_effect(*id))
+            .map(|(id, hlc, name, seen)| Milestone {
+                id: *id,
+                hlc: *hlc,
+                name: self.field(&milestone_record(*id), "name").unwrap_or(name).to_string(),
+                seen: seen.clone(),
+            })
+            .collect();
+        list.sort_by_key(|m| (m.hlc, m.id.device));
+        list
+    }
+
+    fn milestone(&self, id: ChangeId) -> &Vec<(DeviceId, u32)> {
+        self.milestones.iter().find(|(m, ..)| *m == id).map(|(_, _, _, seen)| seen).expect("no such Milestone")
+    }
+
+    /// Is `change` part of Milestone `milestone`?
+    pub fn in_milestone(&self, milestone: ChangeId, change: ChangeId) -> bool {
+        holds(self.milestone(milestone), change)
+    }
+
+    /// The text as it was at a Milestone, without changing anything.
+    pub fn text_at_milestone(&self, milestone: ChangeId) -> String {
+        let seen = self.milestone(milestone);
+        self.text_among(&|c| holds(seen, c))
+    }
+
+    /// What returning to a Milestone would revert: every content Change that isn't part of it.
+    /// `made_earlier_elsewhere` are the ones made before the Milestone on another Device (which
+    /// that Device simply hadn't seen yet), so the Author can choose to keep them.
+    pub fn return_preview(&self, milestone: ChangeId) -> ReturnPreview {
+        let seen = self.milestone(milestone);
+        let (hlc, device) = self.milestones.iter().find(|(m, ..)| *m == milestone).map(|(m, hlc, ..)| (*hlc, m.device)).expect("checked above");
+        // In the fixed Change order (not the order this Device happened to receive them).
+        let mut outside: Vec<(ChangeId, Hlc)> = self.content.iter().copied().filter(|&(id, _)| !holds(seen, id)).collect();
+        outside.sort_by_key(|&(id, h)| (h, id.device));
+        let made_earlier_elsewhere = outside.iter()
+            .filter(|&&(id, h)| h < hlc && id.device != device)
+            .map(|&(id, _)| id)
+            .collect();
+        let reverts = outside.into_iter().map(|(id, _)| id).collect();
+        ReturnPreview { reverts, made_earlier_elsewhere }
+    }
+
+    /// Returns the Work's content to a Milestone: one Revert of every content Change that isn't
+    /// part of it, except those in `keep`. Nothing is removed, and the Revert can itself be
+    /// reverted. None if there's nothing to revert.
+    pub fn return_to_milestone_local(&mut self, milestone: ChangeId, keep: &[ChangeId], now_ms: u64) -> Option<Change> {
+        let targets: Vec<ChangeId> = self.return_preview(milestone).reverts.into_iter()
+            .filter(|id| !keep.contains(id))
+            .collect();
+        if targets.is_empty() {
+            return None;
+        }
+        Some(self.commit_local(ChangeKind::Revert { targets }, now_ms))
+    }
+
+    /// The text if only the Changes `member` accepts had ever happened: Reverts outside the set
+    /// don't count, and nor do deletions or Moves outside it.
+    fn text_among(&self, member: &dyn Fn(ChangeId) -> bool) -> String {
+        let in_effect = |id: ChangeId| member(id) && self.is_in_effect_among(id, member);
+        let mut moves: Vec<(Hlc, MoveInfo)> = self.moves.iter().filter(|(_, m)| in_effect(m.id)).cloned().collect();
+        moves.sort_by_key(|(hlc, m)| (*hlc, m.id.device));
+        let moves: Vec<MoveInfo> = moves.into_iter().map(|(_, m)| m).collect();
+        let layout = Layout::compute(&self.tree, &moves, &self.typed_into);
+        layout.reading_nodes(&self.tree).into_iter()
+            .filter(|&n| in_effect(self.tree.change_at(n)) && !self.tree.deleters_at(n).iter().any(|&d| in_effect(d)))
+            .filter_map(|n| self.tree.char_at(n))
+            .collect()
+    }
+
+    /// Like `is_in_effect`, counting only Reverts that `member` accepts.
+    fn is_in_effect_among(&self, id: ChangeId, member: &dyn Fn(ChangeId) -> bool) -> bool {
+        match self.reverted_by.get(&id) {
+            Some(reverters) => reverters.iter().filter(|&&r| member(r)).all(|&r| !self.is_in_effect_among(r, member)),
+            None => true,
+        }
     }
 
     /// Gives this Device a readable name, shown in the History.
@@ -1356,6 +1499,85 @@ mod test {
         let mut doc = abcdef();
         doc.type_text(3, "XY", 2000);
         doc.move_local(0, 1, 6, 2100);
+    }
+
+    // ---- Milestones ----
+
+    #[test]
+    fn returning_to_a_milestone_puts_the_text_back_and_removes_nothing() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "The rain had stopped. Gulls circled.", 1000);
+        let draft = doc.make_milestone_local("Draft 1", 2000).id;
+        doc.delete_local(13, 7, 3000);                         // "stopped"
+        doc.insert_local(13, "eased", 4000);
+        doc.move_local(0, 20, 32, 5000);                       // shuffle things around
+        let later = doc.text();
+        assert_ne!(later, "The rain had stopped. Gulls circled.");
+        assert_eq!(doc.text_at_milestone(draft), "The rain had stopped. Gulls circled.");
+
+        let back = doc.return_to_milestone_local(draft, &[], 6000).unwrap();
+        assert_eq!(doc.text(), "The rain had stopped. Gulls circled.");
+        doc.revert_local(back.id, false, 7000);                // nothing was removed: undo the return
+        assert_eq!(doc.text(), later);
+    }
+
+    #[test]
+    fn returning_undoes_reverts_made_after_the_milestone() {
+        let mut doc = Doc::new(DeviceId(1));
+        let abc = doc.insert_local(0, "abc", 1000);
+        let draft = doc.make_milestone_local("Draft", 2000).id;
+        doc.revert_local(abc.id, false, 3000);
+        assert_eq!(doc.text(), "");
+        doc.return_to_milestone_local(draft, &[], 4000).unwrap();
+        assert_eq!(doc.text(), "abc");
+    }
+
+    #[test]
+    fn returning_leaves_device_names_and_later_milestones_alone() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.set_device_name_local("Laptop", 1000);
+        doc.insert_local(0, "abc", 1500);
+        let first = doc.make_milestone_local("First", 2000).id;
+        doc.set_device_name_local("Work laptop", 3000);
+        doc.insert_local(3, "def", 3500);
+        doc.make_milestone_local("Second", 4000);
+        doc.return_to_milestone_local(first, &[], 5000).unwrap();
+        assert_eq!(doc.text(), "abc");
+        assert_eq!(doc.device_name(DeviceId(1)), Some("Work laptop"));
+        let names: Vec<String> = doc.milestones().into_iter().map(|m| m.name).collect();
+        assert_eq!(names, ["First", "Second"]);
+    }
+
+    #[test]
+    fn the_preview_calls_out_changes_made_earlier_on_another_device() {
+        let (mut laptop, mut phone) = laptop_and_phone();     // "abcdef"
+        let offline = phone.insert_local(6, "X", 1500);        // the phone, offline...
+        let draft = laptop.make_milestone_local("Draft", 2000).id; // ...before the laptop names a Milestone
+        let after = laptop.insert_local(0, "Y", 3000);
+        laptop.apply(&offline);
+        let preview = laptop.return_preview(draft);
+        assert_eq!(preview.reverts, vec![offline.id, after.id]);
+        assert_eq!(preview.made_earlier_elsewhere, vec![offline.id]);
+
+        laptop.return_to_milestone_local(draft, &[offline.id], 4000).unwrap(); // keep the phone's "X"
+        assert_eq!(laptop.text(), "abcdefX");
+    }
+
+    #[test]
+    fn renaming_and_deleting_a_milestone() {
+        let mut doc = abcdef();
+        let draft = doc.make_milestone_local("Draft 2", 2000).id;
+        doc.rename_milestone_local(draft, "Draft 2, sent to editor", 3000);
+        assert_eq!(doc.milestones()[0].name, "Draft 2, sent to editor");
+        doc.revert_local(draft, false, 4000);                  // deleting it is reverting it
+        assert!(doc.milestones().is_empty());
+    }
+
+    #[test]
+    fn nothing_to_return_to_records_nothing() {
+        let mut doc = abcdef();
+        let draft = doc.make_milestone_local("Draft", 2000).id;
+        assert!(doc.return_to_milestone_local(draft, &[], 3000).is_none());
     }
 
     #[test]

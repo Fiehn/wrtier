@@ -162,7 +162,7 @@ _Avoid_: corruption, sync error
 - Reverting a **Change** also reverts, by default, every later **Change** that added text inside the text it wrote (and anything added inside that, in turn). Later deletions and **Moves** of that text are not reverted with it.
 - A **Revert** can itself be reverted.
 - A **Change** stays undone while any **Revert** of it is in effect; restoring a **Change** cancels every **Revert** of it.
-- Returning to a **Milestone** reverts every **Change** that isn't part of it; nothing is removed.
+- Returning to a **Milestone** reverts every **Change** to the **Work**'s content that isn't part of it, including later **Reverts**; nothing is removed. **Device** names, other **Milestones** and dismissed **Merge notices** stay as they are.
 - A **Milestone** holds exactly the **Changes** the **Device** that named it had seen. A **Change** made earlier on another **Device** that hadn't synced yet is not part of it.
 - A **Work**'s images are stored in its **History**; inserting or replacing an image is a **Change**.
 - A **Text file** is always derived from its **History**, never the other way round.
