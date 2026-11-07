@@ -2,6 +2,7 @@
 //! and answers the interface. The interface only displays and captures input (ADR 0005).
 
 pub mod device;
+pub mod library;
 pub mod patch;
 pub mod positions;
 pub mod recovery;
@@ -196,6 +197,36 @@ async fn preview_page(handle: AppHandle, id: String, page: usize, known: Option<
     .map_err(|e| e.to_string())?
 }
 
+/// The Style library: its Styles, Looks and Story elements, and Conflict copies to resolve.
+#[tauri::command]
+fn get_library(state: State<AppState>) -> Result<library::Library, String> {
+    with_app(&state, |app| Ok(open_vault_of(app)?.library()))
+}
+
+/// A library file's text, for its tab.
+#[tauri::command]
+fn read_library(state: State<AppState>, path: String) -> Result<String, String> {
+    with_app(&state, |app| library::read(&open_vault_of(app)?.root, &path))
+}
+
+/// Saves a library file from its tab.
+#[tauri::command]
+fn write_library(state: State<AppState>, path: String, text: String) -> Result<(), String> {
+    with_app(&state, |app| library::write(&open_vault_of(app)?.root, &path, &text))
+}
+
+/// Makes a new Style, Look or Story element. Returns its path.
+#[tauri::command]
+fn create_library(state: State<AppState>, kind: library::Kind, name: String, element: Option<library::NewElement>) -> Result<String, String> {
+    with_app(&state, |app| library::create(&open_vault_of(app)?.root, kind, &name, element))
+}
+
+/// Keeps one version of a library file that has a Conflict copy.
+#[tauri::command]
+fn resolve_library(state: State<AppState>, copy: String, keep: library::Keep) -> Result<(), String> {
+    with_app(&state, |app| library::resolve(&open_vault_of(app)?.root, &copy, keep))
+}
+
 /// What can go at a place in a Work's text (UTF-16), after a `#`: its Story elements and
 /// Typst's functions. Works with the Page preview closed too.
 #[tauri::command]
@@ -260,6 +291,10 @@ fn start_timer(handle: AppHandle) {
         let changed = with_app(&state, |app| Ok(app.vault.as_mut().map(|v| v.tick(now_ms())).unwrap_or_default()));
         for (id, state) in changed.unwrap_or_default() {
             let _ = handle.emit("work-status", WorkStatus { id, state });
+        }
+        // The Style library changed (in the app, in another editor, or from another Device).
+        if with_app(&state, |app| Ok(app.vault.as_mut().is_some_and(|v| v.library_changed()))).unwrap_or(false) {
+            let _ = handle.emit("library-changed", ());
         }
     });
 }
@@ -446,6 +481,11 @@ pub fn run() {
             preview_jump,
             preview_locate,
             complete_at,
+            get_library,
+            read_library,
+            write_library,
+            create_library,
+            resolve_library,
             forget_preview,
         ])
         .run(tauri::generate_context!())

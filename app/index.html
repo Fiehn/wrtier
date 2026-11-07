@@ -22,6 +22,16 @@
           </div>
         </header>
         <ul id="works"></ul>
+        <details id="library" hidden>
+          <summary>Style library</summary>
+          <div id="library-conflicts"></div>
+          <div id="library-list"></div>
+          <div class="row library-new">
+            <button type="button" class="link" id="new-style">New Style…</button>
+            <button type="button" class="link" id="new-look">New Look…</button>
+            <button type="button" class="link" id="new-element">New Story element…</button>
+          </div>
+        </details>
         <details id="trash" hidden>
           <summary>Trash</summary>
           <ul id="trash-list"></ul>
@@ -96,6 +106,39 @@
         <menu>
           <button type="button" data-close="cancel">Cancel</button>
           <button value="yes" id="ask-confirm-yes">Yes</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="ask-element">
+      <form method="dialog" class="element-form">
+        <h2>New Story element</h2>
+        <label>Written as
+          <span class="hash-name">#<input id="element-name" required maxlength="40" autocomplete="off" placeholder="dream" /></span>
+        </label>
+        <p class="muted">Small letters, digits and -, e.g. <code>dream</code> or <code>radio-message</code>.</p>
+        <label>Its name <input id="element-title" maxlength="60" autocomplete="off" placeholder="Dream" /></label>
+        <label>In the Formatted view
+          <select id="element-shown">
+            <option value="block">A block on its own lines</option>
+            <option value="chip">A chip inside a line</option>
+          </select>
+        </label>
+        <label>In a .docx Export
+          <select id="element-docx">
+            <option value="plain text">Plain text</option>
+            <option value="indented block">Indented block</option>
+            <option value="centred paragraph">Centred paragraph</option>
+            <option value="chapter heading">Chapter heading (new page)</option>
+            <option value="part heading">Part heading (new page, centred)</option>
+            <option value="centred #">A centred # line</option>
+            <option value="left out">Left out</option>
+          </select>
+        </label>
+        <label>What it's for <input id="element-description" maxlength="200" autocomplete="off" placeholder="A dream, set apart from the waking text." /></label>
+        <menu>
+          <button type="button" data-close="cancel">Cancel</button>
+          <button value="ok">Create</button>
         </menu>
       </form>
     </dialog>

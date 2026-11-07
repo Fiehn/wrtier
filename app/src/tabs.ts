@@ -1,10 +1,12 @@
-// Tabs: the Works open in the app. Each has its own editor (so a tab in the background still
-// takes in changes from other Devices) and its own undo; one is shown at a time.
+// Tabs: the Works open in the app, and the Style library files. Each has its own editor (so a
+// tab in the background still takes in changes from other Devices) and its own undo; one is
+// shown at a time.
 
 import { invoke } from "@tauri-apps/api/core";
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, dropCursor, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from "@codemirror/view";
-import { history, standardKeymap } from "@codemirror/commands";
+import { history, historyKeymap, standardKeymap } from "@codemirror/commands";
+import { LibraryFile, fromDisk } from "./libraryfile";
 import { WorkSync, type WorkState } from "./sync";
 import { formattedView } from "./formatted";
 import { toggleMarkup } from "./shortcuts";
@@ -12,6 +14,9 @@ import { dragToMove } from "./dragging";
 import { completions } from "./completion";
 
 export type OpenedWork = { id: string; name: string; text: string; problems: { path: string; reason: string }[]; notice: string | null };
+
+/** A Style library file to open in a tab. */
+export type OpenedLibraryFile = { path: string; title: string; text: string };
 
 export type Layout = { tabs: string[]; active: string | null; cursors: Record<string, number> };
 
@@ -47,18 +52,42 @@ function lineExtensions(options: EditorOptions) {
   ];
 }
 
-/** One open Work. */
+/** One open Work, or one Style library file. */
 class Tab {
   readonly view: EditorView;
-  readonly sync: WorkSync;
+  /** Keeps a Work in step with its History; a library file has none. */
+  private readonly worksSync: WorkSync | null = null;
+  /** A library file, saved to disk as it is. */
+  readonly file: LibraryFile | null = null;
   readonly pane: HTMLElement;
   readonly label: HTMLElement;
   /** The last word from Rust about it, and a line to show at its top (recovered, took in…). */
   state: WorkState | null = null;
   notice: string | null;
 
-  constructor(work: OpenedWork, tabs: Tabs) {
-    this.notice = work.notice;
+  /** A Work's sync (only Work tabs have one). */
+  get sync(): WorkSync {
+    if (!this.worksSync) throw new Error(`${this.id} isn't a Work.`);
+    return this.worksSync;
+  }
+
+  get isWork() {
+    return this.worksSync !== null;
+  }
+
+  get id(): string {
+    return this.worksSync?.id ?? this.file!.id;
+  }
+
+  /** Resolves once everything typed has reached Rust (a Work) or the disk (a library file). */
+  idle(): Promise<void> {
+    return this.worksSync ? this.worksSync.idle() : this.file!.flush();
+  }
+
+  constructor(content: OpenedWork | OpenedLibraryFile, tabs: Tabs) {
+    this.notice = "path" in content
+      ? `Style library: ${content.path}. Saved as you type, and used by every Work that has it.`
+      : content.notice;
     this.pane = document.createElement("div");
     this.pane.className = "pane";
     this.pane.hidden = true;
@@ -72,15 +101,40 @@ class Tab {
     const name = document.createElement("button");
     name.type = "button";
     name.className = "tab-name";
-    name.addEventListener("click", () => void tabs.activate(this.sync.id));
+    name.addEventListener("click", () => void tabs.activate(this.id));
     const close = document.createElement("button");
     close.type = "button";
     close.className = "tab-close";
     close.title = "Close (Ctrl+W)";
     close.textContent = "×";
-    close.addEventListener("click", () => void tabs.close(this.sync.id));
+    close.addEventListener("click", () => void tabs.close(this.id));
     this.label.append(name, close);
     tabs.bar.append(this.label);
+
+    if ("path" in content) {
+      // A library file: plain Typst in the Raw view, with the editor's own undo.
+      this.label.classList.add("library");
+      this.file = new LibraryFile(content.path, (message) => tabs.events.error(message));
+      this.view = new EditorView({
+        parent: editor,
+        state: EditorState.create({
+          doc: content.text,
+          extensions: [
+            EditorView.lineWrapping,
+            history(),
+            keymap.of([...historyKeymap, ...standardKeymap]),
+            linesCompartment.of(lineExtensions(tabs.options)),
+            EditorView.updateListener.of((update) => {
+              if (update.transactions.some((tr) => tr.docChanged && !tr.annotation(fromDisk))) this.file!.edited();
+            }),
+          ],
+        }),
+      });
+      this.file.view = this.view;
+      this.setLabel(content.path, content.title);
+      return;
+    }
+    const work = content;
 
     // Ctrl+Z and redo: the sync decides between the editor's own undo (inside a draft) and the History's.
     const undoKeys = keymap.of([
@@ -113,7 +167,7 @@ class Tab {
         ],
       }),
     });
-    this.sync = new WorkSync(work.id, this.view, {
+    this.worksSync = new WorkSync(work.id, this.view, {
       state: (state) => {
         this.state = state;
         if (state.tookIn) this.notice = state.tookIn;
@@ -143,9 +197,13 @@ class Tab {
 
   rename(id: string, name: string) {
     this.sync.id = id;
+    this.setLabel(id, name);
+  }
+
+  private setLabel(title: string, name: string) {
     const button = this.label.querySelector(".tab-name") as HTMLElement;
     button.textContent = name;
-    button.title = id;
+    button.title = title;
   }
 
   get name() {
@@ -179,7 +237,7 @@ export class Tabs {
   setFormatted(on: boolean) {
     this.formatted = on;
     for (const tab of this.open) {
-      tab.view.dispatch({ effects: viewCompartment.reconfigure(on ? formattedView() : []) });
+      if (tab.isWork) tab.view.dispatch({ effects: viewCompartment.reconfigure(on ? formattedView() : []) });
     }
   }
 
@@ -192,15 +250,15 @@ export class Tabs {
   ) {}
 
   get active(): string | null {
-    return this.front?.sync.id ?? null;
+    return this.front?.id ?? null;
   }
 
   has(id: string) {
-    return this.open.some((tab) => tab.sync.id === id);
+    return this.open.some((tab) => tab.id === id);
   }
 
   private find(id: string) {
-    return this.open.find((tab) => tab.sync.id === id);
+    return this.open.find((tab) => tab.id === id);
   }
 
   /** Shows an opened Work in a new tab (or the tab it already has). `cursor`: where to put it. */
@@ -237,7 +295,8 @@ export class Tabs {
   /** The Author left a Work for now (another tab, another window): its Text file catches up. */
   async leave(tab: Tab | null = this.front) {
     if (!tab) return;
-    await tab.sync.idle();
+    await tab.idle();
+    if (!tab.isWork) return; // a library file: saved, nothing more
     try {
       const state = await invoke<WorkState>("leave_work", { id: tab.sync.id });
       tab.state = state;
@@ -251,27 +310,29 @@ export class Tabs {
   async close(id: string, how: "close" | "discard" = "close") {
     const tab = this.find(id);
     if (!tab) return;
-    await tab.sync.idle();
-    try {
-      await invoke(how === "close" ? "close_work" : "discard_work", { id: tab.sync.id });
-    } catch (e) {
-      this.events.error(String(e));
+    await tab.idle();
+    if (tab.isWork) {
+      try {
+        await invoke(how === "close" ? "close_work" : "discard_work", { id: tab.sync.id });
+      } catch (e) {
+        this.events.error(String(e));
+      }
     }
     const index = this.open.indexOf(tab);
     this.open.splice(index, 1);
     tab.destroy();
-    this.events.closed(tab.sync.id);
+    this.events.closed(tab.id);
     if (tab === this.front) {
       this.front = null;
       const next = this.open[Math.min(index, this.open.length - 1)];
-      if (next) await this.activate(next.sync.id);
+      if (next) await this.activate(next.id);
       else this.show(null);
     }
     this.events.changed();
   }
 
   async closeAll() {
-    for (const tab of [...this.open]) await this.close(tab.sync.id);
+    for (const tab of [...this.open]) await this.close(tab.id);
   }
 
   /** A Work was renamed (here, or on another Device and followed). */
@@ -290,7 +351,7 @@ export class Tabs {
 
   /** Resolves once everything typed in this Work has reached Rust. */
   async settled(id: string) {
-    await this.find(id)?.sync.idle();
+    await this.find(id)?.idle();
   }
 
   /** Brings a Work to the front and selects a stretch of its text (UTF-16 positions). */
@@ -305,7 +366,31 @@ export class Tabs {
 
   /** What the timer said about a Work (Rust names it by the ID the tab had). */
   status(id: string, state: WorkState) {
-    this.find(id)?.sync.status(state);
+    const tab = this.find(id);
+    if (tab?.isWork) tab.sync.status(state);
+  }
+
+  /** Is the tab in front a Work's (not a library file's)? */
+  get activeIsWork(): boolean {
+    return this.front?.isWork ?? false;
+  }
+
+  /** Opens a Style library file in a tab (or brings its tab to the front). */
+  async addLibrary(file: OpenedLibraryFile) {
+    const tab = this.open.find((t) => t.file?.path === file.path) ?? new Tab(file, this);
+    if (!this.open.includes(tab)) this.open.push(tab);
+    await this.activate(tab.id);
+  }
+
+  /** The Style library changed on disk: open library files take it in. */
+  async libraryChanged() {
+    for (const tab of this.open) {
+      if (!tab.file) continue;
+      if (!(await tab.file.reload())) {
+        tab.notice = `${tab.file.path} is no longer in the Style library (deleted or renamed elsewhere). What's here is saved again if you type in it.`;
+        if (tab === this.front) this.show(tab);
+      }
+    }
   }
 
   /** A tab heard from Rust: follow a rename, and refresh what's shown if it's in front. */
@@ -321,13 +406,13 @@ export class Tabs {
   /** Where each tab's cursor is, for remembering. */
   layout(): Layout {
     const cursors: Record<string, number> = {};
-    for (const tab of this.open) cursors[tab.sync.id] = tab.view.state.selection.main.head;
-    return { tabs: this.open.map((t) => t.sync.id), active: this.active, cursors };
+    for (const tab of this.open) cursors[tab.id] = tab.view.state.selection.main.head;
+    return { tabs: this.open.map((t) => t.id), active: this.active, cursors };
   }
 
   /** Waits until everything typed in every tab has reached Rust. */
   async idle() {
-    for (const tab of this.open) await tab.sync.idle();
+    for (const tab of this.open) await tab.idle();
   }
 
   private show(tab: Tab | null) {

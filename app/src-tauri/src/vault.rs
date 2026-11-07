@@ -13,6 +13,7 @@ use wrtier::conflicts::{self, absorb_conflict_copies, conflict_copies, Absorbed}
 use wrtier::doc::Doc;
 use wrtier::ids::DeviceId;
 use wrtier::storage::{self, Probe};
+use crate::library;
 use crate::recovery::{self, Recovery};
 use crate::work::{undoable, Op, OpenWork, Whereabouts, WorkState};
 use wrtier::change::Change;
@@ -42,7 +43,15 @@ pub struct Vault {
     aliases: HashMap<String, String>,
     /// `vault.db` as this Vault last wrote or read it: if it changes, another Device's settings arrived.
     vault_stamp: Option<(std::time::SystemTime, u64)>,
+    /// The Style library's files as last seen: if they change, the interface hears of it.
+    library_stamp: Vec<(PathBuf, u64, Option<std::time::SystemTime>)>,
+    /// Why the default Styles couldn't be written, if they couldn't.
+    defaults_problem: Option<String>,
 }
+
+/// The record in `vault.db` saying which of the app's default Styles were written (ADR 0012):
+/// one field per file, holding the version written.
+const DEFAULTS_RECORD: &str = "defaults";
 
 mod moves;
 mod settings;
@@ -201,9 +210,37 @@ impl Vault {
             ignore_problem: ignore_journals(root).err(),
             aliases: HashMap::new(),
             vault_stamp: file_stamp(&file),
+            library_stamp: Vec::new(),
+            defaults_problem: None,
         };
         vault.absorb_vault_copies(&mut Vec::new()); // any left are reported when the Works are listed
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        vault.defaults_problem = vault.write_defaults(now_ms).err();
+        vault.library_stamp = library::stamp(root);
         Ok(Opened::Vault(vault))
+    }
+
+    /// Writes the app's default Styles, Looks and Story elements the Vault has never had, and
+    /// records them in `vault.db`, so one the Author deletes never comes back (ADR 0012).
+    fn write_defaults(&mut self, now_ms: u64) -> Result<(), String> {
+        let written = library::write_defaults(&self.root, |path| self.vault_doc.field(DEFAULTS_RECORD, path).is_some())?;
+        let changes: Vec<Change> = written.iter()
+            .map(|path| self.vault_doc.set_field_local(DEFAULTS_RECORD, path, library::DEFAULTS_VERSION, now_ms))
+            .collect();
+        if changes.is_empty() { Ok(()) } else { self.save_vault(&changes) }
+    }
+
+    /// The Style library, and its Conflict copies waiting for the Author.
+    pub fn library(&self) -> library::Library {
+        library::list(&self.root)
+    }
+
+    /// Has anything in the Style library changed since this was last asked (here or elsewhere)?
+    pub fn library_changed(&mut self) -> bool {
+        let now = library::stamp(&self.root);
+        let changed = now != self.library_stamp;
+        self.library_stamp = now;
+        changed
     }
 
     pub fn device(&self) -> DeviceId {
@@ -289,6 +326,12 @@ impl Vault {
         let mut problems = Vec::new();
         if let Some(reason) = &self.ignore_problem {
             problems.push(SyncProblem { path: ".stignore".into(), reason: format!("couldn't add *-journal to it: {reason}") });
+        }
+        if let Some(reason) = &self.defaults_problem {
+            problems.push(SyncProblem { path: library::FOLDER.into(), reason: format!("couldn't write the default Styles: {reason}") });
+        }
+        for conflict in library::list(&self.root).conflicts {
+            problems.push(SyncProblem { path: conflict.copy, reason: format!("another version of {}: pick one in the Style library", conflict.path) });
         }
         // Writing kept from before the app closed unexpectedly goes back first.
         for id in recovery::kept_for(&self.recovery_dir, &self.root) {
@@ -811,6 +854,36 @@ mod tests {
             Opened::Vault(v) => v,
             Opened::NotAVault => panic!("asked to create it"),
         }
+    }
+
+    #[test]
+    fn a_new_vault_gets_the_default_styles_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open(dir.path());
+        assert_eq!(vault.library().items.len(), library::DEFAULTS.len());
+        assert_eq!(vault.vault_doc.field(DEFAULTS_RECORD, "Paperback.look"), Some(library::DEFAULTS_VERSION));
+        assert!(!vault.library_changed(), "writing them isn't a change from outside");
+        // An edit in another editor is noticed (the timer asks every second).
+        std::fs::write(dir.path().join("styles/Book text.typ"), "// Style: Book text\n// Edited in vim.\n\n#set text(size: 12pt)\n").unwrap();
+        assert!(vault.library_changed());
+        assert!(!vault.library_changed(), "and only once");
+        // A default the Author deleted stays deleted, on this Device or another.
+        std::fs::remove_file(dir.path().join("styles/A4 draft.look")).unwrap();
+        drop(vault);
+        let Opened::Vault(other) = Vault::open(dir.path(), OTHER, false, &dir.path().join(".recovery")).unwrap() else { panic!() };
+        assert!(!dir.path().join("styles/A4 draft.look").exists());
+        assert_eq!(other.library().items.len(), library::DEFAULTS.len() - 1);
+        // The library isn't listed as Works.
+        assert!(!other.walk().typs.iter().any(|t| t.starts_with(dir.path().join("styles"))));
+    }
+
+    #[test]
+    fn a_conflict_copy_in_the_library_is_a_sync_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open(dir.path());
+        std::fs::write(dir.path().join("styles/A4 page.sync-conflict-20261107-101500-ABCDEFG.typ"), "// Style: A4 page\n").unwrap();
+        let listing = vault.list(1000);
+        assert!(listing.problems.iter().any(|p| p.path == "styles/A4 page.sync-conflict-20261107-101500-ABCDEFG.typ" && p.reason.contains("A4 page.typ")), "{:?}", listing.problems);
     }
 
     /// A Work `name` with `text`, written by `device`, with its Text file.

@@ -5,6 +5,8 @@ import { Tabs, type Layout, type OpenedWork } from "./tabs";
 import { buildTree, foldersOf, type Folder } from "./tree";
 import { showMenu, type MenuItem } from "./menu";
 import { PagePreview } from "./preview";
+import { LibraryPanel } from "./library";
+import { libraryPath } from "./libraryfile";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -117,9 +119,10 @@ function act(run: () => Promise<unknown>) {
 const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $("status"), moved: $("moved") }, {
   changed: () => {
     $("empty").hidden = tabs.active !== null;
-    $("view-mode").hidden = tabs.active === null;
-    $("preview-toggle").hidden = tabs.active === null;
-    preview.show(tabs.active);
+    // A library file is plain Typst: no Formatted view, and no pages of its own.
+    $("view-mode").hidden = !tabs.activeIsWork;
+    $("preview-toggle").hidden = !tabs.activeIsWork;
+    preview.show(tabs.activeIsWork ? tabs.active : null);
     rememberSoon();
     highlightOpen();
   },
@@ -175,7 +178,49 @@ function remember() {
   invoke("save_layout", { layout: tabs.layout() }).catch(showError);
 }
 
+// ---- The Style library ----
+
+const library: LibraryPanel = new LibraryPanel($("library-list"), $("library-conflicts"), {
+  open: (path, title) => openLibraryFile(path, title),
+  error: showError,
+});
+
+async function openLibraryFile(path: string, title: string = library.titleOf(path)): Promise<void> {
+  const text = await invoke<string>("read_library", { path });
+  await tabs.addLibrary({ path, title, text });
+}
+
+// The library changed: in a tab here, in another editor, or from another Device.
+void listen("library-changed", () => {
+  library.refresh().catch(showError);
+  void tabs.libraryChanged();
+});
+
+$("new-style").addEventListener("click", () => act(async () => {
+  const name = await askText("What's the new Style called?", "", "Create", "One small thing it does, e.g. Drop caps or Large print.");
+  if (name !== null) await library.create("style", name);
+}));
+$("new-look").addEventListener("click", () => act(async () => {
+  const name = await askText("What's the new Look called?", "", "Create", "What it's for, e.g. Hardback or Large print.");
+  if (name !== null) await library.create("look", name);
+}));
+$("new-element").addEventListener("click", () => act(async () => {
+  const field = (id: string) => $<HTMLInputElement>(id);
+  for (const id of ["element-name", "element-title", "element-description"]) field(id).value = "";
+  const answer = ask($<HTMLDialogElement>("ask-element"));
+  field("element-name").focus();
+  if ((await answer) !== "ok") return;
+  await library.create("storyElement", field("element-name").value.trim(), {
+    title: field("element-title").value,
+    shownAs: $<HTMLSelectElement>("element-shown").value,
+    docx: $<HTMLSelectElement>("element-docx").value,
+    description: field("element-description").value,
+  });
+}));
+
 async function openWork(id: string, cursor?: number) {
+  const path = libraryPath(id);
+  if (path) return openLibraryFile(path);
   if (tabs.has(id)) return tabs.activate(id);
   const work = await invoke<OpenedWork>("open_work", { id });
   await tabs.add(work, cursor);
@@ -226,6 +271,8 @@ async function openVault(path: string) {
   if (opened.deviceName === null) await askDeviceName(opened.suggestedName);
   applySettings(await invoke<Settings>("get_settings"));
   await refreshList();
+  $("library").hidden = false;
+  await library.refresh();
   // The tabs that were open here last time, each with its cursor where it was.
   const layout = await invoke<Layout>("get_layout");
   for (const id of layout.tabs) {

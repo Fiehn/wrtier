@@ -1,0 +1,8 @@
+// Look: Paperback
+// A printed novel: trade paperback pages, book typography, Chapters opening on a new page.
+// One Style per line. When two Styles set the same thing, the one further down wins.
+
+Paperback page
+Book text
+Chapter openings
+Page numbers

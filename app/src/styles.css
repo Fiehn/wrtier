@@ -260,6 +260,88 @@ kbd {
   margin: 4px 0;
 }
 
+/* ---- The Style library ---- */
+
+#library {
+  margin-top: 16px;
+  font-size: 13px;
+}
+
+#library summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+#library h3 {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+#library ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+#library li.muted {
+  padding: 2px 6px;
+}
+
+.library-item {
+  all: unset;
+  display: block;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 5px;
+  overflow-wrap: anywhere;
+}
+
+.library-item:hover,
+.library-item:focus-visible {
+  background: var(--chip);
+}
+
+.library-item code {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* A file with something wrong in it: still listed, with the problem in its tooltip. */
+.library-item.has-problem::after {
+  content: " ⚠";
+  color: var(--warn-text);
+}
+
+.library-new {
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.library-conflict {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  padding: 6px 8px;
+  border-radius: 5px;
+  margin-top: 8px;
+}
+
+.library-conflict p {
+  margin: 0 0 6px;
+}
+
+.library-conflict button {
+  margin: 0 4px 4px 0;
+}
+
+/* A library file's tab: set apart from the Works' tabs. */
+.tab.library .tab-name {
+  font-style: italic;
+}
+
 #trash {
   margin-top: 16px;
   color: var(--muted);
@@ -736,6 +818,23 @@ dialog h2 {
 #settings label {
   display: block;
   margin-top: 10px;
+}
+
+.element-form label {
+  display: block;
+  margin-top: 10px;
+}
+
+.element-form p.muted {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+
+.hash-name {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 
 #settings label.here {
