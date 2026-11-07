@@ -9,6 +9,7 @@ import { WorkSync, type WorkState } from "./sync";
 import { formattedView } from "./formatted";
 import { toggleMarkup } from "./shortcuts";
 import { dragToMove } from "./dragging";
+import { completions } from "./completion";
 
 export type OpenedWork = { id: string; name: string; text: string; problems: { path: string; reason: string }[]; notice: string | null };
 
@@ -101,6 +102,7 @@ class Tab {
           keymap.of(standardKeymap),
           dropCursor(),
           dragToMove(),
+          completions({ work: () => this.sync.id, settled: () => this.sync.idle() }),
           viewCompartment.of(tabs.formatted ? formattedView() : []),
           linesCompartment.of(lineExtensions(tabs.options)),
           EditorView.updateListener.of((update) => {

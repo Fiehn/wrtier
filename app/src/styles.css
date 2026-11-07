@@ -495,6 +495,51 @@ main > :not(#panes) {
   border-radius: 5px;
 }
 
+/* ---- Completions (typing `#`) ---- */
+
+.editor .cm-tooltip-autocomplete > ul {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  max-height: 18em;
+  min-width: 16em;
+}
+
+.editor .cm-tooltip-autocomplete > ul > li {
+  padding: 2px 10px;
+}
+
+.editor .cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.editor .cm-tooltip-autocomplete completion-section {
+  display: block;
+  padding: 4px 10px 2px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+
+.editor .cm-completionDetail {
+  margin-left: 0.8em;
+  font-style: normal;
+  color: var(--muted);
+}
+
+.editor li[aria-selected] .cm-completionDetail {
+  color: inherit;
+}
+
+.editor .cm-completionInfo {
+  max-width: 26em;
+  padding: 6px 10px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+}
+
 .tab {
   display: flex;
   align-items: center;

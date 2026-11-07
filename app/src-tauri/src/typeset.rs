@@ -212,6 +212,28 @@ pub enum JumpTo {
     Pages { spot: Spot },
 }
 
+/// What can go at the cursor (after a `#`), from Typst's own autocompleter.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Completions {
+    /// Where the text the completions replace starts (UTF-16): just after the `#`.
+    pub from: usize,
+    pub items: Vec<CompletionItem>,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionItem {
+    pub label: String,
+    /// What picking it types, as a snippet: `${}` marks where the cursor goes.
+    pub apply: String,
+    pub detail: Option<String>,
+    /// "function", "type", "constant", "parameter", "syntax" or "other".
+    pub kind: &'static str,
+    /// The Work's own (its Story elements, and anything else it defines) or Typst's.
+    pub story_element: bool,
+}
+
 /// What a compile gives the Page preview.
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -270,19 +292,60 @@ impl Typesetter {
         fonts
     }
 
-    /// Compiles a Work's text as it is now. `fonts_dir`: its Vault's `fonts/` folder.
-    pub fn compile(&mut self, id: &str, fonts_dir: &Path, text: String) -> Compiled {
-        let start = Instant::now();
+    /// A Work's preview, made if it has none yet, with its text as it is now.
+    fn preview(&mut self, id: &str, fonts_dir: &Path, text: &str) -> &mut Preview {
         let fonts = self.fonts(fonts_dir);
         let preview = self.previews.entry(id.to_string()).or_insert_with(|| Preview {
             world: WorkWorld {
                 library: LazyHash::new(Library::default()),
-                fonts: fonts.clone(),
+                fonts,
                 main: Source::new(main_id(), String::new()),
             },
             last_good: None,
         });
-        preview.world.main.replace(&text);
+        preview.world.main.replace(text);
+        preview
+    }
+
+    /// What can go at `at` (UTF-16) in a Work's text as it is now: after a `#`, every Story
+    /// element and Typst function in scope there. `explicit`: asked for (Ctrl+Space), not just
+    /// typed, so it may also offer completions where nothing was started yet.
+    pub fn complete(&mut self, id: &str, fonts_dir: &Path, text: &str, at: usize, explicit: bool) -> Option<Completions> {
+        let preview = self.preview(id, fonts_dir, text);
+        let source = &preview.world.main;
+        let cursor = source.lines().utf16_to_byte(at)?;
+        let found = catch_unwind(AssertUnwindSafe(|| {
+            typst_ide::autocomplete(&preview.world, preview.last_good.as_ref(), source, cursor, explicit)
+        }));
+        let (from, completions) = found.ok()??;
+        let typst = preview.world.library.global.scope();
+        let items = completions.into_iter().map(|c| {
+            let kind = match c.kind {
+                typst_ide::CompletionKind::Func => "function",
+                typst_ide::CompletionKind::Type => "type",
+                typst_ide::CompletionKind::Constant => "constant",
+                typst_ide::CompletionKind::Param => "parameter",
+                typst_ide::CompletionKind::Syntax => "syntax",
+                _ => "other",
+            };
+            // Anything that isn't part of Typst itself was defined for this Work.
+            let story_element = matches!(kind, "function" | "constant") && typst.get(&c.label).is_none();
+            CompletionItem {
+                apply: c.apply.map(|a| a.to_string()).unwrap_or_else(|| c.label.to_string()),
+                label: c.label.to_string(),
+                detail: c.detail.map(|d| d.to_string()),
+                kind,
+                story_element,
+            }
+        }).collect();
+        Some(Completions { from: source.lines().byte_to_utf16(from)?, items })
+    }
+
+    /// Compiles a Work's text as it is now. `fonts_dir`: its Vault's `fonts/` folder.
+    pub fn compile(&mut self, id: &str, fonts_dir: &Path, text: String) -> Compiled {
+        let start = Instant::now();
+        let fonts = self.fonts(fonts_dir);
+        let preview = self.preview(id, fonts_dir, &text);
         let outcome = catch_unwind(AssertUnwindSafe(|| typst::compile::<PagedDocument>(&preview.world)));
         // Forget cached work this compile didn't use, or memory grows with every edit (Phase 0b).
         comemo::evict(1);
@@ -615,6 +678,36 @@ mod tests {
         assert!(spot.x > before.x, "the inset moves it right: {before:?} → {spot:?}");
         // On `#dream[`: the text inside it.
         assert!(t.locate("Rain", at(text, "#dream[")).is_some());
+    }
+
+    fn complete(t: &mut Typesetter, text: &str) -> Completions {
+        let at = text.find('|').unwrap();
+        let text = text.replace('|', "");
+        t.complete("Rain", Path::new("no-fonts-here"), &text, at, false).expect("completions")
+    }
+
+    #[test]
+    fn a_hash_lists_story_elements_and_typst() {
+        let mut t = Typesetter::new(false);
+        let c = complete(&mut t, "#let dream(body) = emph(body)\n\nShe slept. #|");
+        assert_eq!(c.from, "#let dream(body) = emph(body)\n\nShe slept. #".len());
+        let dream = c.items.iter().find(|i| i.label == "dream").expect("the Work's own element is offered");
+        assert!(dream.story_element);
+        assert!(dream.apply.starts_with("dream"), "{:?}", dream.apply);
+        let text = c.items.iter().find(|i| i.label == "text").expect("Typst's own functions too");
+        assert!(!text.story_element);
+        assert!(c.items.len() > 50, "everything Typst has: {}", c.items.len());
+    }
+
+    #[test]
+    fn what_is_typed_after_the_hash_is_what_gets_replaced() {
+        let mut t = Typesetter::new(false);
+        let c = complete(&mut t, "#let dream(body) = emph(body)\n\n#dr|");
+        assert_eq!(c.from, "#let dream(body) = emph(body)\n\n#".len());
+        assert!(c.items.iter().any(|i| i.label == "dream"));
+        // Plain prose offers nothing.
+        let mut t = Typesetter::new(false);
+        assert!(t.complete("Rain", Path::new("x"), "The rain had", 12, false).is_none_or(|c| c.items.is_empty()));
     }
 
     #[test]

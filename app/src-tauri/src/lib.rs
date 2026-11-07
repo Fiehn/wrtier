@@ -196,6 +196,24 @@ async fn preview_page(handle: AppHandle, id: String, page: usize, known: Option<
     .map_err(|e| e.to_string())?
 }
 
+/// What can go at a place in a Work's text (UTF-16), after a `#`: its Story elements and
+/// Typst's functions. Works with the Page preview closed too.
+#[tauri::command]
+async fn complete_at(handle: AppHandle, id: String, at: usize, explicit: bool) -> Result<Option<typeset::Completions>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (text, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
+            let vault = open_vault_of(app)?;
+            let (text, _) = vault.work_text(&id, now_ms())?;
+            Ok((text, vault.root.join("fonts")))
+        })?;
+        let state = handle.state::<TypesetState>();
+        let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(typesetter.complete(&id, &fonts_dir, &text, at, explicit))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Where a click on a page of the Page preview leads (points from the page's top left).
 #[tauri::command]
 async fn preview_jump(handle: AppHandle, id: String, page: usize, x: f64, y: f64) -> Result<Option<typeset::JumpTo>, String> {
@@ -427,6 +445,7 @@ pub fn run() {
             preview_page,
             preview_jump,
             preview_locate,
+            complete_at,
             forget_preview,
         ])
         .run(tauri::generate_context!())
