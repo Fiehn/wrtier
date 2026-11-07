@@ -36,6 +36,7 @@
           <button id="sidebar-toggle" type="button" title="Hide the Works (Ctrl+\)" aria-label="Show or hide the Works">☰</button>
           <nav id="tabbar"></nav>
           <button id="view-mode" type="button" class="link" title="Ctrl+E" hidden>Raw view</button>
+        <button id="preview-toggle" type="button" class="link" title="Ctrl+Shift+P" hidden>Pages</button>
         </div>
         <div id="notice" hidden></div>
         <div id="moved" hidden></div>
@@ -43,6 +44,15 @@
         <div id="panes"></div>
         <p id="empty" class="muted">Open a Vault, then choose a Work on the left, or press Ctrl+O.</p>
       </main>
+
+      <aside id="preview" hidden>
+        <header>
+          <strong>Page preview</strong>
+          <button id="preview-close" type="button" class="link" title="Hide the Page preview (Ctrl+Shift+P)">Hide</button>
+        </header>
+        <div id="preview-bar" hidden></div>
+        <div id="preview-pages"></div>
+      </aside>
     </div>
 
     <dialog id="ask-create">
@@ -116,6 +126,8 @@
         <label class="here"><input type="checkbox" id="line-numbers-here" /> Only on this device</label>
         <label class="check"><input type="checkbox" id="highlight-line" /> Shade the line the cursor is on</label>
         <label class="here"><input type="checkbox" id="highlight-line-here" /> Only on this device</label>
+        <label class="check"><input type="checkbox" id="preview-follows" /> The Page preview follows the cursor</label>
+        <label class="here"><input type="checkbox" id="preview-follows-here" /> Only on this device</label>
         <p class="muted">Settings are kept in the Vault, so every device that opens it uses them, unless it has its own.</p>
         <menu>
           <button value="done">Done</button>

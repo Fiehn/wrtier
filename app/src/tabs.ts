@@ -21,6 +21,14 @@ export type TabEvents = {
   error(message: string): void;
   /** Asks the Author for a name; null if they cancelled. */
   askName(question: string, initial: string): Promise<string | null>;
+  /** A Work's text changed in its editor (typed, or taken in from elsewhere). */
+  edited(id: string): void;
+  /** A typing burst in a Work was recorded as a Change. */
+  committed(id: string): void;
+  /** The cursor moved, or the text around it changed (UTF-16 position). */
+  cursor(id: string, at: number): void;
+  /** A Work's tab closed, or it now goes by another ID. */
+  closed(id: string): void;
 };
 
 const historyCompartment = new Compartment();
@@ -97,6 +105,8 @@ class Tab {
           linesCompartment.of(lineExtensions(tabs.options)),
           EditorView.updateListener.of((update) => {
             for (const tr of update.transactions) this.sync.track(tr);
+            if (update.docChanged) tabs.events.edited(this.sync.id);
+            if (update.docChanged || update.selectionSet) tabs.events.cursor(this.sync.id, update.state.selection.main.head);
           }),
         ],
       }),
@@ -110,6 +120,7 @@ class Tab {
       burstClosed: () => {
         this.view.dispatch({ effects: historyCompartment.reconfigure([]) });
         this.view.dispatch({ effects: historyCompartment.reconfigure(history()) });
+        tabs.events.committed(this.sync.id);
       },
       error: (message) => tabs.events.error(message),
     });
@@ -247,6 +258,7 @@ export class Tabs {
     const index = this.open.indexOf(tab);
     this.open.splice(index, 1);
     tab.destroy();
+    this.events.closed(tab.sync.id);
     if (tab === this.front) {
       this.front = null;
       const next = this.open[Math.min(index, this.open.length - 1)];
@@ -265,7 +277,28 @@ export class Tabs {
     const tab = this.find(id);
     if (!tab) return;
     tab.rename(to, to.split("/").pop() ?? to);
+    this.events.closed(id);
     this.events.changed();
+  }
+
+  /** Where the cursor is in a Work (UTF-16). */
+  cursorOf(id: string): number | null {
+    return this.find(id)?.view.state.selection.main.head ?? null;
+  }
+
+  /** Resolves once everything typed in this Work has reached Rust. */
+  async settled(id: string) {
+    await this.find(id)?.sync.idle();
+  }
+
+  /** Brings a Work to the front and selects a stretch of its text (UTF-16 positions). */
+  async reveal(id: string, from: number, to: number) {
+    const tab = this.find(id);
+    if (!tab) return;
+    await this.activate(id);
+    const length = tab.view.state.doc.length;
+    tab.view.dispatch({ selection: { anchor: Math.min(from, length), head: Math.min(to, length) }, scrollIntoView: true });
+    tab.view.focus();
   }
 
   /** What the timer said about a Work (Rust names it by the ID the tab had). */

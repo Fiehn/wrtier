@@ -55,11 +55,15 @@ A named, ordered stack of **Styles** that gives a **Work** its whole appearance,
 _Avoid_: template, theme, layout, preset
 
 **Style library**:
-The **Vault**'s collection of **Styles**, **Looks** and **Story element** definitions, including the defaults the app ships with.
+The **Vault**'s collection of **Styles**, **Looks** and **Story element** definitions, including the defaults the app wrote into it when the **Vault** was made; once written, the defaults belong to the **Vault** and a newer app never changes them.
 _Avoid_: style store, template folder
 
+**Style update notice**:
+A line shown on a **Work** whose recorded copy of a **Style** or **Story element** definition differs from the **Style library**'s, saying the **Page preview** uses the new version and the next edit records it; showing it records nothing.
+_Avoid_: merge notice, style conflict, warning
+
 **Preamble**:
-The part of a **Work**, kept apart from its text, that lists the **Looks** it uses, any extra **Styles** for this **Work** only, its settings (title, author name, language) and any raw Typst for this **Work** only.
+The part of a **Work**, kept apart from its text, that lists the **Looks** it uses, any extra **Styles** for this **Work** only, the **Author**'s own **Story elements** it uses, its settings (title, author name, language) and any raw Typst for this **Work** only.
 _Avoid_: header, front matter, settings
 
 ### Feedback
@@ -124,7 +128,7 @@ A message shown to the **Author** after a merge, pointing at text the merge had 
 _Avoid_: conflict, merge error, warning
 
 **Conflict copy**:
-A duplicate of a **History** file made by the sync tool when two **Devices** changed it before syncing; it is expected, not an error.
+A duplicate of a file in the **Vault** (usually a **History**, but also a **Text file** or a file in the **Style library**) made by the sync tool when two **Devices** changed it before syncing; it is expected, not an error.
 _Avoid_: corruption, sync error
 
 **Sync problem**:
@@ -151,16 +155,22 @@ _Avoid_: device settings, local settings
 - A **Vault** holds many **Works**, many **Reviewers** and one **Style library**.
 - A **Reviewer** can comment on any **Work** in the **Vault**.
 - The app ships built-in **Story elements**; the **Author** can define more in the **Style library**.
+- Every **Work** has the built-in **Story elements**. The **Author**'s own are added to each **Work** explicitly, in its **Preamble**; a **Work** never picks one up just because its text uses it.
 - Every **Story element** has a default appearance; **Styles** change how it looks, and its definition says what a `.docx` **Export** does with it.
 - A **Work**'s **History** records the definitions of the **Story elements** it uses, just as it records its **Styles**.
 - A **Look** stacks many **Styles**; when two **Styles** set the same thing, the one lower in the stack wins.
 - A **Work** uses one or more **Looks** from the **Style library**; its **Preamble** can add extra **Styles** on top for that **Work** only.
+- Only one **Look** is rendered at a time: the **Author** picks it in the **Page preview** and again for each PDF **Export**. The **Preamble**'s extra **Styles** and the **Work**'s **Story elements** are rendered in every **Look**.
+- A **Look**'s own **Styles** may change how a **Story element** looks, but never define one, so a **Story element** never disappears when the **Look** changes.
 - A PDF **Export** uses exactly one **Look**; a `.docx` **Export** ignores **Looks** and keeps only the text's structure and emphasis.
 - A **Work**'s **History** records the content of every **Style** it uses each time that **Style** changes, so every **Milestone** renders exactly as it did.
-- Fonts are only referenced by name: the app looks in the **Vault**'s fonts folder first, then the **Device**'s fonts, and otherwise warns and uses a default.
+- A changed **Style** is recorded in a **Work** just before a **Device**'s first edit to it in a sitting, and before any **Export**; opening or reading a **Work** never records one. Until then the **Page preview** uses the **Style library**'s version, and the **Work** shows a **Style update notice**.
+- **Milestones** always render with the **Styles** the **Work** had recorded at that point, never with the **Style library**'s current ones.
+- Fonts are only referenced by name: the app looks in the **Vault**'s fonts folder first, then the **Device**'s fonts, and otherwise warns and uses a default that ships with the app. A font found only on the **Device** is flagged, since other **Devices** may render the **Work** differently.
+- The same version of a **Work** with the same fonts gives the same PDF on every **Device**.
 - A **Comment** has exactly one sender: the **Author** or one **Reviewer**.
 - Replying to a resolved **Comment** doesn't reopen it.
-- When two **Devices** set the same setting differently, the later one wins; the other value stays in the **History**. Raw Typst in the **Preamble** is merged like the **Work**'s text, so neither **Device**'s edit is lost.
+- When two **Devices** set the same setting differently, the later one wins; the other value stays in the **History**. Raw Typst in the **Preamble** works the same way, and when two **Devices** edited it without seeing each other's edit, the **Author** gets a **Merge notice** that shows the other version.
 - **Reviewers** only comment; only the **Author** changes the text.
 - An AI is always a **Reviewer**, never an **Author**: it can add **Comments** but can never change the text.
 - A **Comment** follows its text through **Moves**. If all its text is deleted it becomes a **Detached comment**; restoring the text reattaches it.
@@ -182,10 +192,12 @@ _Avoid_: device settings, local settings
 - A **Milestone** holds exactly the **Changes** the **Device** that named it had seen. A **Change** made earlier on another **Device** that hadn't synced yet is not part of it.
 - A **Work**'s images are stored in its **History**; inserting or replacing an image is a **Change**.
 - A **Text file** is always derived from its **History**, never the other way round.
+- A **Text file** compiles on its own: it carries the **Work**'s recorded **Styles**, **Looks** and **Story elements**, rendered in the **Work**'s first **Look**. Changing the **Preamble** happens only in the app.
 - An **External edit** is recorded into the **History** as a new **Change**; it never replaces the **History**.
 - An **External edit** is compared against the text the app last wrote to that **Text file**, so it merges as if it came from a **Device** that had been offline since then.
 - A **Conflict copy** is merged back into its **History** by whichever **Device** sees it first, then deleted, whether or not its **Work** is open. One that can't be merged is kept as a **Sync problem**.
-- A **Merge notice** is about text inside a **Work**; a **Sync problem** is about a file in the **Vault**.
+- A **Merge notice** is about a **Work**'s content (its text or its **Preamble**); a **Sync problem** is about a file in the **Vault**.
+- A **Conflict copy** of a file in the **Style library** is never merged; it stays a **Sync problem** until the **Author** picks which version to keep.
 - Every **Change** records which **Device** made it and when. **Changes** are ordered by when they were made, and a **Device** never places a new **Change** before one it has already seen.
 - A **Work**'s **History** records a readable name for every **Device** that changed it, so the file can be read on its own. The app itself always shows a **Device**'s current name from the **Vault**.
 - **Device state** is never stored in the **Vault**. **Vault settings** are, including each **Device**'s overrides of them.
@@ -211,4 +223,5 @@ _Avoid_: device settings, local settings
 - "preview" was used for both the formatted editor and the compiled pages. Resolved: the editor mode is the **Formatted view**; the compiled pages are the **Page preview**.
 - "styling" and "theming" were both used for appearance. Resolved: a **Style** is about the printed page; "theme" means only the app's own appearance.
 - "Device settings" was used both for what one Device keeps locally and for preferences such as the theme. Resolved: what never syncs is **Device state**; preferences are **Vault settings**, which a **Device** can override for itself.
+- "style element" was used for whatever a **Work** adds outside its **Looks**. Resolved: those are the **Preamble**'s extra **Styles** and the **Work**'s **Story elements**, both rendered in every **Look**.
 - "editor" can mean the app's text-editing area or a person who reviews the **Work**. Resolved: a person is always a **Reviewer** (with "editor" as a role label); "editor" on its own means the app's text-editing area.

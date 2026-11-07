@@ -4,6 +4,7 @@ import { type WorkState } from "./sync";
 import { Tabs, type Layout, type OpenedWork } from "./tabs";
 import { buildTree, foldersOf, type Folder } from "./tree";
 import { showMenu, type MenuItem } from "./menu";
+import { PagePreview } from "./preview";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -31,6 +32,8 @@ type Settings = {
   lineNumbersHere: boolean;
   highlightLine: boolean;
   highlightLineHere: boolean;
+  previewFollows: boolean;
+  previewFollowsHere: boolean;
 };
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -115,12 +118,51 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
   changed: () => {
     $("empty").hidden = tabs.active !== null;
     $("view-mode").hidden = tabs.active === null;
+    $("preview-toggle").hidden = tabs.active === null;
+    preview.show(tabs.active);
     rememberSoon();
     highlightOpen();
   },
   error: showError,
   askName: (question, initial) => askText(question, initial),
+  edited: (id) => preview.edited(id),
+  committed: (id) => preview.committed(id),
+  cursor: (id) => preview.cursor(id),
+  closed: (id) => preview.forget(id),
 });
+
+// ---- The Page preview (Ctrl+Shift+P), open or not remembered on this Device ----
+
+const preview = new PagePreview($("preview"), $("preview-bar"), $("preview-pages"), {
+  settled: (id) => tabs.settled(id),
+  reveal: (id, from, to) => void tabs.reveal(id, from, to),
+  cursorOf: (id) => tabs.cursorOf(id),
+  error: showError,
+});
+
+function setPreview(open: boolean) {
+  preview.setOpen(open);
+  $("preview-toggle").textContent = open ? "Hide pages" : "Pages";
+  try {
+    localStorage.setItem("preview", open ? "open" : "closed");
+  } catch {
+    // not remembered, then: no harm done
+  }
+}
+
+try {
+  setPreview(localStorage.getItem("preview") === "open");
+} catch {
+  setPreview(false);
+}
+$("preview-toggle").addEventListener("click", () => setPreview(!preview.open));
+$("preview-close").addEventListener("click", () => setPreview(false));
+window.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "p") {
+    e.preventDefault();
+    setPreview(!preview.open);
+  }
+}, { capture: true });
 
 /** The tabs (and cursors) are remembered for next time, a moment after they change. */
 let rememberTimer: number | undefined;
@@ -646,7 +688,10 @@ function applySettings(settings: Settings) {
   $<HTMLInputElement>("line-numbers-here").checked = settings.lineNumbersHere;
   $<HTMLInputElement>("highlight-line").checked = settings.highlightLine;
   $<HTMLInputElement>("highlight-line-here").checked = settings.highlightLineHere;
+  $<HTMLInputElement>("preview-follows").checked = settings.previewFollows;
+  $<HTMLInputElement>("preview-follows-here").checked = settings.previewFollowsHere;
   tabs.setOptions({ lineNumbers: settings.lineNumbers, highlightLine: settings.highlightLine });
+  preview.setFollows(settings.previewFollows);
 }
 
 /** An on/off setting's two checkboxes: the setting itself, and "only on this device". */
@@ -657,6 +702,7 @@ function onOff(name: string, box: string, here: string) {
 }
 onOff("lineNumbers", "line-numbers", "line-numbers-here");
 onOff("highlightLine", "highlight-line", "highlight-line-here");
+onOff("previewFollows", "preview-follows", "preview-follows-here");
 
 function setting(name: string, value: string, here: boolean) {
   act(async () => applySettings(await invoke<Settings>("set_setting", { name, value, here })));

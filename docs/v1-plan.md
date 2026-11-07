@@ -13,12 +13,12 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 **History engine (Rust core)**
 
 - Every character knows which Change wrote it ([ADR 0003](adr/0003-character-level-history-with-moves.md)).
-- Kinds of Change: typing burst, deletion, replaced selection, paste, Move, Revert, External edit, Comment actions, Preamble edits, Style and Story element definitions recorded, image inserted or replaced.
+- Kinds of Change: typing burst, deletion, replaced selection, paste, Move, Revert, External edit, Comment actions, Preamble edits, Style and Story element definitions recorded.
 - A typing burst closes when you pause (about 5 s), the cursor leaves, you start a different kind of action, or after about 60 s of nonstop typing. These numbers are for tuning and don't affect correctness. Typos fixed inside an open burst are never recorded.
 - A typing burst is one stretch of new text at one spot, anchored to the characters on either side, not to an index. While open it's a draft that can grow and shrink, kept in memory and the recovery file but never in the `.db`. Backspacing past its start or deleting past its end closes it and starts a deletion. Deleting is a burst too: backspacing or deleting forwards at one spot hides the text at once and records it as one deletion when it closes, by the same rules; typing closes it. Typing over a selection records one "replaced selection". A burst that ends up empty records nothing. Merges don't close a burst. Its Change ID is reserved when it opens, and its timestamp is set when it closes.
 - Moves work on any selection, and edits made elsewhere to moved text follow it. Only text added strictly inside the moved range follows; text added at either edge stays where it was.
 - Revert also reverts dependent later Changes by default. A Revert can itself be reverted. Returning to a Milestone reverts everything after it.
-- Everything that isn't the Work's text (Preamble settings, Style and Story element definitions, Comment state, Reviewer and Device names, image slots) is stored as records with fields. Each field keeps its latest value in the fixed Change order, and older values stay in the History. Free text the Author edits outside the Work's text (the Preamble's raw Typst, and Comment bodies if they can be edited) is its own text sequence in the same engine, so concurrent edits to it merge instead of one being lost.
+- Everything that isn't the Work's text (Preamble settings, Style and Story element definitions, Comment state, Reviewer and Device names) is stored as records with fields. Each field keeps its latest value in the fixed Change order, and older values stay in the History. Free text the Author edits outside the Work's text (the Preamble's raw Typst, and Comment bodies if they can be edited) is also a single field in v1. When two Devices set it without seeing each other's edit, the later one wins and the Author gets a Merge notice whose "show me" opens the other version, so it can be copied back.
 - A Milestone is exactly the set of Changes the naming Device had seen, stored as the highest counter seen from each Device. Returning to it is one Revert of every content Change that isn't part of it (later Reverts included, so the text is exactly as it was), and the Revert preview calls out Changes made before the Milestone on another Device but not part of it, so the Author can keep them. Device names, other Milestones and dismissed notices aren't content, so they stay. Renaming a Milestone is a field; deleting it is reverting it.
 - A later Change depends on an earlier one only if it inserted text strictly inside text the earlier Change wrote (with that Change's characters on both sides), and so on transitively. Deletions and Moves are never dependents.
 - A Change is in effect unless a Revert that is itself in effect targets it. "Restore this Change" reverts every in-effect Revert of it at once, so a Change reverted on two Devices offline comes back with one action.
@@ -28,22 +28,27 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 - The app shows a Device's current name from `vault.db`, then the name the Work recorded, then its ID. Just before a Device's first edit to a Work in a sitting (before any typing burst opens, since nothing else may be recorded while one is open), it records its current name in that Work if the Work has none or an older one. Reading never writes, and a rename reaches each Work the next time it's edited.
 - Caches (the built tree, the current text, Session summaries) live in a cache folder on the Device, outside the Vault. They never sync and can always be rebuilt from the `.db`.
 - The app never holds a `.db` open between writes. Unsaved Changes stay in a recovery file outside the Vault until the app has seen them in the `.db`.
-- The Text file is regenerated on save. External edits are detected and recorded. The app recognises Text file contents it wrote itself, including in Conflict copies of the Text file.
+- The Text file is regenerated on save. It starts with a generated header holding the Work's recorded Styles, Looks and Story elements, so it compiles on its own in the Work's first Look; the header is never part of the Work's text, and edits to it outside the app are dropped ([ADR 0011](adr/0011-text-files-carry-a-generated-header.md)). External edits are detected and recorded. The app recognises Text file contents it wrote itself, including in Conflict copies of the Text file.
 - Each time the app writes a Text file, it records the file's hash and the version (the set of Changes) it was built from. A Text file with an unknown hash is compared against the text of the last version written there, and the differences become Changes anchored to that version, so they merge like Changes from an offline Device. If no written version can be found, the file is compared against the current text and the Author gets a Merge notice.
 - In an External edit, a block of deleted text that reappears exactly somewhere else (at least a whole line, or about 40 characters) is recorded as a Move, so its History and Comments go with it; spaces at the block's edges may differ. Everything else is recorded as deletions and insertions. The file is compared word by word, so a changed word reads as one replacement, not as fragments of letters. All of one External edit's Changes form one Session, labelled "External edit". A byte order mark and Windows line endings added by another editor are ignored.
-- Images are stored in the `.db` once per unique content, and written out next to the Text file only when the Work has any ([ADR 0007](adr/0007-images-live-inside-the-work.md)).
 - `vault.db` holds the Vault's Devices and their names, Reviewers, and Vault settings (including each Device's overrides), and merges the same way. A folder is a Vault because it has a `vault.db`; picking a folder without one asks before making it a Vault.
 
 **Typst**
 
 - Compiling runs in the Rust core. The Page preview supports clicking to jump to that spot in the text.
-- On desktop, compile shortly after each typing burst. On Android, compile only while the Page preview is open.
+- Compile only while the Page preview is open, on every platform, about 300 ms after the last keystroke. It compiles the text as it is on screen, including an open typing burst; compiling reads the History and never writes to it. Exports always compile, with the preview open or not.
+- When the Work doesn't compile, the Page preview keeps the last pages that did, faded, under a bar with the first error and "Show me" (which jumps to it like click-to-jump). Errors appear only after the same pause as compiling, so they don't flicker while typing. An error in a Style, Look or Story element names the file in the Style library it comes from. A PDF Export refuses to run while there's an error; Typst warnings never block anything and show as a count in the bar. The `.docx` Export doesn't use the compile, so Typst errors don't block it.
+- The Page preview keeps the cursor's page in view. Whether it follows the cursor is a Vault setting (a Device can override it), and it's on by default.
 - The Style library ships with default Styles, Looks and built-in Story elements. The Author can add Styles, Looks and their own Story elements.
+- The defaults are written into `styles/` when the Vault is made and then belong to the Vault, so every Device reads the same ones whatever its app version. A newer app never overwrites them: defaults the Vault has never had are added once (`vault.db` records which were written, so deleted ones don't come back), and improved versions of existing ones are only offered, with Compare / Use it ([ADR 0012](adr/0012-default-styles-are-copied-into-the-vault.md)).
 - A Story element definition has a name, how it's written, a default look, how it appears in the Formatted view (chip or block), and what the `.docx` Export does with it.
 - Built-in Story elements: Chapter, Part, scene break (typing `***` on an empty line converts it), emphasis, epigraph, block text (letters and in-world documents), dedication.
-- The Preamble panel, collapsed by default, holds Looks, extra Styles, title, author name, language and raw Typst.
+- The Preamble panel, collapsed by default, holds Looks, extra Styles, the Author's own Story elements, title, author name, language and raw Typst.
+- Style library files open in an ordinary app tab (Raw view with Typst highlighting, on every platform). They have no History of their own and are saved on a pause, like the Text file. "New Story element" is a small form (name, chip or block, `.docx` behaviour) that writes the file with a correct header and a starter function that labels its output (`<name>`), so Styles can restyle it at once. "New Style" and "New Look" create the file and open it. An open Work notices a library change from anywhere within about a second: the Page preview recompiles and the Style update notice appears.
+- The built-in Story elements are part of every Work. The Author's own are added to a Work explicitly in the Preamble panel, which is when the Work records their definition. Using one that isn't added (e.g. `#dream[…]`) shows an error chip in the Formatted view with "dream isn't in this Work. Add it?", and the Text file's header only carries what the Work added.
 - Works record the Styles and Story element definitions they use, so Milestones re-render exactly as they were ([ADR 0004](adr/0004-works-record-styles-but-only-reference-fonts.md)).
-- Fonts are looked up in the Vault's `fonts/` folder, then the Device's fonts, and otherwise the app warns and uses a default.
+- Fonts are looked up in the Vault's `fonts/` folder, then the Device's fonts, and otherwise the app warns and uses a default. The default is Typst's own fonts (`typst-assets`), bundled in the app, so it's the same on every Device. A Device font is only used for a family neither the Vault nor the app has, so a Device's own copy of, say, Libertinus never changes how the default looks. A font that comes from the Device instead of the Vault is flagged in the Page preview and at Export ("other Devices may render this Work differently"), with a hint to copy it into `fonts/`.
+- A PDF's date is the time of the latest Change in the version rendered, never the current time, so exporting the same version twice, on any Device, gives a byte-identical file.
 
 **Editor**
 
@@ -86,6 +91,7 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 
 - PDF in a chosen Look.
 - Plain `.docx` in standard manuscript formatting, keeping only structure and emphasis. Story elements are handled as their definitions say.
+- The `.docx` is built by the app itself: it reads the Work's text with Typst's own parser (`typst-syntax`) and writes the file with a small Rust crate, so it works on Android and never depends on a Look. Emphasis becomes italics. Each Story element definition picks one behaviour from a fixed menu: Chapter heading (new page), Part heading (new page, centred), centred `#` line, indented block, centred paragraph, plain text, or left out. Anything else (such as raw Typst code in the text) is skipped and listed in a short report. Fixed manuscript format: 12 pt Times New Roman (Courier as an option), double-spaced, 1-inch margins, first-line indents, header with surname / title / page number.
 
 **Platforms**
 
@@ -96,14 +102,17 @@ One **Author** can write a novel or short story on Windows, Debian and Android f
 
 Planned for v2:
 
+- Images, as [ADR 0007](adr/0007-images-live-inside-the-work.md) describes: stored in the `.db` once per unique content, inserting or replacing one is a Change, and copies are written to `<Work>.images/` next to the Text file only when the Work has any. Written in the text as `#image("map.png")`, where the name is an image slot in the Work, so Milestones show the image the slot had then. Not needed for v1: novels rarely use images, and v1 is for getting real use out of the app first. Renaming and trashing a Work already move `.images/` along, so nothing else changes when they arrive.
 - Collections
 - Own spellchecker (Hunspell dictionaries through `spellbook`, plus a Vault-wide word list)
 - AI comments over MCP: comments only, anchored by quote, run as a `writer mcp` mode
 - Reading a second Work side by side
 - Importing Word comments as Comments
 - EPUB Export
+- A richer `.docx` Export: Styles and Story element definitions describe their own `.docx` formatting in their header comment, instead of picking from v1's fixed menu. Design it once it's clearer what `.docx` can express.
 - Play Store build using the folder picker
 - Maybe: detect text that was both moved and edited in an External edit as a Move (fuzzy matching), if exact matching turns out not to be enough.
+- Free text outside the Work's text (the Preamble's raw Typst, Comment bodies) as its own text sequence in the History engine, so concurrent edits merge instead of the later one winning. Stored data doesn't change: old field values stay readable, and new edits start using the sequence.
 - Revisit which Changes count as dependent when reverting, based on how the v1 rule feels in real use.
 - Smarter Move edges: text added at the edge of a moved range on another Device follows the Move when it clearly belongs to it. Example: if the range starts just after a ".", a word added after that "." (such as "Quietly, ") goes with the Move, and the same at the end. The rule must give the same answer on every Device even when the punctuation itself was edited concurrently.
 - A cache for opening Works almost instantly, mainly for phones. The History engine's working state (the position tree, the layout, which Changes are applied and undone, the Moves, the clock) is saved as one file outside the Vault. Opening loads it and applies only the Changes added since. It needs no change to the engine's rules or to anything stored in the Vault:
@@ -184,12 +193,28 @@ On Debian the app is built on the machine itself and installed as a `.deb` (Taur
 
 ### Phase 3: Typst
 
-- Compiling from the History, the Page preview, and click-to-jump.
-- The Style library, default Looks, built-in and Author-defined Story elements, and the Preamble panel.
-- Styles and Story element definitions recorded in the History, and font lookup.
-- PDF and `.docx` Exports.
+- Compiling from the History (only while the Page preview is open), the Page preview, click-to-jump, and the preview following the cursor.
+- The Style library as files in `styles/`, with the defaults written into the Vault, library tabs and the "New Story element" form, and Conflict copies of library files reported for the Author to pick.
+- The Preamble panel: Looks (the first is the default), extra Styles, the Author's own Story elements added explicitly, settings, and raw Typst as one field with a Merge notice on concurrent edits.
+- Styles and Story element definitions recorded in the History just before the first edit in a sitting, the Style update notice, and Milestones rendering with what they had recorded.
+- The Text file's generated header, so it compiles on its own.
+- Font lookup with bundled fallback fonts and flagged Device fonts, and compile errors in the Page preview.
+- PDF Export in a chosen Look, and the `.docx` Export built from Typst's parser.
 
-*Done when:* the same Work produces an identical PDF on Windows and Debian with the same Vault fonts, an old Milestone re-renders unchanged after a Style is edited, and the `.docx` opens cleanly in Word and LibreOffice.
+Steps (1–3 are independent; 5–7 need 4; 8 needs only the Story element definitions from 3):
+
+1. **Compile and Page preview.** One Typst `World` per open Work kept alive between compiles (the 0b lessons: `evict(1)`, lock before compiling, optimised dependencies). Compiles only while the preview is open, about 300 ms after the last keystroke, including the open burst. Pages rendered lazily as SVG. Fonts: Vault, then Device (flagged), then bundled. On errors the last good pages stay, faded, under the error bar. It also compiles as soon as a typing burst is recorded. *Done when:* a 300-page Work previews smoothly while typing, and a stray `#` shows the bar with a working "Show me".
+   *Result (2026-11-07):* done. On a 315-page novel: first compile about 0.67 s, recompile after a small edit about 55 ms, plus about 5 ms to check the pages in view (only those are hashed and redrawn; hashing every page cost more than the compile). Scanning the Device's fonts takes about 0.6 s, once per run, in the background when the Vault opens.
+2. **Click-to-jump and following the cursor**, with its Vault setting. *Done when:* both directions land on the right spot, including inside a Story element.
+   *Result (2026-11-07):* built and tested (in Rust, with a function-based element standing in for Story elements until step 3). The cursor is found glyph by glyph, so it lands on its own line, not at the start of its paragraph; a cursor in markup uses the nearest text. Finding it on page 150 of 315 takes about 8 ms. Still to check by hand in the app.
+3. **The Style library as files.** Formats (`.typ`, `.look`, the element header), defaults written into the Vault, change watching, library tabs, the "New Story element" form, Conflict copies with pick-one. *Done when:* a new Vault has the defaults, and editing one in vim is noticed within a second.
+4. **The Preamble in the History.** Preamble records and panel; the compile source built from the Work's own Looks, extra Styles and Story elements; the Look picker in the preview (Device state); recording before the first edit and the Style update notice; the raw Typst Merge notice. A field Change records which value it replaced (`replaces`), so two edits that replaced the same value are known to be concurrent, whatever their times; old rows have none. Story element chips, `***` → `#scene-break()`, and the "Add it?" error chip. *Done when:* switching Looks in the preview works, and a Style edited on another Device shows the notice and is recorded on the next edit.
+5. **The Text file header** ([ADR 0011](adr/0011-text-files-carry-a-generated-header.md)): written and stripped, edits inside it dropped with a line saying so, old Text files without one still read. *Done when:* the `typst` command line compiles the Text file to the same pages as the app.
+6. **Milestones render as they were:** fields at a Milestone, and a simple "Page preview at Milestone…" picker (the real History view is Phase 5). *Done when:* an old Milestone renders unchanged after a Style edit.
+7. **PDF Export:** chosen Look, Styles recorded first, refused on errors, date from the History. *Done when:* byte-identical on Windows and Debian.
+8. **`.docx` Export** from `typst-syntax`: behaviour menu, manuscript format, the "left out" report. *Done when:* it opens cleanly in Word and LibreOffice.
+
+*Done when:* the same version of a Work, with every font from the Vault or bundled, produces a byte-identical PDF on Windows and Debian, an old Milestone re-renders unchanged after a Style is edited, the Text file compiled with the `typst` command line gives the same pages as the app's Export in the first Look, and the `.docx` opens cleanly in Word and LibreOffice.
 
 ### Phase 4: Comments
 
@@ -206,7 +231,7 @@ On Debian the app is built on the machine itself and installed as a `.deb` (Taur
 ### Phase 6: Polish and Android
 
 - The Chapter list with drag-to-reorder, focus mode, word counts, themes, and the spellcheck switch.
-- The Android layout (one screen at a time), the "All files access" flow (detect the missing permission and open its settings page; see the 0c lessons), and compiling only while the Page preview is open.
+- The Android layout (one screen at a time), the "All files access" flow (detect the missing permission and open its settings page; see the 0c lessons).
 - Testing: Playwright on Chromium and WebKit, plus hand testing on a real phone with real keyboards.
 
 *Done when:* a full novel goes back and forth between Android, Windows and Debian through Syncthing, with offline edits on all three, and ends with identical text and Comments everywhere.
@@ -220,7 +245,7 @@ Settle these while building the History engine, and write an ADR for any answer 
 - ~~How a Change ID is formed and how a Device gets its ID.~~ Settled: the ID is Device ID + counter. Changes are ordered by a hybrid logical clock (wall-clock time that never goes below anything already seen), then by Device ID. A Device ID is random and short, made on first launch, kept in Device state and left out of Android backups. The History records a readable name for each Device. A merge that finds the same ID with different content refuses loudly.
 - ~~How long a gap ends a Session.~~ Settled: each Change stores its Session ID (the ID of the Session's first Change). A new Session starts when the Work is opened on a Device, or after about 30 minutes without a Change (to be tuned in use). A Session never spans Devices or Works.
 - How the editor shows Changes merged in from elsewhere without making your cursor jump. Partly settled: an open typing burst is anchored to characters, so merges don't move it. Cursors and selections outside a burst are still open (Phase 2).
-- A Style file in `styles/` edited on two Devices. Style files are plain files with no History, so their Conflict copies can't merge automatically. Proposal: show both versions and let the Author pick.
+- ~~A Style file in `styles/` edited on two Devices.~~ Settled (Phase 3): the Style library stays plain files, so it can be edited in any text editor. A Style is `styles/<name>.typ` (only `set`/`show` rules), a Look is `styles/<name>.look` (Style names in stack order, one per line), and a Story element is `styles/elements/<name>.typ` (a Typst function with a header comment holding its metadata). A Conflict copy of one of these is never merged: it's a Sync problem, and the Author picks a version (keep this one, keep the other, or open both).
 - ~~An External edit on one Device while the app edits the same Work on another.~~ Settled: the External edit is compared against the version the app last wrote to that Text file, not against the current text, and then merges as normal.
 
 ## Main risks
@@ -238,7 +263,7 @@ Settle these while building the History engine, and write an ADR for any answer 
 Writing/                        ← the Vault (Syncthing folder)
 ├── The Long Night.db           ← a Work's History
 ├── The Long Night.typ          ← its Text file (regenerated)
-├── The Long Night.images/      ← regenerated image copies, only if the Work has images
+├── The Long Night.images/      ← regenerated image copies, only if the Work has images (v2)
 ├── Short stories/              ← ordinary folders, any arrangement
 │   ├── Rain.db
 │   └── Rain.typ

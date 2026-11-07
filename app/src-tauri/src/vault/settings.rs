@@ -24,6 +24,9 @@ pub struct Settings {
     /// The line with the cursor shaded.
     pub highlight_line: bool,
     pub highlight_line_here: bool,
+    /// The Page preview keeps the cursor's page in view (on by default).
+    pub preview_follows: bool,
+    pub preview_follows_here: bool,
 }
 
 /// The settings there are, as stored, with their default and what's allowed.
@@ -36,6 +39,7 @@ fn check(name: &str, value: &str) -> Result<(&'static str, String), String> {
         },
         "lineNumbers" if ["on", "off"].contains(&value) => Ok(("line_numbers", value.to_string())),
         "highlightLine" if ["on", "off"].contains(&value) => Ok(("highlight_line", value.to_string())),
+        "previewFollows" if ["on", "off"].contains(&value) => Ok(("preview_follows", value.to_string())),
         _ => Err(format!("Not a setting: {name} = {value:?}")),
     }
 }
@@ -56,6 +60,7 @@ impl Vault {
         let (font_size, font_size_here) = self.setting("font_size", "17");
         let (line_numbers, line_numbers_here) = self.setting("line_numbers", "off");
         let (highlight_line, highlight_line_here) = self.setting("highlight_line", "off");
+        let (preview_follows, preview_follows_here) = self.setting("preview_follows", "on");
         Settings {
             theme,
             font_size: font_size.parse().unwrap_or(17),
@@ -65,6 +70,8 @@ impl Vault {
             line_numbers_here,
             highlight_line: highlight_line == "on",
             highlight_line_here,
+            preview_follows: preview_follows == "on",
+            preview_follows_here,
         }
     }
 
@@ -99,10 +106,13 @@ mod tests {
         assert_eq!(vault.settings(), Settings {
             theme: "system".into(), font_size: 17, theme_here: false, font_size_here: false,
             line_numbers: false, line_numbers_here: false, highlight_line: false, highlight_line_here: false,
+            preview_follows: true, preview_follows_here: false,
         });
         vault.set_setting("lineNumbers", "on", true, 500).unwrap();
         assert!(vault.settings().line_numbers && vault.settings().line_numbers_here);
         assert!(vault.set_setting("highlightLine", "maybe", false, 500).is_err());
+        vault.set_setting("previewFollows", "off", true, 500).unwrap();
+        assert!(!vault.settings().preview_follows && vault.settings().preview_follows_here);
         vault.set_setting("theme", "dark", false, 1000).unwrap();
         vault.set_setting("fontSize", "20", true, 2000).unwrap();
         let settings = vault.settings();

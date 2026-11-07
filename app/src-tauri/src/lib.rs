@@ -5,6 +5,7 @@ pub mod device;
 pub mod patch;
 pub mod positions;
 pub mod recovery;
+pub mod typeset;
 pub mod vault;
 pub mod work;
 
@@ -27,6 +28,11 @@ struct App {
 }
 
 struct AppState(Mutex<App>);
+
+/// The Page previews. Kept apart from `AppState`: a compile can take a while (the first one of
+/// a novel about half a second), and typing must never wait for it. Holding this lock for the
+/// whole compile also makes sure only one compile runs at a time (Phase 0b).
+struct TypesetState(Mutex<typeset::Typesetter>);
 
 /// The time, always from here and never from the interface.
 fn now_ms() -> u64 {
@@ -91,6 +97,7 @@ fn open_vault(state: State<AppState>, path: String, create: bool) -> Result<Vaul
                     previous.close_all(now_ms());
                 }
                 app.vault = Some(vault);
+                typeset::warm_up();
                 app.device.last_vault = Some(root);
                 app.device.save()?;
                 Ok(VaultOpened::Opened { root: path, device_name, suggested_name: device::suggested_name() })
@@ -157,6 +164,66 @@ fn work_text(state: State<AppState>, id: String) -> Result<WorkText, String> {
         let (text, state) = open_vault_of(app)?.work_text(&id, now_ms())?;
         Ok(WorkText { text, state })
     })
+}
+
+/// Typesets a Work's text as it is now, the open burst included, for the Page preview. It runs
+/// off the main thread, and takes the app's lock only to read the text.
+#[tauri::command]
+async fn compile_preview(handle: AppHandle, id: String) -> Result<typeset::Compiled, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (text, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
+            let vault = open_vault_of(app)?;
+            let (text, _) = vault.work_text(&id, now_ms())?;
+            Ok((text, vault.root.join("fonts")))
+        })?;
+        let state = handle.state::<TypesetState>();
+        let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(typesetter.compile(&id, &fonts_dir, text))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One page of a Work's Page preview, as SVG, unless it's the same as `known`.
+#[tauri::command]
+async fn preview_page(handle: AppHandle, id: String, page: usize, known: Option<String>) -> Result<typeset::PagePicture, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<TypesetState>();
+        let typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        typesetter.page(&id, page, known.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Where a click on a page of the Page preview leads (points from the page's top left).
+#[tauri::command]
+async fn preview_jump(handle: AppHandle, id: String, page: usize, x: f64, y: f64) -> Result<Option<typeset::JumpTo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<TypesetState>();
+        let typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        typesetter.jump(&id, page, x, y)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Where a place in a Work's text (UTF-16) is on its pages, for keeping the cursor in view.
+#[tauri::command]
+async fn preview_locate(handle: AppHandle, id: String, at: usize) -> Result<Option<typeset::Spot>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<TypesetState>();
+        let typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        typesetter.locate(&id, at)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// A Work's tab closed, or the preview was: its pages aren't needed any more.
+#[tauri::command]
+fn forget_preview(state: State<TypesetState>, id: String) {
+    state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).forget(&id);
 }
 
 /// What the timer did to a Work, for the editor.
@@ -311,6 +378,7 @@ pub fn run() {
                 }
             }
             app.manage(AppState(Mutex::new(App { device, vault: None, recovery_dir: local.join("recovery") })));
+            app.manage(TypesetState(Mutex::new(typeset::Typesetter::default())));
             start_timer(app.handle().clone());
             Ok(())
         })
@@ -355,6 +423,11 @@ pub fn run() {
             set_setting,
             get_layout,
             save_layout,
+            compile_preview,
+            preview_page,
+            preview_jump,
+            preview_locate,
+            forget_preview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
