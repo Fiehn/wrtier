@@ -4,6 +4,7 @@
 pub mod device;
 pub mod library;
 pub mod patch;
+pub mod preamble;
 pub mod positions;
 pub mod recovery;
 pub mod typeset;
@@ -169,17 +170,18 @@ fn work_text(state: State<AppState>, id: String) -> Result<WorkText, String> {
 
 /// Typesets a Work's text as it is now, the open burst included, for the Page preview. It runs
 /// off the main thread, and takes the app's lock only to read the text.
+/// `look`: the Look to render (picked in the preview, remembered on this Device), else the Work's first.
 #[tauri::command]
-async fn compile_preview(handle: AppHandle, id: String) -> Result<typeset::Compiled, String> {
+async fn compile_preview(handle: AppHandle, id: String, look: Option<String>) -> Result<typeset::Compiled, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let (text, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
+        let (text, header, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
             let vault = open_vault_of(app)?;
-            let (text, _) = vault.work_text(&id, now_ms())?;
-            Ok((text, vault.root.join("fonts")))
+            let (text, header) = vault.typeset_input(&id, look.as_deref(), now_ms())?;
+            Ok((text, header, vault.root.join("fonts")))
         })?;
         let state = handle.state::<TypesetState>();
         let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(typesetter.compile(&id, &fonts_dir, text))
+        Ok(typesetter.compile_with(&id, &fonts_dir, &header, text))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -195,6 +197,18 @@ async fn preview_page(handle: AppHandle, id: String, page: usize, known: Option<
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// A Work's Preamble, for the dialog. The Work needn't be open.
+#[tauri::command]
+fn get_preamble(state: State<AppState>, id: String) -> Result<vault::PreambleView, String> {
+    with_app(&state, |app| open_vault_of(app)?.preamble_for_dialog(&id, now_ms()))
+}
+
+/// Changes a Work's Preamble. Returns the open Work's state (None if it isn't open).
+#[tauri::command]
+fn set_preamble(state: State<AppState>, id: String, preamble: preamble::Preamble) -> Result<Option<WorkState>, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_preamble(&id, &preamble, now_ms()))
 }
 
 /// The Style library: its Styles, Looks and Story elements, and Conflict copies to resolve.
@@ -230,16 +244,16 @@ fn resolve_library(state: State<AppState>, copy: String, keep: library::Keep) ->
 /// What can go at a place in a Work's text (UTF-16), after a `#`: its Story elements and
 /// Typst's functions. Works with the Page preview closed too.
 #[tauri::command]
-async fn complete_at(handle: AppHandle, id: String, at: usize, explicit: bool) -> Result<Option<typeset::Completions>, String> {
+async fn complete_at(handle: AppHandle, id: String, at: usize, explicit: bool, look: Option<String>) -> Result<Option<typeset::Completions>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let (text, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
+        let (text, header, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
             let vault = open_vault_of(app)?;
-            let (text, _) = vault.work_text(&id, now_ms())?;
-            Ok((text, vault.root.join("fonts")))
+            let (text, header) = vault.typeset_input(&id, look.as_deref(), now_ms())?;
+            Ok((text, header, vault.root.join("fonts")))
         })?;
         let state = handle.state::<TypesetState>();
         let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(typesetter.complete(&id, &fonts_dir, &text, at, explicit))
+        Ok(typesetter.complete(&id, &fonts_dir, &header, &text, at, explicit))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -481,6 +495,8 @@ pub fn run() {
             preview_jump,
             preview_locate,
             complete_at,
+            get_preamble,
+            set_preamble,
             get_library,
             read_library,
             write_library,

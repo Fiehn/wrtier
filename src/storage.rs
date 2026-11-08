@@ -1,4 +1,4 @@
-﻿use std::error::Error;
+use std::error::Error;
 use std::path::Path;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use crate::change::{Change, ChangeKind, CharRange, InsertRun, NoticeKey, Span};
@@ -54,7 +54,7 @@ CREATE TABLE deletions (
 
 /// The newest storage version this app writes. A file with a higher one was written by a newer
 /// app, which may store things this one doesn't understand, so it isn't touched.
-pub const STORAGE_VERSION: i64 = 8;
+pub const STORAGE_VERSION: i64 = 9;
 
 /// What a `.db` file is, for listing a Vault.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -274,6 +274,26 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
+    if version < 9 {
+        // A field records which value it replaced, so two edits made without seeing each other
+        // are known as such (older rows have none). And `dismissals` accepts the notice for
+        // that; the table is rebuilt to change its CHECK.
+        conn.execute_batch("
+        BEGIN;
+        ALTER TABLE fields ADD COLUMN replaces TEXT; -- the Change whose value this one replaced
+        CREATE TABLE dismissals_new (
+            change      TEXT PRIMARY KEY REFERENCES changes(id),
+            notice      TEXT NOT NULL CHECK (notice IN ('overlap', 'loop', 'unknown_text_file', 'concurrent_field')),
+            move        TEXT NOT NULL, -- overlap: the later Move; loop: the skipped Move; unknown_text_file: the Session; concurrent_field: the value shown
+            other_move  TEXT           -- overlap: the earlier Move; concurrent_field: the value that lost; otherwise NULL
+        );
+        INSERT INTO dismissals_new SELECT change, notice, move, other_move FROM dismissals;
+        DROP TABLE dismissals;
+        ALTER TABLE dismissals_new RENAME TO dismissals;
+        PRAGMA user_version = 9;
+        COMMIT;
+        ")?;
+    }
     Ok(())
 }
 /// One row in `insertions`. Insert and Replace both write one.
@@ -398,16 +418,17 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                 NoticeKey::Overlap { later, earlier } => ("overlap", later, Some(earlier)),
                 NoticeKey::Loop { skipped } => ("loop", skipped, None),
                 NoticeKey::UnknownTextFile { session } => ("unknown_text_file", session, None),
+                NoticeKey::ConcurrentField { later, earlier } => ("concurrent_field", later, Some(earlier)),
             };
             conn.execute(
                 "INSERT OR IGNORE INTO dismissals (change, notice, move, other_move) VALUES (?1, ?2, ?3, ?4)",
                 params![change.id.to_string(), kind, mv.to_string(), other.map(|o| o.to_string())],
             )?;
         }
-        ChangeKind::SetField { record, field, value } => {
+        ChangeKind::SetField { record, field, value, replaces } => {
             conn.execute(
-                "INSERT OR IGNORE INTO fields (change, record, field, value) VALUES (?1, ?2, ?3, ?4)",
-                params![change.id.to_string(), record, field, value],
+                "INSERT OR IGNORE INTO fields (change, record, field, value, replaces) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![change.id.to_string(), record, field, value, replaces.map(|r| r.to_string())],
             )?;
         }
         ChangeKind::Milestone { name, seen } => {
@@ -526,18 +547,20 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
             ("overlap", Some(other)) => NoticeKey::Overlap { later: mv, earlier: other.parse()? },
             ("loop", None) => NoticeKey::Loop { skipped: mv },
             ("unknown_text_file", None) => NoticeKey::UnknownTextFile { session: mv },
+            ("concurrent_field", Some(other)) => NoticeKey::ConcurrentField { later: mv, earlier: other.parse()? },
             (notice, other) => return Err(format!("Invalid dismissal: {notice} {other:?}").into()),
         };
         dismissals.insert(change, key);
     }
 
     // Pass 3e: which field each SetField sets.
-    let mut fields: HashMap<ChangeId, (String, String, String)> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT change, record, field, value FROM fields")?;
+    let mut fields: HashMap<ChangeId, (String, String, String, Option<ChangeId>)> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT change, record, field, value, replaces FROM fields")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let change: ChangeId = column(row, 0)?.parse()?;
-        fields.insert(change, (row.get(1)?, row.get(2)?, row.get(3)?));
+        let replaces = parse_optional(optional_column(row, 4)?)?;
+        fields.insert(change, (row.get(1)?, row.get(2)?, row.get(3)?, replaces));
     }
 
     // Pass 3f: Milestones: their names, and what each holds.
@@ -598,8 +621,8 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
                 ChangeKind::Dismiss { notice }
             }
             "field" => {
-                let (record, field, value) = fields.remove(&id).ok_or(format!("Missing field for change {}", id))?;
-                ChangeKind::SetField { record, field, value }
+                let (record, field, value, replaces) = fields.remove(&id).ok_or(format!("Missing field for change {}", id))?;
+                ChangeKind::SetField { record, field, value, replaces }
             }
             "milestone" => {
                 let name = milestone_names.remove(&id).ok_or(format!("Missing Milestone name for change {}", id))?;
@@ -711,7 +734,7 @@ const TABLES: &[(&str, &str, &str, &str)] = &[
     ("move_pieces", "change", "change, piece, first_char, last_char, from_anchor", "change, piece, first_char, last_char, from_anchor, moved_text"),
     ("move_seen", "change", "change, device, counter", "change, device, counter"),
     ("dismissals", "change", "change, notice, move, other_move", "change, notice, move, other_move"),
-    ("fields", "change", "change, record, field, value", "change, record, field, value"),
+    ("fields", "change", "change, record, field, value, replaces", "change, record, field, value, replaces"),
     ("milestones", "change", "change, name", "change, name"),
     ("milestone_seen", "change", "change, device, counter", "change, device, counter"),
 ];
@@ -950,11 +973,27 @@ mod test {
     use super::*;
     
     #[test]
+    fn what_a_field_replaced_and_its_notice_round_trip() {
+        use crate::change::PREAMBLE_RECORD;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Rain.db");
+        let mut doc = Doc::new(DeviceId(1));
+        let a = doc.set_field_local(PREAMBLE_RECORD, "raw", "one", 1000);
+        let b = doc.set_field_local(PREAMBLE_RECORD, "raw", "two", 2000);
+        let dismiss = doc.dismiss_local(NoticeKey::ConcurrentField { later: b.id, earlier: a.id }, 3000);
+        save(&path, &[a.clone(), b.clone(), dismiss.clone()], &doc).unwrap();
+        let (changes, loaded) = load(&path, DeviceId(1)).unwrap();
+        assert_eq!(changes, vec![a.clone(), b.clone(), dismiss]);
+        assert!(matches!(&changes[1].kind, ChangeKind::SetField { replaces: Some(r), .. } if *r == a.id));
+        assert_eq!(loaded.field(PREAMBLE_RECORD, "raw"), Some("two"));
+    }
+
+    #[test]
     fn test_migrate() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version as i64, STORAGE_VERSION);
     }
 
     #[test]

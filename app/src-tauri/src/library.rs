@@ -92,6 +92,8 @@ pub struct Conflict {
 pub struct Library {
     pub items: Vec<Item>,
     pub conflicts: Vec<Conflict>,
+    /// The built-in Story elements' names: every Work has them.
+    pub built_in: Vec<String>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -190,10 +192,7 @@ fn read_item(root: &Path, path: &Path, text: &str) -> Option<Item> {
     item.description = description.join(" ");
     match kind {
         Kind::Look => {
-            item.styles = text.lines().map(str::trim)
-                .filter(|l| !l.is_empty() && !l.starts_with("//"))
-                .map(str::to_string)
-                .collect();
+            item.styles = look_styles(text);
             if item.styles.is_empty() {
                 item.problems.push("lists no Styles".into());
             }
@@ -220,6 +219,19 @@ fn read_item(root: &Path, path: &Path, text: &str) -> Option<Item> {
     Some(item)
 }
 
+/// A Look's Styles, in stack order: its lines that aren't comments.
+pub fn look_styles(text: &str) -> Vec<String> {
+    text.lines().map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("//"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The built-in Story elements: the ones the app ships, which every Work has.
+pub fn built_in_elements() -> impl Iterator<Item = (&'static str, &'static str)> {
+    DEFAULTS.iter().filter_map(|(path, text)| Some((path.strip_prefix("elements/")?.strip_suffix(".typ")?, *text)))
+}
+
 /// Does the file define a function (or value) called `name`?
 fn defines(text: &str, name: &str) -> bool {
     text.lines().map(str::trim).any(|line| {
@@ -231,7 +243,7 @@ fn defines(text: &str, name: &str) -> bool {
 
 /// Everything in the library, and the Conflict copies waiting for the Author.
 pub fn list(root: &Path) -> Library {
-    let mut library = Library::default();
+    let mut library = Library { built_in: built_in_elements().map(|(name, _)| name.to_string()).collect(), ..Library::default() };
     for path in files(root) {
         if let Some(main) = conflicts::main_of(&path) {
             library.conflicts.push(Conflict { path: relative(root, &main), copy: relative(root, &path) });

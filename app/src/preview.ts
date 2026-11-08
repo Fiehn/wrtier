@@ -24,6 +24,8 @@ export type PreviewHooks = {
   reveal(id: string, from: number, to: number): void;
   /** Where the cursor is in this Work (UTF-16), if it's open. */
   cursorOf(id: string): number | null;
+  /** The Work's Looks, in its Preamble's order. */
+  looksOf(id: string): Promise<string[]>;
   error(message: string): void;
 };
 
@@ -71,12 +73,25 @@ export class PagePreview {
   private inView = new Set<number>();
   private readonly observer: IntersectionObserver;
 
+  /** The Look the pages are in: picked here, remembered on this Device for each Work. */
+  private look: string | null = null;
+
   constructor(
     private readonly root: HTMLElement,
     private readonly bar: HTMLElement,
     private readonly list: HTMLElement,
+    private readonly picker: HTMLSelectElement,
     private readonly hooks: PreviewHooks,
   ) {
+    this.picker.addEventListener("change", () => {
+      this.look = this.picker.value || null;
+      try {
+        if (this.work) localStorage.setItem(`look:${this.work}`, this.picker.value);
+      } catch {
+        // not remembered, then: no harm done
+      }
+      this.compileSoon(0);
+    });
     // Pages are drawn as they come near the visible area (a screen's height ahead).
     this.observer = new IntersectionObserver((entries) => {
       for (const entry of entries) {
@@ -183,6 +198,36 @@ export class PagePreview {
     this.work = work;
     this.clear();
     this.showBar(null);
+    void this.preambleChanged(work);
+  }
+
+  /** A Work's Preamble changed (its Looks may have): pick the Look again, and compile. */
+  async preambleChanged(work: string | null) {
+    if (work !== this.work) return;
+    let looks: string[] = [];
+    if (work) {
+      try {
+        looks = await this.hooks.looksOf(work);
+      } catch {
+        // not readable right now: the Work's first Look is used
+      }
+    }
+    if (work !== this.work) return;
+    let remembered: string | null = null;
+    try {
+      remembered = work ? localStorage.getItem(`look:${work}`) : null;
+    } catch {
+      // nothing remembered
+    }
+    this.look = remembered && looks.includes(remembered) ? remembered : (looks[0] ?? null);
+    this.picker.replaceChildren(...looks.map((name, i) => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = i === 0 ? `${name} (the Work's own)` : name;
+      return option;
+    }));
+    this.picker.value = this.look ?? "";
+    this.picker.hidden = looks.length < 2;
     if (work && this.open) this.compileSoon(0);
   }
 
@@ -212,7 +257,7 @@ export class PagePreview {
     this.running = true;
     try {
       await this.hooks.settled(work);
-      const compiled = await invoke<Compiled>("compile_preview", { id: work });
+      const compiled = await invoke<Compiled>("compile_preview", { id: work, look: this.look });
       if (work === this.work) this.showCompiled(compiled);
     } catch (e) {
       if (work === this.work) this.hooks.error(String(e));

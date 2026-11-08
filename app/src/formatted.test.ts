@@ -1,7 +1,59 @@
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
-import { spansForTests } from "./formatted";
+import { bracketsForTests, spansForTests } from "./formatted";
 import { parseMarkup } from "./markup";
+import { elementsFacet, type ElementInfo } from "./elements";
+import { fromHistory } from "./sync";
+
+const elements: ElementInfo[] = [
+  { name: "block-text", title: "Block text", shownAs: "block", inWork: true },
+  { name: "epigraph", title: "Epigraph", shownAs: "block", inWork: true },
+];
+
+function editor(doc: string) {
+  return EditorState.create({ doc, extensions: [elementsFacet.of(elements), ...bracketsForTests] });
+}
+
+/** Deletes `from`..`to` as the Author would (Backspace, Delete, or a selection). */
+function del(state: EditorState, from: number, to: number, userEvent = "delete.backward") {
+  return state.update({ changes: { from, to }, selection: { anchor: from }, userEvent }).state;
+}
+
+describe("a Story element's brackets in the Formatted view", () => {
+  it("can't be deleted on their own", () => {
+    let s = editor("#block-text[Dear Anna,]");
+    s = del(s, 11, 12); // Backspace at the start of its text
+    expect(s.doc.toString()).toBe("#block-text[Dear Anna,]");
+    s = del(s, 21, 23, "delete.selection"); // ",]" selected
+    expect(s.doc.toString()).toBe("#block-text[Dear Anna]");
+  });
+
+  it("go with the command when it's deleted, at once or letter by letter", () => {
+    expect(del(editor("A #block-text[Dear Anna] B"), 2, 13, "delete.selection").doc.toString()).toBe("A Dear Anna B");
+    let s = editor("#epigraph[Long.]");
+    for (let at = 9; at > 0; at--) s = del(s, at - 1, at); // backspacing the command away
+    expect(s.doc.toString()).toBe("Long.");
+  });
+
+  it("stay while the command is only renamed", () => {
+    let s = editor("#epigraph[Long.]");
+    s = s.update({ changes: { from: 1, to: 9, insert: "block-text" }, userEvent: "input.type" }).state;
+    expect(s.doc.toString()).toBe("#block-text[Long.]");
+  });
+
+  it("leave typing over a selection alone, apart from the bracket", () => {
+    let s = editor("#epigraph[Long.] After.");
+    // ". Aft" and the hidden "]" between them, typed over with "!":
+    s = s.update({ changes: { from: 14, to: 20, insert: "!" }, userEvent: "input.type" }).state;
+    expect(s.doc.toString()).toBe("#epigraph[Long!]er.");
+  });
+
+  it("never change what comes from the History", () => {
+    let s = editor("#epigraph[Long.]");
+    s = s.update({ changes: { from: 15, to: 16 }, annotations: fromHistory.of(true) }).state;
+    expect(s.doc.toString()).toBe("#epigraph[Long.");
+  });
+});
 
 describe("the Formatted view's spans", () => {
   it("parsing only the edited paragraph always gives what parsing everything gives", () => {

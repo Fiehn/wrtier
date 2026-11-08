@@ -554,6 +554,45 @@ main > :not(#panes) {
   color: var(--muted);
 }
 
+/* A Story element's head, shown as a small label in front of its text. */
+.cm-tp-element {
+  display: inline-block;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 0.68em;
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--chip);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-right: 0.4em;
+  vertical-align: 0.15em;
+}
+
+/* One with no text of its own (a scene break) stands alone, centred like on the page. */
+.cm-tp-element-whole {
+  display: block;
+  width: fit-content;
+  margin: 0.2em auto;
+}
+
+/* In the Style library but not in this Work: it won't typeset until it's added. */
+.cm-tp-element-missing {
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+
+/* The lines of a block Story element (an epigraph, a letter): set apart from the prose. */
+.cm-tp-block {
+  border-left: 3px solid var(--chip);
+  padding-left: 12px !important;
+}
+
 .cm-tp-comment {
   color: var(--muted);
   font-style: italic;
@@ -693,6 +732,114 @@ main > :not(#panes) {
   font-size: 13px;
   color: var(--muted);
   margin-bottom: 10px;
+}
+
+/* A Style the Work uses changed in the library: shown until the next edit records it. */
+#style-notice {
+  font-size: 13px;
+  background: var(--chip);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+}
+
+/* ---- The Preamble dialog ---- */
+
+dialog#preamble {
+  max-width: 560px;
+  max-height: calc(100vh - 32px);
+}
+
+.preamble-form section {
+  margin-top: 14px;
+}
+
+.preamble-form h3 {
+  font-size: 14px;
+  margin: 0 0 2px;
+}
+
+.preamble-form p.muted {
+  font-size: 12px;
+  margin: 0 0 6px;
+}
+
+.preamble-list {
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+}
+
+.preamble-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: var(--panel);
+  margin-bottom: 3px;
+}
+
+.preamble-list li > span {
+  flex: 1;
+}
+
+.preamble-list li.muted {
+  background: none;
+  padding-left: 0;
+  font-size: 13px;
+}
+
+.preamble-list .missing {
+  color: var(--warn-text);
+}
+
+.preamble-list .missing::after {
+  content: " ⚠";
+}
+
+.preamble-list small {
+  color: var(--muted);
+}
+
+.preamble-add select {
+  flex: 1;
+}
+
+.preamble-add button {
+  flex: none;
+}
+
+.preamble-settings label {
+  display: block;
+  margin-top: 6px;
+}
+
+.preamble-form textarea {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--text);
+  resize: vertical;
+}
+
+.preamble-conflict {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  padding: 6px 8px;
+  border-radius: 5px;
+  margin: 8px 0 4px;
+  font-size: 13px;
+}
+
+#preview-look {
+  font: inherit;
+  font-size: 13px;
+  max-width: 50%;
 }
 
 #status {

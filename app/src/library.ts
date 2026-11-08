@@ -18,7 +18,7 @@ export type LibraryItem = {
   styles: string[];
 };
 type Conflict = { path: string; copy: string };
-type Library = { items: LibraryItem[]; conflicts: Conflict[] };
+type Library = { items: LibraryItem[]; conflicts: Conflict[]; builtIn: string[] };
 export type NewElement = { title: string; shownAs: string; docx: string; description: string };
 
 /** What the panel does with the rest of the page. */
@@ -36,6 +36,8 @@ const GROUPS: { kind: Kind; label: string }[] = [
 
 export class LibraryPanel {
   items: LibraryItem[] = [];
+  /** The built-in Story elements' names: every Work has them. */
+  builtIn: string[] = [];
 
   constructor(
     private readonly list: HTMLElement,
@@ -51,6 +53,7 @@ export class LibraryPanel {
   async refresh() {
     const library = await invoke<Library>("get_library");
     this.items = library.items;
+    this.builtIn = library.builtIn;
     this.showConflicts(library.conflicts);
     this.list.replaceChildren();
     for (const group of GROUPS) {

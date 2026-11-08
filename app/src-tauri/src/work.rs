@@ -105,6 +105,8 @@ pub struct WorkState {
     pub sync_problem: Option<String>,
     /// The Work's History moved away underneath the open tab (on another Device), if it did.
     pub moved: Option<Whereabouts>,
+    /// A Style (or Look, or Story element) changed in the library since the Work recorded it.
+    pub style_notice: Option<String>,
 }
 
 /// Where a Work's History went when it disappeared from under an open tab.
@@ -173,6 +175,10 @@ pub struct OpenWork {
     /// if it's moved or renamed elsewhere.
     identity: Option<String>,
     pub whereabouts: Option<Whereabouts>,
+    /// The Style library as of which this Work last recorded what it uses (see `Vault`'s
+    /// library generation): an edit after the library changed records the new versions first.
+    styles_checked: Option<u64>,
+    pub style_notice: Option<String>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -193,6 +199,8 @@ impl OpenWork {
         OpenWork {
             identity: storage::identity(&db).ok().flatten(),
             whereabouts: None,
+            styles_checked: None,
+            style_notice: None,
             mine,
             db_stamp,
             typ_stamp,
@@ -233,7 +241,39 @@ impl OpenWork {
             took_in: None,
             sync_problem: self.sync_problem.clone(),
             moved: self.whereabouts.clone(),
+            style_notice: self.style_notice.clone(),
         }
+    }
+
+    /// Does this Work need to record the Style library as of `generation` before an edit?
+    pub fn styles_due(&self, generation: u64) -> bool {
+        self.styles_checked != Some(generation)
+    }
+
+    /// Records the library files the Work uses that changed (or were never recorded), as of
+    /// `generation`. Only while no burst is open: nothing else may be recorded then.
+    fn record_styles(&mut self, library: Option<(&crate::preamble::Shelf, u64)>, now_ms: u64) {
+        let Some((shelf, generation)) = library else { return };
+        if self.doc.burst().is_some() || !self.styles_due(generation) {
+            return;
+        }
+        self.styles_checked = Some(generation);
+        let changes = crate::preamble::record_unrecorded(&mut self.doc, shelf, now_ms);
+        self.unsaved.extend(changes);
+        self.style_notice = None;
+    }
+
+    /// The Author changed the Preamble (in the dialog): it's recorded at once, with the
+    /// library files it now uses. An open burst closes first.
+    pub fn set_preamble(&mut self, preamble: &crate::preamble::Preamble, shelf: &crate::preamble::Shelf, generation: u64, now_ms: u64) -> WorkState {
+        self.close_burst(now_ms);
+        let changes = preamble.record(&mut self.doc, now_ms);
+        self.unsaved.extend(changes);
+        self.styles_checked = None;
+        self.record_styles(Some((shelf, generation)), now_ms);
+        self.save();
+        self.keep_recovery(false);
+        self.state(Vec::new())
     }
 
     /// What tells this Work from every other (see `storage::identity`).
@@ -295,9 +335,12 @@ impl OpenWork {
     }
 
     /// Applies a batch of ops from the editor, saves, and says what the editor needs to know.
-    pub fn edit(&mut self, ops: Vec<Op>, device_name: Option<&str>, now_ms: u64) -> Result<WorkState, String> {
+    /// `library`: the Style library and its generation, if it changed since this Work last
+    /// recorded what it uses (see `styles_due`).
+    pub fn edit(&mut self, ops: Vec<Op>, device_name: Option<&str>, library: Option<(&crate::preamble::Shelf, u64)>, now_ms: u64) -> Result<WorkState, String> {
         if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync)) {
             self.name_this_device(device_name, now_ms)?;
+            self.record_styles(library, now_ms);
         }
         let count = ops.len();
         let mut patches = Vec::new();
@@ -742,13 +785,13 @@ mod tests {
         let before = w.state(Vec::new()).outside;
         w.tick(now_ms);
         assert!(w.state(Vec::new()).outside > before, "the change was noticed");
-        w.edit(vec![Op::Sync], None, now_ms + 1).unwrap()
+        w.edit(vec![Op::Sync], None, None, now_ms + 1).unwrap()
     }
 
     #[test]
     fn another_devices_changes_arrive_without_disturbing_the_open_burst() {
         let (_dir, mut w) = work("abc");
-        w.edit(vec![typing(3, "X")], None, 1000).unwrap(); // a burst is open
+        w.edit(vec![typing(3, "X")], None, None, 1000).unwrap(); // a burst is open
         phone_types(&w, 0, "P");
         let state = notice_and_sync(&mut w, 2000);
         assert_eq!(w.text(), "PabcX");
@@ -775,12 +818,12 @@ mod tests {
     #[test]
     fn an_edit_in_vim_waits_for_the_open_burst() {
         let (_dir, mut w) = work("abc");
-        w.edit(vec![typing(3, "X")], None, 1000).unwrap();
+        w.edit(vec![typing(3, "X")], None, None, 1000).unwrap();
         std::fs::write(&w.typ, "abc!").unwrap();
         notice_and_sync(&mut w, 2000);
         assert_eq!(w.text(), "abcX", "not yet: the burst is open");
         w.tick(9000); // the burst closes, and the waiting edit counts as a change again
-        w.edit(vec![Op::Sync], None, 9001).unwrap();
+        w.edit(vec![Op::Sync], None, None, 9001).unwrap();
         assert!(w.text().contains('X') && w.text().contains('!'), "{}", w.text());
     }
 
@@ -789,7 +832,7 @@ mod tests {
         let (dir, mut w) = work("abc");
         let older = dir.path().join("older.db");
         std::fs::copy(&w.db, &older).unwrap();
-        w.edit(vec![typing(3, "d")], None, 1000).unwrap();
+        w.edit(vec![typing(3, "d")], None, None, 1000).unwrap();
         w.tick(8000); // "d" saved
         std::fs::copy(&older, &w.db).unwrap(); // Syncthing puts back a copy from before it
         notice_and_sync(&mut w, 9000);
@@ -832,7 +875,7 @@ mod tests {
     #[test]
     fn typing_is_saved_when_the_burst_closes() {
         let (_dir, mut w) = work("");
-        let state = w.edit(vec![typing(0, "Hello"), typing(5, " world")], Some("Laptop"), 1000).unwrap();
+        let state = w.edit(vec![typing(0, "Hello"), typing(5, " world")], Some("Laptop"), None, 1000).unwrap();
         assert_eq!(state.len, 11);
         assert!(state.burst.is_some());
         assert!(saved(&w).is_empty(), "nothing recorded while the burst is open");
@@ -848,18 +891,18 @@ mod tests {
     #[test]
     fn positions_from_the_editor_are_utf16() {
         let (_dir, mut w) = work("a😊b");
-        let state = w.edit(vec![typing(3, "X")], None, 1000).unwrap(); // after the emoji
+        let state = w.edit(vec![typing(3, "X")], None, None, 1000).unwrap(); // after the emoji
         assert_eq!(w.text(), "a😊Xb");
         assert_eq!(state.len, 5);
-        assert!(w.edit(vec![typing(2, "!")], None, 1100).is_err(), "inside the emoji");
-        assert!(w.edit(vec![typing(99, "!")], None, 1200).is_err(), "past the end");
+        assert!(w.edit(vec![typing(2, "!")], None, None, 1100).is_err(), "inside the emoji");
+        assert!(w.edit(vec![typing(99, "!")], None, None, 1200).is_err(), "past the end");
         assert_eq!(w.text(), "a😊Xb", "nothing happened");
     }
 
     #[test]
     fn a_paste_is_its_own_change_at_once() {
         let (_dir, mut w) = work("ab");
-        w.edit(vec![typing(1, "x"), Op::Paste { from: 3, to: 3, text: "PASTED".into() }], None, 1000).unwrap();
+        w.edit(vec![typing(1, "x"), Op::Paste { from: 3, to: 3, text: "PASTED".into() }], None, None, 1000).unwrap();
         assert_eq!(w.text(), "axbPASTED");
         assert_eq!(saved(&w), vec!["insert", "insert", "insert"], "the open burst closed first, then the paste");
     }
@@ -867,12 +910,12 @@ mod tests {
     #[test]
     fn cutting_and_pasting_the_same_text_is_a_move() {
         let (_dir, mut w) = work("One. Two. Three.");
-        w.edit(vec![Op::Cut { from: 0, to: 5 }], None, 1000).unwrap();
+        w.edit(vec![Op::Cut { from: 0, to: 5 }], None, None, 1000).unwrap();
         assert_eq!(w.text(), "Two. Three.");
-        w.edit(vec![Op::Cursor { pos: 11 }], None, 20_000).unwrap(); // look around for a while
+        w.edit(vec![Op::Cursor { pos: 11 }], None, None, 20_000).unwrap(); // look around for a while
         w.tick(30_000);
         assert_eq!(saved(&w), vec!["insert"], "the cut waits for its paste");
-        let state = w.edit(vec![Op::Paste { from: 11, to: 11, text: "One. ".into() }], None, 31_000).unwrap();
+        let state = w.edit(vec![Op::Paste { from: 11, to: 11, text: "One. ".into() }], None, None, 31_000).unwrap();
         assert_eq!(w.text(), "Two. Three.One. ");
         assert!(state.patches.is_empty(), "the editor already shows it");
         assert_eq!(saved(&w), vec!["insert", "move"]);
@@ -881,7 +924,7 @@ mod tests {
     #[test]
     fn a_cut_followed_by_typing_is_a_deletion() {
         let (_dir, mut w) = work("One. Two.");
-        w.edit(vec![Op::Cut { from: 0, to: 5 }, typing(0, "X")], None, 1000).unwrap();
+        w.edit(vec![Op::Cut { from: 0, to: 5 }, typing(0, "X")], None, None, 1000).unwrap();
         w.close(2000);
         assert_eq!(w.text(), "XTwo.");
         assert_eq!(saved(&w), vec!["insert", "delete", "insert"]);
@@ -890,7 +933,7 @@ mod tests {
     #[test]
     fn dragging_a_selection_is_a_move() {
         let (_dir, mut w) = work("abcdef");
-        w.edit(vec![Op::Move { from: 0, to: 2, at: 6 }], None, 1000).unwrap();
+        w.edit(vec![Op::Move { from: 0, to: 2, at: 6 }], None, None, 1000).unwrap();
         assert_eq!(w.text(), "cdefab");
         assert_eq!(saved(&w), vec!["insert", "move"]);
     }
@@ -898,9 +941,9 @@ mod tests {
     #[test]
     fn undo_inside_the_burst_edits_the_draft() {
         let (_dir, mut w) = work("");
-        w.edit(vec![typing(0, "Hello"), typing(5, " world")], None, 1000).unwrap();
+        w.edit(vec![typing(0, "Hello"), typing(5, " world")], None, None, 1000).unwrap();
         // The editor undoes " world" itself and tells us.
-        let state = w.edit(vec![Op::Delete { from: 5, to: 11, origin: Origin::Undo }], None, 1100).unwrap();
+        let state = w.edit(vec![Op::Delete { from: 5, to: 11, origin: Origin::Undo }], None, None, 1100).unwrap();
         assert!(state.patches.is_empty());
         w.close(2000);
         assert_eq!(w.text(), "Hello");
@@ -910,25 +953,25 @@ mod tests {
     #[test]
     fn undo_beyond_the_burst_reverts_the_latest_change_and_redo_restores_it() {
         let (_dir, mut w) = work("The rain.");
-        w.edit(vec![typing(8, " had stopped")], None, 1000).unwrap();
+        w.edit(vec![typing(8, " had stopped")], None, None, 1000).unwrap();
         w.tick(10_000); // closed and saved
         assert_eq!(w.text(), "The rain had stopped.");
-        let state = w.edit(vec![Op::Undo], None, 11_000).unwrap();
+        let state = w.edit(vec![Op::Undo], None, None, 11_000).unwrap();
         assert_eq!(w.text(), "The rain.");
         assert_eq!(editor_after("The rain had stopped.", &state), "The rain.");
-        let state = w.edit(vec![Op::Redo], None, 12_000).unwrap();
+        let state = w.edit(vec![Op::Redo], None, None, 12_000).unwrap();
         assert_eq!(editor_after("The rain.", &state), "The rain had stopped.");
         assert_eq!(saved(&w), vec!["insert", "insert", "revert", "revert"]);
         // Undo only goes back through this sitting: the text from before stays.
-        w.edit(vec![Op::Undo], None, 13_000).unwrap();
-        w.edit(vec![Op::Undo], None, 14_000).unwrap();
+        w.edit(vec![Op::Undo], None, None, 13_000).unwrap();
+        w.edit(vec![Op::Undo], None, None, 14_000).unwrap();
         assert_eq!(w.text(), "The rain.");
     }
 
     #[test]
     fn undo_with_a_burst_open_drops_the_burst() {
         let (_dir, mut w) = work("abc");
-        let state = w.edit(vec![typing(3, "def"), Op::Undo], None, 1000).unwrap();
+        let state = w.edit(vec![typing(3, "def"), Op::Undo], None, None, 1000).unwrap();
         assert_eq!(w.text(), "abc");
         assert_eq!(editor_after("abcdef", &state), "abc");
         assert!(state.burst.is_none());
@@ -937,9 +980,9 @@ mod tests {
     #[test]
     fn undoing_a_cut_puts_it_back() {
         let (_dir, mut w) = work("One. Two.");
-        w.edit(vec![Op::Cut { from: 0, to: 5 }], None, 1000).unwrap();
+        w.edit(vec![Op::Cut { from: 0, to: 5 }], None, None, 1000).unwrap();
         // The editor's undo re-inserts the cut text.
-        let state = w.edit(vec![Op::Type { from: 0, to: 0, text: "One. ".into(), origin: Origin::Undo }], None, 1100).unwrap();
+        let state = w.edit(vec![Op::Type { from: 0, to: 0, text: "One. ".into(), origin: Origin::Undo }], None, None, 1100).unwrap();
         assert_eq!(w.text(), "One. Two.");
         assert!(state.patches.is_empty());
         w.close(2000);
@@ -949,11 +992,11 @@ mod tests {
     #[test]
     fn redo_after_undoing_a_whole_draft_types_it_again() {
         let (_dir, mut w) = work("abc");
-        w.edit(vec![typing(3, "def")], None, 1000).unwrap();
-        let state = w.edit(vec![Op::Delete { from: 3, to: 6, origin: Origin::Undo }], None, 1100).unwrap();
+        w.edit(vec![typing(3, "def")], None, None, 1000).unwrap();
+        let state = w.edit(vec![Op::Delete { from: 3, to: 6, origin: Origin::Undo }], None, None, 1100).unwrap();
         assert_eq!(w.text(), "abc");
         assert!(state.burst.is_none(), "the empty burst was dropped");
-        let state = w.edit(vec![Op::Type { from: 3, to: 3, text: "def".into(), origin: Origin::Redo }], None, 1200).unwrap();
+        let state = w.edit(vec![Op::Type { from: 3, to: 3, text: "def".into(), origin: Origin::Redo }], None, None, 1200).unwrap();
         assert_eq!(w.text(), "abcdef");
         assert!(state.patches.is_empty(), "the editor already shows it");
         w.close(2000);
@@ -963,10 +1006,10 @@ mod tests {
     #[test]
     fn redo_after_undoing_a_deletion_deletes_again() {
         let (_dir, mut w) = work("abcdef");
-        w.edit(vec![Op::Delete { from: 3, to: 6, origin: Origin::Input }], None, 1000).unwrap();
-        w.edit(vec![Op::Type { from: 3, to: 3, text: "def".into(), origin: Origin::Undo }], None, 1100).unwrap();
+        w.edit(vec![Op::Delete { from: 3, to: 6, origin: Origin::Input }], None, None, 1000).unwrap();
+        w.edit(vec![Op::Type { from: 3, to: 3, text: "def".into(), origin: Origin::Undo }], None, None, 1100).unwrap();
         assert_eq!(w.text(), "abcdef");
-        let state = w.edit(vec![Op::Delete { from: 3, to: 6, origin: Origin::Redo }], None, 1200).unwrap();
+        let state = w.edit(vec![Op::Delete { from: 3, to: 6, origin: Origin::Redo }], None, None, 1200).unwrap();
         assert_eq!(w.text(), "abc");
         assert!(state.patches.is_empty());
         w.close(2000);
@@ -976,9 +1019,9 @@ mod tests {
     #[test]
     fn the_editors_undo_after_the_burst_closed_becomes_a_revert() {
         let (_dir, mut w) = work("abc");
-        w.edit(vec![typing(3, "def")], None, 1000).unwrap();
+        w.edit(vec![typing(3, "def")], None, None, 1000).unwrap();
         w.tick(10_000); // the timer closed it before the editor's undo arrived
-        let state = w.edit(vec![Op::Delete { from: 3, to: 6, origin: Origin::Undo }], None, 10_100).unwrap();
+        let state = w.edit(vec![Op::Delete { from: 3, to: 6, origin: Origin::Undo }], None, None, 10_100).unwrap();
         assert_eq!(w.text(), "abc");
         assert_eq!(editor_after("abc", &state), "abc");
         assert_eq!(saved(&w), vec!["insert", "insert", "revert"]);
@@ -987,7 +1030,7 @@ mod tests {
     #[test]
     fn the_open_burst_is_kept_until_it_is_saved() {
         let (_dir, mut w) = work("abc");
-        w.edit(vec![typing(3, "def")], None, 1000).unwrap();
+        w.edit(vec![typing(3, "def")], None, None, 1000).unwrap();
         assert!(w.recovery.json.exists(), "kept from the first keystroke");
         w.tick(10_000); // closed and saved
         assert!(!w.recovery.json.exists(), "nothing left to keep");
@@ -996,12 +1039,12 @@ mod tests {
     #[test]
     fn the_text_file_follows_on_leaving_and_every_30_seconds() {
         let (_dir, mut w) = work("abc");
-        w.edit(vec![typing(3, "d")], None, 1000).unwrap();
+        w.edit(vec![typing(3, "d")], None, None, 1000).unwrap();
         w.tick(7000); // saved, but the Text file waits
         assert_eq!(text_of(&w.typ), "abc");
         w.tick(31_000);
         assert_eq!(text_of(&w.typ), "abcd");
-        w.edit(vec![typing(4, "e")], None, 32_000).unwrap();
+        w.edit(vec![typing(4, "e")], None, None, 32_000).unwrap();
         w.leave(33_000);
         assert_eq!(text_of(&w.typ), "abcde");
     }
@@ -1010,7 +1053,7 @@ mod tests {
     fn a_text_file_edited_outside_is_not_overwritten_before_it_is_taken_in() {
         let (_dir, mut w) = work("abc");
         std::fs::write(&w.typ, "edited in vim").unwrap();
-        w.edit(vec![typing(3, "d")], None, 1000).unwrap();
+        w.edit(vec![typing(3, "d")], None, None, 1000).unwrap();
         w.leave(2000);
         assert_eq!(std::fs::read_to_string(&w.typ).unwrap(), "edited in vim");
     }

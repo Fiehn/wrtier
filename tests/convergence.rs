@@ -240,7 +240,7 @@ fn expected_name(all: &[Change], device: DeviceId) -> Option<String> {
     all.iter()
         .filter(|c| in_effect(c.id, &reverted_by))
         .filter_map(|c| match &c.kind {
-            ChangeKind::SetField { record: r, field, value } if *r == record && field == "name" => Some((c.order_key(), value.clone())),
+            ChangeKind::SetField { record: r, field, value, .. } if *r == record && field == "name" => Some((c.order_key(), value.clone())),
             _ => None,
         })
         .max_by_key(|(order, _)| *order)

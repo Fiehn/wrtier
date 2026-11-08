@@ -6,7 +6,7 @@
 //! such shortcut is checked against a full recompute. `crate::reference::doc` is the first,
 //! simple version; this one must behave identically (`tests/against_reference.rs`).
 
-use crate::change::{device_record, is_meta_record, milestone_record, session_record, Change, ChangeKind, InsertRun, CharRange, NoticeKey, Span};
+use crate::change::{device_record, is_free_text, is_meta_record, milestone_record, session_record, Change, ChangeKind, InsertRun, CharRange, NoticeKey, Span};
 use crate::text_file;
 use crate::fugue::Tree;
 use crate::ids::{ChangeId, DeviceId, Hlc, CharId};
@@ -25,7 +25,7 @@ pub struct Doc {
     moves: Vec<(Hlc, MoveInfo)>,                   // every Move applied, with its clock for sorting
     typed_into: HashMap<CharId, Vec<CharId>>,      // a piece's anchor → nodes typed or dropped into it
     dismissals: Vec<(ChangeId, NoticeKey)>,        // every Dismiss Change, and the notice it hides
-    fields: HashMap<(String, String), Vec<(Hlc, ChangeId, String)>>, // (record, field) → every value set
+    fields: HashMap<(String, String), Vec<FieldValue>>, // (record, field) → every value set
     content: Vec<(ChangeId, Hlc)>,                 // every Change to the Work's content, as applied
     content_set: HashSet<ChangeId>,                // the same, for lookups
     milestones: Vec<(ChangeId, Hlc, String, Vec<(DeviceId, u32)>)>, // every Milestone: id, time, name, what it holds
@@ -35,6 +35,16 @@ pub struct Doc {
     // Worked out by `refresh` (or a fast path) after every Change, so reading the text doesn't redo it.
     visible: Vec<u32>, // the visible characters' tree nodes, in reading order
     burst: Option<Burst>, // the open typing burst, if any
+}
+
+/// One value a field was set to.
+#[derive(Clone, Debug)]
+struct FieldValue {
+    hlc: Hlc,
+    id: ChangeId,
+    value: String,
+    /// The value it replaced, as the setting Device saw it.
+    replaces: Option<ChangeId>,
 }
 
 /// A typing burst: one stretch of new text at one spot, kept as a draft until it closes.
@@ -228,6 +238,11 @@ impl Doc {
             let nodes = self.visible.iter().copied().filter(|&n| changes.contains(&self.tree.change_at(n))).collect();
             found.push((NoticeKey::UnknownTextFile { session }, nodes));
         }
+        // Free text outside the Work's text (the Preamble's raw Typst) edited on two Devices:
+        // it points at no text in the Work; `concurrent_field` gives the version that lost.
+        for (_, _, later, earlier) in self.concurrent_fields() {
+            found.push((NoticeKey::ConcurrentField { later, earlier }, FxHashSet::default()));
+        }
         found.into_iter()
             .filter(|(key, _)| !self.is_dismissed(*key))
             .map(|(key, involved)| {
@@ -267,11 +282,42 @@ impl Doc {
     /// The current value of a record's field: the latest in the fixed Change order among the
     /// Changes in effect. None if it was never set, or every value was reverted.
     pub fn field(&self, record: &str, field: &str) -> Option<&str> {
+        self.field_value(record, field).map(|v| v.value.as_str())
+    }
+
+    /// The value in effect, with the Change that set it.
+    fn field_value(&self, record: &str, field: &str) -> Option<&FieldValue> {
         self.fields.get(&(record.to_string(), field.to_string()))?
             .iter()
-            .filter(|(_, id, _)| self.is_in_effect(*id))
-            .max_by_key(|(hlc, id, _)| (*hlc, id.device))
-            .map(|(_, _, value)| value.as_str())
+            .filter(|v| self.is_in_effect(v.id))
+            .max_by_key(|v| (v.hlc, v.id.device))
+    }
+
+    /// The value a field had in an earlier Change, such as the version a Merge notice says lost.
+    pub fn field_set_by(&self, record: &str, field: &str, change: ChangeId) -> Option<&str> {
+        self.fields.get(&(record.to_string(), field.to_string()))?
+            .iter().find(|v| v.id == change).map(|v| v.value.as_str())
+    }
+
+    /// Free-text fields whose value in effect was set without seeing another Device's edit of
+    /// the same value: (record, field, the value shown, the latest one that lost). The notice
+    /// goes once the Author edits the field again (that edit replaces the shown value).
+    fn concurrent_fields(&self) -> Vec<(String, String, ChangeId, ChangeId)> {
+        let mut found = Vec::new();
+        for ((record, field), values) in &self.fields {
+            if !is_free_text(record, field) {
+                continue;
+            }
+            let Some(shown) = self.field_value(record, field) else { continue };
+            let lost = values.iter()
+                .filter(|v| v.id != shown.id && v.replaces == shown.replaces && v.value != shown.value && self.is_in_effect(v.id))
+                .max_by_key(|v| (v.hlc, v.id.device));
+            if let Some(lost) = lost {
+                found.push((record.clone(), field.clone(), shown.id, lost.id));
+            }
+        }
+        found.sort();
+        found
     }
 
     /// A Device's readable name, if it has one.
@@ -433,9 +479,10 @@ impl Doc {
                 // Changes nothing in the text; merge_notices() checks this list.
                 self.dismissals.push((change.id, *notice));
             }
-            ChangeKind::SetField { record, field, value } => {
+            ChangeKind::SetField { record, field, value, replaces } => {
                 // Changes nothing in the text; field() picks the latest value in effect.
-                self.fields.entry((record.clone(), field.clone())).or_default().push((change.hlc, change.id, value.clone()));
+                self.fields.entry((record.clone(), field.clone())).or_default()
+                    .push(FieldValue { hlc: change.hlc, id: change.id, value: value.clone(), replaces: *replaces });
             }
             ChangeKind::Milestone { name, seen } => {
                 // Changes nothing in the text; milestones() lists them.
@@ -888,8 +935,17 @@ impl Doc {
 
     /// Sets a field of a record, such as a Device's name.
     pub fn set_field_local(&mut self, record: &str, field: &str, value: &str, now_ms: u64) -> Change {
-        let kind = ChangeKind::SetField { record: record.to_string(), field: field.to_string(), value: value.to_string() };
+        let replaces = self.field_value(record, field).map(|v| v.id);
+        let kind = ChangeKind::SetField { record: record.to_string(), field: field.to_string(), value: value.to_string(), replaces };
         self.commit_local(kind, now_ms)
+    }
+
+    /// A Merge notice about a free-text field: which field it is, and the version that lost.
+    pub fn concurrent_field(&self, key: NoticeKey) -> Option<(String, String, String)> {
+        let NoticeKey::ConcurrentField { later, earlier } = key else { return None };
+        let (record, field, _, _) = self.concurrent_fields().into_iter().find(|(_, _, l, e)| *l == later && *e == earlier)?;
+        let lost = self.field_set_by(&record, &field, earlier)?.to_string();
+        Some((record, field, lost))
     }
 
     // ---- Milestones ----
@@ -1058,9 +1114,9 @@ impl Doc {
         }
         // Label the Session, for the History view (and the Merge notice if the version was unknown).
         let record = session_record(recorded[0].session);
-        recorded.push(self.import_change(ChangeKind::SetField { record: record.clone(), field: "source".into(), value: "External edit".into() }, now_ms));
+        recorded.push(self.import_change(ChangeKind::SetField { record: record.clone(), field: "source".into(), value: "External edit".into(), replaces: None }, now_ms));
         if !known {
-            recorded.push(self.import_change(ChangeKind::SetField { record, field: "base".into(), value: "unknown".into() }, now_ms));
+            recorded.push(self.import_change(ChangeKind::SetField { record, field: "base".into(), value: "unknown".into(), replaces: None }, now_ms));
         }
         self.session = None; // what's typed next is a new Session
         self.refresh();
@@ -1921,6 +1977,55 @@ mod test {
         phone.apply(&a);
         assert_eq!(laptop.device_name(DeviceId(1)), Some("Old laptop"));
         assert_eq!(phone.device_name(DeviceId(1)), Some("Old laptop"));
+    }
+
+    #[test]
+    fn raw_typst_edited_on_two_devices_gets_a_notice_with_the_version_that_lost() {
+        use crate::change::PREAMBLE_RECORD;
+        let (mut laptop, mut phone) = laptop_and_phone();
+        let first = laptop.set_field_local(PREAMBLE_RECORD, "raw", "#set par(leading: 0.7em)", 1000);
+        phone.apply(&first);
+        assert_eq!(first.kind, ChangeKind::SetField { record: PREAMBLE_RECORD.into(), field: "raw".into(), value: "#set par(leading: 0.7em)".into(), replaces: None });
+        // Both edit it offline, an hour apart: the later wins, but neither had seen the other.
+        let a = phone.set_field_local(PREAMBLE_RECORD, "raw", "#set par(leading: 0.8em)", 2_000);
+        let b = laptop.set_field_local(PREAMBLE_RECORD, "raw", "#show link: underline", 3_602_000);
+        laptop.apply(&a);
+        phone.apply(&b);
+        for doc in [&laptop, &phone] {
+            assert_eq!(doc.field(PREAMBLE_RECORD, "raw"), Some("#show link: underline"));
+            let notices = doc.merge_notices();
+            assert_eq!(notices.len(), 1);
+            assert_eq!(notices[0].key, NoticeKey::ConcurrentField { later: b.id, earlier: a.id });
+            let (_, field, lost) = doc.concurrent_field(notices[0].key).unwrap();
+            assert_eq!((field.as_str(), lost.as_str()), ("raw", "#set par(leading: 0.8em)"));
+        }
+        // Editing it again (having seen the notice) settles it.
+        laptop.set_field_local(PREAMBLE_RECORD, "raw", "#set par(leading: 0.8em)\n#show link: underline", 3_700_000);
+        assert!(laptop.merge_notices().is_empty());
+    }
+
+    #[test]
+    fn edits_that_saw_each_other_or_agree_get_no_notice() {
+        use crate::change::PREAMBLE_RECORD;
+        let (mut laptop, mut phone) = laptop_and_phone();
+        let a = laptop.set_field_local(PREAMBLE_RECORD, "raw", "one", 1000);
+        phone.apply(&a);
+        let b = phone.set_field_local(PREAMBLE_RECORD, "raw", "two", 2000); // saw "one"
+        laptop.apply(&b);
+        assert!(laptop.merge_notices().is_empty());
+        // The same text set on both, offline: nothing was lost.
+        let c = laptop.set_field_local(PREAMBLE_RECORD, "raw", "three", 3000);
+        let d = phone.set_field_local(PREAMBLE_RECORD, "raw", "three", 3000);
+        laptop.apply(&d);
+        phone.apply(&c);
+        assert!(laptop.merge_notices().is_empty() && phone.merge_notices().is_empty());
+        // Other fields (Device names, settings) take the later value quietly.
+        let record = device_record(DeviceId(1));
+        let e = laptop.set_field_local(&record, "name", "Laptop", 4000);
+        let f = phone.set_field_local(&record, "name", "Old laptop", 4000);
+        laptop.apply(&f);
+        phone.apply(&e);
+        assert!(laptop.merge_notices().is_empty());
     }
 
     #[test]

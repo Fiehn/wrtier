@@ -7,6 +7,7 @@ import { showMenu, type MenuItem } from "./menu";
 import { PagePreview } from "./preview";
 import { LibraryPanel } from "./library";
 import { libraryPath } from "./libraryfile";
+import { PreambleDialog, type Preamble } from "./preambledialog";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -116,7 +117,7 @@ function act(run: () => Promise<unknown>) {
 
 // ---- Tabs ----
 
-const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $("status"), moved: $("moved") }, {
+const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $("status"), moved: $("moved"), style: $("style-notice") }, {
   changed: () => {
     $("empty").hidden = tabs.active !== null;
     // A library file is plain Typst: no Formatted view, and no pages of its own.
@@ -132,14 +133,16 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
   committed: (id) => preview.committed(id),
   cursor: (id) => preview.cursor(id),
   closed: (id) => preview.forget(id),
+  addElement: (id, name) => act(() => addElement(id, name)),
 });
 
 // ---- The Page preview (Ctrl+Shift+P), open or not remembered on this Device ----
 
-const preview = new PagePreview($("preview"), $("preview-bar"), $("preview-pages"), {
+const preview = new PagePreview($("preview"), $("preview-bar"), $("preview-pages"), $<HTMLSelectElement>("preview-look"), {
   settled: (id) => tabs.settled(id),
   reveal: (id, from, to) => void tabs.reveal(id, from, to),
   cursorOf: (id) => tabs.cursorOf(id),
+  looksOf: async (id) => (await invoke<{ preamble: Preamble }>("get_preamble", { id })).preamble.looks,
   error: showError,
 });
 
@@ -190,11 +193,68 @@ async function openLibraryFile(path: string, title: string = library.titleOf(pat
   await tabs.addLibrary({ path, title, text });
 }
 
-// The library changed: in a tab here, in another editor, or from another Device.
+// The library changed: in a tab here, in another editor, or from another Device. The Page
+// preview uses the library's versions, so it's compiled again too.
 void listen("library-changed", () => {
-  library.refresh().catch(showError);
+  library.refresh().then(() => refreshElements()).catch(showError);
   void tabs.libraryChanged();
+  void preview.preambleChanged(tabs.activeIsWork ? tabs.active : null);
 });
+
+// ---- A Work's Preamble ----
+
+const preambleDialog = new PreambleDialog(ask);
+
+async function editPreamble(id: string) {
+  await library.refresh(); // the dialog offers what the library has now
+  const name = id.split("/").pop() ?? id;
+  const state = await preambleDialog.open(id, name, library.items, library.builtIn);
+  if (state === undefined) return; // cancelled
+  if (state) tabs.status(id, state);
+  await preambleChanged(id);
+}
+
+/** A Work's Preamble changed: its editor's Story elements and its pages follow. */
+async function preambleChanged(id: string) {
+  await refreshElements(id);
+  await preview.preambleChanged(id);
+}
+
+/** Tells each open Work's editor (or just `only`) which Story elements it has. */
+async function refreshElements(only?: string) {
+  for (const id of tabs.works) {
+    if (only && id !== only) continue;
+    try {
+      const { preamble } = await invoke<{ preamble: Preamble }>("get_preamble", { id });
+      tabs.setElements(id, library.items.filter((i) => i.kind === "storyElement").map((i) => ({
+        name: i.name,
+        title: i.title,
+        shownAs: i.shownAs ?? "block",
+        inWork: library.builtIn.includes(i.name) || preamble.elements.includes(i.name),
+      })));
+    } catch {
+      // gone or unreadable right now: it keeps what it had
+    }
+  }
+}
+
+/** "Add it?": a Story element from the library goes into the Work's Preamble. */
+async function addElement(id: string, name: string) {
+  const { preamble } = await invoke<{ preamble: Preamble }>("get_preamble", { id });
+  if (!preamble.elements.includes(name)) {
+    const state = await invoke<WorkState | null>("set_preamble", { id, preamble: { ...preamble, elements: [...preamble.elements, name] } });
+    if (state) tabs.status(id, state);
+  }
+  await preambleChanged(id);
+}
+
+// Ctrl+Shift+L: the Preamble of the Work in front.
+window.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "l" && tabs.activeIsWork && tabs.active) {
+    e.preventDefault();
+    act(() => editPreamble(tabs.active!));
+  }
+}, { capture: true });
 
 $("new-style").addEventListener("click", () => act(async () => {
   const name = await askText("What's the new Style called?", "", "Create", "One small thing it does, e.g. Drop caps or Large print.");
@@ -224,6 +284,7 @@ async function openWork(id: string, cursor?: number) {
   if (tabs.has(id)) return tabs.activate(id);
   const work = await invoke<OpenedWork>("open_work", { id });
   await tabs.add(work, cursor);
+  await refreshElements(work.id);
   if (work.problems.length > 0) showProblems(work.problems);
   await refreshList(); // a Text file may have become a Work
 }
@@ -356,6 +417,7 @@ function workItem(entry: Entry): HTMLElement {
   actions.className = "entry-actions";
   if (entry.kind === "work") {
     actions.append(
+      actionButton("Preamble…", `Looks, Styles, Story elements and settings of ${entry.id} (Ctrl+Shift+L)`, () => editPreamble(entry.id)),
       actionButton("Rename", `Rename ${entry.id}`, () => renameWork(entry.id)),
       actionButton("Trash", `Move ${entry.id} to the trash`, () => trashWork(entry.id)),
     );
@@ -446,7 +508,9 @@ function highlightOpen() {
 async function newWork(name?: string, folder?: string) {
   const id = name ?? (await askText("What's the new Work called?", folder ? `${folder}/` : "", "Create"));
   if (id === null) return;
-  await tabs.add(await invoke<OpenedWork>("create_work", { id }));
+  const created = await invoke<OpenedWork>("create_work", { id });
+  await tabs.add(created);
+  await refreshElements(created.id);
   await refreshList();
 }
 
@@ -502,6 +566,7 @@ $("sidebar").addEventListener("contextmenu", (e) => {
     items =
       entry.kind === "work" ? [
         { label: "Open", run: run(() => openWork(entry.id)) },
+        { label: "Preamble…", run: run(() => editPreamble(entry.id)) },
         "separator",
         { label: "Rename…", run: run(() => renameWork(entry.id)) },
         { label: "Move to trash", run: run(() => trashWork(entry.id)) },

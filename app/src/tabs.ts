@@ -7,6 +7,7 @@ import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, dropCursor, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from "@codemirror/view";
 import { history, historyKeymap, standardKeymap } from "@codemirror/commands";
 import { LibraryFile, fromDisk } from "./libraryfile";
+import { storyElements, type ElementInfo } from "./elements";
 import { WorkSync, type WorkState } from "./sync";
 import { formattedView } from "./formatted";
 import { toggleMarkup } from "./shortcuts";
@@ -35,6 +36,8 @@ export type TabEvents = {
   cursor(id: string, at: number): void;
   /** A Work's tab closed, or it now goes by another ID. */
   closed(id: string): void;
+  /** "Add it?" was clicked on a Story element the Work doesn't have yet. */
+  addElement(id: string, name: string): void;
 };
 
 const historyCompartment = new Compartment();
@@ -42,6 +45,8 @@ const historyCompartment = new Compartment();
 const viewCompartment = new Compartment();
 /** Line numbers and the shaded cursor line (settings). */
 const linesCompartment = new Compartment();
+/** The Story elements the Work has (from its Preamble and the Style library). */
+const elementsCompartment = new Compartment();
 
 export type EditorOptions = { lineNumbers: boolean; highlightLine: boolean };
 
@@ -157,6 +162,7 @@ class Tab {
           dropCursor(),
           dragToMove(),
           completions({ work: () => this.sync.id, settled: () => this.sync.idle() }),
+          elementsCompartment.of(storyElements([])),
           viewCompartment.of(tabs.formatted ? formattedView() : []),
           linesCompartment.of(lineExtensions(tabs.options)),
           EditorView.updateListener.of((update) => {
@@ -181,6 +187,7 @@ class Tab {
       error: (message) => tabs.events.error(message),
     });
     this.rename(work.id, work.name);
+    this.pane.addEventListener("wrtier-add-element", (e) => tabs.events.addElement(this.id, (e as CustomEvent<string>).detail));
 
     // A click anywhere in the writing area (the margins beside the text, the space below it)
     // puts the cursor in the text, at the nearest place.
@@ -245,7 +252,7 @@ export class Tabs {
     readonly bar: HTMLElement,
     readonly panes: HTMLElement,
     /** Where the active tab's lines go: what was recovered or taken in, and problems. */
-    private lines: { notice: HTMLElement; status: HTMLElement; moved: HTMLElement },
+    private lines: { notice: HTMLElement; status: HTMLElement; moved: HTMLElement; style: HTMLElement },
     readonly events: TabEvents,
   ) {}
 
@@ -370,6 +377,17 @@ export class Tabs {
     if (tab?.isWork) tab.sync.status(state);
   }
 
+  /** The open Works (not library files). */
+  get works(): string[] {
+    return this.open.filter((t) => t.isWork).map((t) => t.id);
+  }
+
+  /** Tells a Work's editor which Story elements it has, and how they look. */
+  setElements(id: string, elements: ElementInfo[]) {
+    const tab = this.find(id);
+    if (tab?.isWork) tab.view.dispatch({ effects: elementsCompartment.reconfigure(storyElements(elements)) });
+  }
+
   /** Is the tab in front a Work's (not a library file's)? */
   get activeIsWork(): boolean {
     return this.front?.isWork ?? false;
@@ -424,6 +442,9 @@ export class Tabs {
       .filter((line): line is string => !!line);
     status.textContent = problems.join("\n");
     status.hidden = problems.length === 0;
+    // A Style changed in the library: shown until the next edit records it.
+    this.lines.style.textContent = state?.styleNotice ?? "";
+    this.lines.style.hidden = !state?.styleNotice;
     this.showMoved(tab);
   }
 

@@ -36,7 +36,10 @@ pub enum ChangeKind {
     /// Sets one field of a record: anything that isn't the Work's text, such as a Device's name.
     /// The latest value in the fixed Change order wins; older values stay in the History,
     /// and reverting this Change brings the previous value back.
-    SetField { record: String, field: String, value: String },
+    /// `replaces`: the Change whose value the Device saw when it set this one (None if the field
+    /// had none). Two values that replaced the same one were set without seeing each other,
+    /// whatever their times: for free text that's worth a Merge notice.
+    SetField { record: String, field: String, value: String, replaces: Option<ChangeId> },
     /// A named point in the History: exactly the Changes the naming Device had seen, as the
     /// highest counter it had from each Device. Rename it with a field on `milestone_record`;
     /// delete it by reverting this Change.
@@ -63,6 +66,16 @@ pub fn is_meta_record(record: &str) -> bool {
     record.starts_with("device/") || record.starts_with("milestone/") || record.starts_with("session/")
 }
 
+/// The record holding a Work's Preamble: its Looks, extra Styles, Story elements and settings.
+pub const PREAMBLE_RECORD: &str = "preamble";
+
+/// Fields holding free text the Author writes (in v1 a single value, not a text sequence): two
+/// Devices editing one without seeing each other's edit get a Merge notice, so the version that
+/// lost can be copied back. Other fields (names, settings) just take the later value quietly.
+pub fn is_free_text(record: &str, field: &str) -> bool {
+    record == PREAMBLE_RECORD && field == "raw"
+}
+
 /// Names a Merge notice the same way on every Device, by the Moves involved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NoticeKey {
@@ -73,6 +86,9 @@ pub enum NoticeKey {
     /// The Text file was edited outside the app, but the version it was written from couldn't be
     /// found, so the edit was compared against the current text instead. Named by its Session.
     UnknownTextFile { session: ChangeId },
+    /// Two Devices edited the same free-text field (such as the Preamble's raw Typst) without
+    /// seeing each other's edit: `later` is shown, `earlier` is the version that lost.
+    ConcurrentField { later: ChangeId, earlier: ChangeId },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

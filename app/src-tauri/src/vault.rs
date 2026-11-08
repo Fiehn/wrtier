@@ -14,6 +14,7 @@ use wrtier::doc::Doc;
 use wrtier::ids::DeviceId;
 use wrtier::storage::{self, Probe};
 use crate::library;
+use crate::preamble::{self, Preamble, Shelf, Version};
 use crate::recovery::{self, Recovery};
 use crate::work::{undoable, Op, OpenWork, Whereabouts, WorkState};
 use wrtier::change::Change;
@@ -45,8 +46,20 @@ pub struct Vault {
     vault_stamp: Option<(std::time::SystemTime, u64)>,
     /// The Style library's files as last seen: if they change, the interface hears of it.
     library_stamp: Vec<(PathBuf, u64, Option<std::time::SystemTime>)>,
+    /// Counts the library's changes: a Work that recorded what it uses as of an older count
+    /// records the new versions before its next edit.
+    library_generation: u64,
     /// Why the default Styles couldn't be written, if they couldn't.
     defaults_problem: Option<String>,
+}
+
+/// A Work's Preamble as the dialog shows it.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PreambleView {
+    pub preamble: Preamble,
+    /// The other Device's version of the raw Typst, if both were edited without seeing each other.
+    pub raw_other: Option<String>,
 }
 
 /// The record in `vault.db` saying which of the app's default Styles were written (ADR 0012):
@@ -211,6 +224,7 @@ impl Vault {
             aliases: HashMap::new(),
             vault_stamp: file_stamp(&file),
             library_stamp: Vec::new(),
+            library_generation: 0,
             defaults_problem: None,
         };
         vault.absorb_vault_copies(&mut Vec::new()); // any left are reported when the Works are listed
@@ -236,10 +250,16 @@ impl Vault {
     }
 
     /// Has anything in the Style library changed since this was last asked (here or elsewhere)?
+    /// If so, open Works get their Style update notices, and record the new versions before
+    /// their next edit.
     pub fn library_changed(&mut self) -> bool {
         let now = library::stamp(&self.root);
         let changed = now != self.library_stamp;
         self.library_stamp = now;
+        if changed {
+            self.library_generation += 1;
+            self.refresh_style_notices();
+        }
         changed
     }
 
@@ -506,7 +526,9 @@ impl Vault {
             None => (Vec::new(), None),
         };
         let recovery = Recovery::for_work(&self.recovery_dir, &self.root, id);
-        self.works.insert(id.to_string(), OpenWork::new(db, typ, doc, now_ms, recovery, sitting, mine));
+        let mut work = OpenWork::new(db, typ, doc, now_ms, recovery, sitting, mine);
+        work.style_notice = preamble::update_notice(&work.doc, &Shelf::read(&self.root));
+        self.works.insert(id.to_string(), work);
         Ok(OpenedWork { id: id.to_string(), name, text, problems, notice })
     }
 
@@ -597,7 +619,17 @@ impl Vault {
         let mut doc = Doc::new(self.device);
         let given = doc.set_field_local(storage::WORK_RECORD, storage::WORK_ID_FIELD, &work_id, now_ms);
         let created = doc.set_field_local(storage::WORK_RECORD, "created", &now_ms.to_string(), now_ms);
-        storage::save(&db, &[given, created], &doc).map_err(err)?;
+        let mut changes = vec![given, created];
+        // A new Work starts with the first default Look the library still has; the Preamble
+        // dialog changes it. (Its content is recorded with the first edit.)
+        let library = library::list(&self.root);
+        let look = ["Paperback", "Manuscript", "A4 draft"].into_iter()
+            .find(|name| library.items.iter().any(|i| i.kind == library::Kind::Look && i.name == *name));
+        if let Some(look) = look {
+            let preamble = Preamble { looks: vec![look.to_string()], ..Preamble::default() };
+            changes.extend(preamble.record(&mut doc, now_ms));
+        }
+        storage::save(&db, &changes, &doc).map_err(err)?;
         storage::write_text_file(&db, &typ, &doc, now_ms).map_err(err)?;
         self.open_work(&id, now_ms)
     }
@@ -652,7 +684,67 @@ impl Vault {
                 });
             }
         }
-        self.with_work(id, now_ms, |w, name| w.edit(ops, name, now_ms))
+        // Before the first edit since the Style library last changed, the Work records the
+        // versions of everything it uses (read here only when that's due).
+        let (root, generation) = (self.root.clone(), self.library_generation);
+        self.with_work(id, now_ms, |w, name| {
+            let shelf = w.styles_due(generation).then(|| Shelf::read(&root));
+            w.edit(ops, name, shelf.as_ref().map(|s| (s, generation)), now_ms)
+        })
+    }
+
+    /// A Work's Preamble, as its History has it now. The Work needn't be open.
+    pub fn preamble(&mut self, id: &str, now_ms: u64) -> Result<Preamble, String> {
+        Ok(self.preamble_for_dialog(id, now_ms)?.preamble)
+    }
+
+    /// What the Preamble dialog shows: the Preamble, and the other Device's raw Typst if two
+    /// Devices edited it without seeing each other's edit.
+    pub fn preamble_for_dialog(&mut self, id: &str, now_ms: u64) -> Result<PreambleView, String> {
+        let view = |doc: &Doc| PreambleView { preamble: Preamble::of(doc), raw_other: Preamble::raw_lost(doc) };
+        if self.works.contains_key(&self.current_id(id)) {
+            return self.with_work(id, now_ms, |w, _| Ok(view(&w.doc)));
+        }
+        let (db, _) = self.paths(id)?;
+        let (_, doc) = storage::load(&db, self.device).map_err(err)?;
+        Ok(view(&doc))
+    }
+
+    /// Changes a Work's Preamble (from the dialog), recording the library files it now uses.
+    /// A Work that isn't open is changed in its `.db` directly. Returns the open Work's state.
+    pub fn set_preamble(&mut self, id: &str, preamble: &Preamble, now_ms: u64) -> Result<Option<WorkState>, String> {
+        preamble.check()?;
+        let shelf = Shelf::read(&self.root);
+        let generation = self.library_generation;
+        if self.works.contains_key(&self.current_id(id)) {
+            return self.with_work(id, now_ms, |w, _| Ok(Some(w.set_preamble(preamble, &shelf, generation, now_ms))));
+        }
+        let (db, _) = self.paths(id)?;
+        let (me, name) = (self.device, self.device_name());
+        let (_, mut doc) = storage::load(&db, me).map_err(err)?;
+        let mut changes = preamble.record(&mut doc, now_ms);
+        changes.extend(preamble::record_unrecorded(&mut doc, &shelf, now_ms));
+        storage::save(&db, &changes, &doc).map_err(err)?;
+        record_name(&db, &mut doc, name.as_deref(), now_ms)?;
+        Ok(None)
+    }
+
+    /// What a compile of an open Work needs: its text as it is now, and the Preamble's Typst
+    /// with the Style library's current versions. `look`: the one to render (else its first).
+    pub fn typeset_input(&mut self, id: &str, look: Option<&str>, now_ms: u64) -> Result<(String, preamble::Header), String> {
+        let shelf = Shelf::read(&self.root);
+        self.with_work(id, now_ms, |w, _| {
+            let uses = preamble::uses(&w.doc, &shelf, Version::Library);
+            Ok((w.text(), preamble::header(&w.doc, uses, look)))
+        })
+    }
+
+    /// The Style update notice of every open Work, as the library is now.
+    fn refresh_style_notices(&mut self) {
+        let shelf = Shelf::read(&self.root);
+        for work in self.works.values_mut() {
+            work.style_notice = preamble::update_notice(&work.doc, &shelf);
+        }
     }
 
     /// The Author left the Work for now (another Work, or another window).
@@ -875,6 +967,59 @@ mod tests {
         assert_eq!(other.library().items.len(), library::DEFAULTS.len() - 1);
         // The library isn't listed as Works.
         assert!(!other.walk().typs.iter().any(|t| t.starts_with(dir.path().join("styles"))));
+    }
+
+    #[test]
+    fn a_new_work_starts_with_a_look_and_records_it_with_the_first_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open(dir.path());
+        vault.create_work("Rain", 1000).unwrap();
+        assert_eq!(vault.preamble("Rain", 1000).unwrap().looks, ["Paperback"]);
+        // Opening it records nothing; the first edit records what it uses.
+        let has_copy = |v: &mut Vault| v.with_work("Rain", 0, |w, _| Ok(w.doc.field("look/Paperback", "content").is_some())).unwrap();
+        assert!(!has_copy(&mut vault));
+        vault.edit("Rain", vec![typing(0, "The rain had stopped.")], 2000).unwrap();
+        assert!(has_copy(&mut vault));
+        // It compiles with the Preamble in front of its text.
+        let (text, header) = vault.typeset_input("Rain", None, 3000).unwrap();
+        assert_eq!(text, "The rain had stopped.");
+        assert!(header.text.contains("#show: wrtier-look-1"));
+    }
+
+    #[test]
+    fn a_style_changed_elsewhere_is_noticed_then_recorded_by_the_next_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open(dir.path());
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "abc")], 2000).unwrap();
+        vault.tick(20_000); // the burst closes
+        let notice = |v: &mut Vault| v.with_work("Rain", 0, |w, _| Ok(w.state(Vec::new()).style_notice)).unwrap();
+        assert_eq!(notice(&mut vault), None);
+        std::fs::write(dir.path().join("styles/Book text.typ"), "// Style: Book text\n// Bigger.\n#set text(size: 13pt)\n").unwrap();
+        assert!(vault.library_changed());
+        assert!(notice(&mut vault).is_some_and(|n| n.starts_with("Book text has changed")));
+        // The Page preview already uses the new one.
+        assert!(vault.typeset_input("Rain", None, 21_000).unwrap().1.text.contains("13pt"));
+        vault.edit("Rain", vec![typing(3, "d")], 22_000).unwrap();
+        assert_eq!(notice(&mut vault), None);
+        assert!(vault.with_work("Rain", 0, |w, _| Ok(w.doc.field("style/Book text", "content").unwrap().contains("13pt"))).unwrap());
+    }
+
+    #[test]
+    fn the_preamble_of_a_closed_work_can_be_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open(dir.path());
+        vault.create_work("Rain", 1000).unwrap();
+        vault.close_work("Rain", 1500);
+        let p = Preamble { looks: vec!["Manuscript".into(), "Paperback".into()], title: "Rain".into(), language: "en".into(), ..Preamble::default() };
+        assert_eq!(vault.set_preamble("Rain", &p, 2000).unwrap(), None);
+        assert_eq!(vault.preamble("Rain", 2000).unwrap(), p);
+        assert!(vault.set_preamble("Rain", &Preamble { language: "English".into(), ..p.clone() }, 3000).is_err());
+        // Open again: it renders in Manuscript, from its own records.
+        vault.open_work("Rain", 4000).unwrap();
+        let (_, header) = vault.typeset_input("Rain", None, 4000).unwrap();
+        assert!(header.text.contains("// Look: Manuscript\n#let wrtier-look-1"), "{}", header.text);
+        assert!(header.text.contains("#set document(title: \"Rain\")"));
     }
 
     #[test]

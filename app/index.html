@@ -49,6 +49,7 @@
         <button id="preview-toggle" type="button" class="link" title="Ctrl+Shift+P" hidden>Pages</button>
         </div>
         <div id="notice" hidden></div>
+        <div id="style-notice" hidden></div>
         <div id="moved" hidden></div>
         <div id="status" hidden></div>
         <div id="panes"></div>
@@ -58,6 +59,7 @@
       <aside id="preview" hidden>
         <header>
           <strong>Page preview</strong>
+          <select id="preview-look" title="Which of the Work's Looks the pages are in (remembered on this Device)" hidden></select>
           <button id="preview-close" type="button" class="link" title="Hide the Page preview (Ctrl+Shift+P)">Hide</button>
         </header>
         <div id="preview-bar" hidden></div>
@@ -106,6 +108,58 @@
         <menu>
           <button type="button" data-close="cancel">Cancel</button>
           <button value="yes" id="ask-confirm-yes">Yes</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="preamble">
+      <form method="dialog" class="preamble-form">
+        <h2 id="preamble-heading">Preamble</h2>
+
+        <section>
+          <h3>Looks</h3>
+          <p class="muted">The first is this Work's own: its Text file uses it, and the Page preview and Exports start with it.</p>
+          <ul id="preamble-looks" class="preamble-list"></ul>
+          <div class="row preamble-add"><select id="preamble-add-look"></select><button type="button" id="preamble-add-look-button">Add</button></div>
+        </section>
+
+        <section>
+          <h3>Extra Styles</h3>
+          <p class="muted">On top of whichever Look is used, for this Work only.</p>
+          <ul id="preamble-styles" class="preamble-list"></ul>
+          <div class="row preamble-add"><select id="preamble-add-style"></select><button type="button" id="preamble-add-style-button">Add</button></div>
+        </section>
+
+        <section>
+          <h3>Story elements</h3>
+          <p class="muted" id="preamble-built-in"></p>
+          <ul id="preamble-elements" class="preamble-list"></ul>
+          <div class="row preamble-add"><select id="preamble-add-element"></select><button type="button" id="preamble-add-element-button">Add</button></div>
+        </section>
+
+        <section class="preamble-settings">
+          <h3>Settings</h3>
+          <label>Title <input id="preamble-title" maxlength="200" autocomplete="off" /></label>
+          <label>Author name <input id="preamble-author" maxlength="200" autocomplete="off" /></label>
+          <label>Language <input id="preamble-language" maxlength="3" autocomplete="off" placeholder="en" /></label>
+          <p class="muted">A two-letter code such as en, da or de. It decides quotation marks and hyphenation.</p>
+        </section>
+
+        <section>
+          <h3>Raw Typst</h3>
+          <p class="muted">For this Work only, after everything above.</p>
+          <textarea id="preamble-raw" rows="4" spellcheck="false"></textarea>
+          <div id="preamble-raw-other" hidden>
+            <p class="preamble-conflict">This was changed on two Devices at the same time, and the version above won. The other one:</p>
+            <textarea id="preamble-raw-other-text" rows="3" readonly spellcheck="false"></textarea>
+            <button type="button" id="preamble-use-other">Use the other one</button>
+            <p class="muted">Saving keeps what's in the box above, whichever it is.</p>
+          </div>
+        </section>
+
+        <menu>
+          <button type="button" data-close="cancel">Cancel</button>
+          <button value="save">Save</button>
         </menu>
       </form>
     </dialog>

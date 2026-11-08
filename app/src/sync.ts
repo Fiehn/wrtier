@@ -39,6 +39,8 @@ export type WorkState = {
   syncProblem: string | null;
   /** The Work's History moved away underneath the tab (on another Device). */
   moved: Whereabouts | null;
+  /** A Style it uses changed in the Style library since the Work recorded it. */
+  styleNotice: string | null;
 };
 
 export type Whereabouts = { kind: "renamed"; to: string } | { kind: "trashed" } | { kind: "gone" } | { kind: "diverged" };

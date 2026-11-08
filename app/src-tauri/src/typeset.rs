@@ -23,6 +23,7 @@ use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World, WorldExt};
 use typst_kit::fonts::{FontPath, FontStore};
+use crate::preamble::Header;
 use typst_layout::PagedDocument;
 
 /// A font found on this Device: where it is and what it is, without its data.
@@ -162,6 +163,23 @@ impl typst_ide::IdeWorld for WorkWorld {
 struct Preview {
     world: WorkWorld,
     last_good: Option<PagedDocument>,
+    /// The Preamble put before the Work's text, and how far it shifts positions.
+    header: Header,
+    header_utf16: usize,
+    header_lines: usize,
+}
+
+impl Preview {
+    /// A place in the Work's text (UTF-16), as a byte offset in the compiled source.
+    fn to_source(&self, at: usize) -> Option<usize> {
+        self.world.main.lines().utf16_to_byte(at + self.header_utf16)
+    }
+
+    /// A byte offset in the compiled source, as a place in the Work's text (UTF-16); None if
+    /// it's in the Preamble.
+    fn to_text(&self, byte: usize) -> Option<usize> {
+        self.world.main.lines().byte_to_utf16(byte)?.checked_sub(self.header_utf16)
+    }
 }
 
 /// A page's size in points, so the preview can lay it out before its picture arrives.
@@ -292,8 +310,8 @@ impl Typesetter {
         fonts
     }
 
-    /// A Work's preview, made if it has none yet, with its text as it is now.
-    fn preview(&mut self, id: &str, fonts_dir: &Path, text: &str) -> &mut Preview {
+    /// A Work's preview, made if it has none yet, with its Preamble and its text as they are now.
+    fn preview(&mut self, id: &str, fonts_dir: &Path, header: &Header, text: &str) -> &mut Preview {
         let fonts = self.fonts(fonts_dir);
         let preview = self.previews.entry(id.to_string()).or_insert_with(|| Preview {
             world: WorkWorld {
@@ -302,25 +320,38 @@ impl Typesetter {
                 main: Source::new(main_id(), String::new()),
             },
             last_good: None,
+            header: Header::default(),
+            header_utf16: 0,
+            header_lines: 0,
         });
-        preview.world.main.replace(text);
+        preview.world.main.replace(&format!("{}{text}", header.text));
+        if preview.header != *header {
+            preview.header = header.clone();
+            preview.header_utf16 = header.text.encode_utf16().count();
+            preview.header_lines = header.text.matches('\n').count();
+        }
         preview
     }
 
     /// What can go at `at` (UTF-16) in a Work's text as it is now: after a `#`, every Story
     /// element and Typst function in scope there. `explicit`: asked for (Ctrl+Space), not just
     /// typed, so it may also offer completions where nothing was started yet.
-    pub fn complete(&mut self, id: &str, fonts_dir: &Path, text: &str, at: usize, explicit: bool) -> Option<Completions> {
-        let preview = self.preview(id, fonts_dir, text);
+    pub fn complete(&mut self, id: &str, fonts_dir: &Path, header: &Header, text: &str, at: usize, explicit: bool) -> Option<Completions> {
+        let preview = self.preview(id, fonts_dir, header, text);
+        let cursor = preview.to_source(at)?;
         let source = &preview.world.main;
-        let cursor = source.lines().utf16_to_byte(at)?;
         let found = catch_unwind(AssertUnwindSafe(|| {
             typst_ide::autocomplete(&preview.world, preview.last_good.as_ref(), source, cursor, explicit)
         }));
         let (from, completions) = found.ok()??;
         let typst = preview.world.library.global.scope();
-        let items = completions.into_iter().map(|c| {
-            let kind = match c.kind {
+        // The Looks' wrappers are the app's own, not something to write.
+        let completions = completions.into_iter().filter(|c| !c.label.starts_with("wrtier-look-"));
+        let elements = &preview.header.elements;
+        // A bracket already after the cursor: picking a function shouldn't type another.
+        let bracketed = source.text()[cursor..].starts_with(['(', '[']);
+        let items = completions.map(|c| {
+            let mut kind = match c.kind {
                 typst_ide::CompletionKind::Func => "function",
                 typst_ide::CompletionKind::Type => "type",
                 typst_ide::CompletionKind::Constant => "constant",
@@ -328,30 +359,46 @@ impl Typesetter {
                 typst_ide::CompletionKind::Syntax => "syntax",
                 _ => "other",
             };
-            // Anything that isn't part of Typst itself was defined for this Work.
-            let story_element = matches!(kind, "function" | "constant") && typst.get(&c.label).is_none();
-            CompletionItem {
-                apply: c.apply.map(|a| a.to_string()).unwrap_or_else(|| c.label.to_string()),
-                label: c.label.to_string(),
-                detail: c.detail.map(|d| d.to_string()),
-                kind,
-                story_element,
+            let mut apply = c.apply.map(|a| a.to_string()).unwrap_or_else(|| c.label.to_string());
+            let mut detail = c.detail.map(|d| d.to_string());
+            // Typst only adds brackets for its own functions; the Story elements are defined in
+            // the Preamble, so their template comes from how each is written.
+            let form = elements.iter().find(|e| e.name == c.label.as_str());
+            if let Some(form) = form {
+                kind = "function";
+                if !bracketed {
+                    apply = if form.body { format!("{}[${{}}]", form.name) } else { format!("{}()", form.name) };
+                }
+                detail = form.detail.clone().or(detail);
             }
+            // The Work's Story elements, and anything else it defines that isn't part of Typst.
+            let story_element = form.is_some() || matches!(kind, "function" | "constant") && typst.get(&c.label).is_none();
+            CompletionItem { apply, label: c.label.to_string(), detail, kind, story_element }
         }).collect();
-        Some(Completions { from: source.lines().byte_to_utf16(from)?, items })
+        Some(Completions { from: preview.to_text(from)?, items })
     }
 
-    /// Compiles a Work's text as it is now. `fonts_dir`: its Vault's `fonts/` folder.
+    /// Compiles a Work's text without a Preamble (Typst's plain defaults).
     pub fn compile(&mut self, id: &str, fonts_dir: &Path, text: String) -> Compiled {
+        self.compile_with(id, fonts_dir, &Header::default(), text)
+    }
+
+    /// Compiles a Work's text as it is now, after its Preamble. `fonts_dir`: its Vault's
+    /// `fonts/` folder.
+    pub fn compile_with(&mut self, id: &str, fonts_dir: &Path, header: &Header, text: String) -> Compiled {
         let start = Instant::now();
         let fonts = self.fonts(fonts_dir);
-        let preview = self.preview(id, fonts_dir, &text);
+        let preview = self.preview(id, fonts_dir, header, &text);
         let outcome = catch_unwind(AssertUnwindSafe(|| typst::compile::<PagedDocument>(&preview.world)));
         // Forget cached work this compile didn't use, or memory grows with every edit (Phase 0b).
         comemo::evict(1);
         let mut compiled = match outcome {
             Ok(warned) => {
-                let warnings = problems(&preview.world, &warned.warnings);
+                let mut warnings = problems(preview, &warned.warnings);
+                // What the Preamble names but nothing provides (a Look naming a missing Style…).
+                warnings.extend(header.missing.iter().map(|m| Problem {
+                    message: format!("In the Preamble: {m}"), hints: Vec::new(), from: None, to: None, line: None,
+                }));
                 match warned.output {
                     Ok(document) => {
                         let device_fonts = fonts_from_device(&fonts, &document);
@@ -359,7 +406,7 @@ impl Typesetter {
                         Compiled { pages: Vec::new(), stale: false, errors: Vec::new(), warnings, device_fonts, ms: 0 }
                     }
                     Err(errors) => Compiled {
-                        pages: Vec::new(), stale: true, errors: problems(&preview.world, &errors),
+                        pages: Vec::new(), stale: true, errors: problems(preview, &errors),
                         warnings, device_fonts: Vec::new(), ms: 0,
                     },
                 }
@@ -400,9 +447,8 @@ impl Typesetter {
         let document = preview.last_good.as_ref()?;
         let position = PagedPosition { page: NonZeroUsize::new(page + 1)?, point: Point::new(Abs::pt(x), Abs::pt(y)) };
         match typst_ide::jump_from_click(&preview.world, document, &position)? {
-            typst_ide::Jump::File(file, at) if file == preview.world.main.id() => {
-                Some(JumpTo::Text { at: preview.world.main.lines().byte_to_utf16(at)? })
-            }
+            // (A click on something the Preamble made, such as a Look's page number, leads nowhere.)
+            typst_ide::Jump::File(file, at) if file == preview.world.main.id() => Some(JumpTo::Text { at: preview.to_text(at)? }),
             typst_ide::Jump::Position(p) => Some(JumpTo::Pages {
                 spot: Spot { page: p.page.get() - 1, x: p.point.x.to_pt(), y: p.point.y.to_pt() },
             }),
@@ -413,8 +459,7 @@ impl Typesetter {
     /// Where a place in the Work's text (UTF-16) is on the pages, for keeping it in view.
     pub fn locate(&self, id: &str, at: usize) -> Option<Spot> {
         let preview = self.previews.get(id)?;
-        let source = &preview.world.main;
-        locate(preview.last_good.as_ref()?, source, source.lines().utf16_to_byte(at)?)
+        locate(preview.last_good.as_ref()?, &preview.world.main, preview.to_source(at)?)
     }
 
     /// The Work's tab closed (or it was renamed): its preview isn't needed.
@@ -491,19 +536,37 @@ fn find_glyph(frame: &Frame, span: Span, within: u16) -> Option<(u16, Point)> {
     best
 }
 
-/// Typst's diagnostics, with their place in the Work's text.
-fn problems(world: &WorkWorld, diagnostics: &[SourceDiagnostic]) -> Vec<Problem> {
+/// Typst's diagnostics, with their place in the Work's text. One in the Preamble says which
+/// file of the Style library it's in (and its line there), since it can't be shown in the text.
+fn problems(preview: &Preview, diagnostics: &[SourceDiagnostic]) -> Vec<Problem> {
+    let world = &preview.world;
     let lines = world.main.lines();
+    let header_bytes = preview.header.text.len();
     diagnostics.iter().map(|d| {
         let range = (d.span.id() == Some(world.main.id())).then(|| world.range(d.span)).flatten();
-        let (from, to, line) = match range {
-            Some(r) => (lines.byte_to_utf16(r.start), lines.byte_to_utf16(r.end), lines.byte_to_line(r.start).map(|l| l + 1)),
-            None => (None, None, None),
-        };
         let mut message = d.message.to_string();
         if d.severity == Severity::Warning && message.is_empty() {
             message = "warning".into();
         }
+        let (from, to, line) = match range {
+            Some(r) if r.start >= header_bytes => (
+                preview.to_text(r.start),
+                preview.to_text(r.end),
+                lines.byte_to_line(r.start).map(|l| l + 1 - preview.header_lines),
+            ),
+            Some(r) => {
+                let place = match preview.header.segments.iter().find(|s| (s.start..s.end).contains(&r.start)) {
+                    Some(s) => {
+                        let line = preview.header.text[s.start..r.start].matches('\n').count() + 1;
+                        format!("{}, line {line}", s.label)
+                    }
+                    None => "the Preamble".to_string(),
+                };
+                message = format!("{place}: {message} (in the Style library, not in your text)");
+                (None, None, None)
+            }
+            None => (None, None, None),
+        };
         Problem { message, hints: d.hints.iter().map(|h| h.v.to_string()).collect(), from, to, line }
     }).collect()
 }
@@ -683,7 +746,7 @@ mod tests {
     fn complete(t: &mut Typesetter, text: &str) -> Completions {
         let at = text.find('|').unwrap();
         let text = text.replace('|', "");
-        t.complete("Rain", Path::new("no-fonts-here"), &text, at, false).expect("completions")
+        t.complete("Rain", Path::new("no-fonts-here"), &Header::default(), &text, at, false).expect("completions")
     }
 
     #[test]
@@ -707,7 +770,63 @@ mod tests {
         assert!(c.items.iter().any(|i| i.label == "dream"));
         // Plain prose offers nothing.
         let mut t = Typesetter::new(false);
-        assert!(t.complete("Rain", Path::new("x"), "The rain had", 12, false).is_none_or(|c| c.items.is_empty()));
+        assert!(t.complete("Rain", Path::new("x"), &Header::default(), "The rain had", 12, false).is_none_or(|c| c.items.is_empty()));
+    }
+
+    /// A header like a Work's Preamble makes: a Story element, a Style that can go wrong.
+    fn header_with(style: &str) -> Header {
+        let mut h = Header::default();
+        h.text.push_str(crate::preamble::HEADER_START);
+        let element = "// Story element: Dream\n// A dream.\n#let dream(body) = [#block(inset: 2em, emph(body)) <dream>]\n";
+        h.text.push_str(element);
+        h.elements.push(crate::preamble::ElementForm::of("dream", element));
+        let pause = "#let pause() = [#v(2em) <pause>]\n";
+        h.text.push_str(pause);
+        h.elements.push(crate::preamble::ElementForm::of("pause", pause));
+        let start = h.text.len();
+        h.text.push_str(style);
+        h.segments.push(crate::preamble::Segment { start, end: h.text.len(), label: "styles/Odd.typ".into() });
+        h.text.push_str(crate::preamble::HEADER_END);
+        h
+    }
+
+    #[test]
+    fn positions_stay_in_the_works_text_after_a_preamble() {
+        let mut t = Typesetter::new(false);
+        let h = header_with("// Style: Odd\n#set text(size: 12pt)\n");
+        let text = "Awake.\n\n#dream[I was falling]\n\n#nothing";
+        let c = t.compile_with("Rain", Path::new("x"), &h, text.to_string());
+        let error = &c.errors[0];
+        assert_eq!(error.line, Some(5), "lines count from the Work's text");
+        assert_eq!(error.from, Some(at(text, "#nothing") + 1));
+        // Clicks and the cursor land in the Work's text, not in the Preamble.
+        let good = "Awake.\n\n#dream[I was falling]";
+        t.compile_with("Rain", Path::new("x"), &h, good.to_string());
+        round_trip(&t, good, "falling");
+        // The Preamble's Story elements come first among the completions.
+        let c = t.complete("Rain", Path::new("x"), &h, "Awake. #dr", 10, false).unwrap();
+        assert_eq!(c.from, 8);
+        assert!(!c.items.iter().any(|i| i.label.starts_with("wrtier-look")));
+        // Picking one types it with its brackets, the cursor inside a body.
+        let dream = c.items.iter().find(|i| i.label == "dream").expect("offered");
+        assert!(dream.story_element);
+        assert_eq!(dream.apply, "dream[${}]");
+        assert_eq!(dream.detail.as_deref(), Some("Dream: A dream."));
+        let c = t.complete("Rain", Path::new("x"), &h, "Awake. #pa", 10, false).unwrap();
+        assert_eq!(c.items.iter().find(|i| i.label == "pause").unwrap().apply, "pause()");
+        // With a bracket already there, none is added.
+        let c = t.complete("Rain", Path::new("x"), &h, "Awake. #dr[falling]", 10, false).unwrap();
+        assert_eq!(c.items.iter().find(|i| i.label == "dream").unwrap().apply, "dream");
+    }
+
+    #[test]
+    fn an_error_in_the_style_library_names_its_file() {
+        let mut t = Typesetter::new(false);
+        let h = header_with("// Style: Odd\n// A line.\n#set text(size: twelve)\n");
+        let c = t.compile_with("Rain", Path::new("x"), &h, "Hello.".to_string());
+        let error = &c.errors[0];
+        assert!(error.message.starts_with("styles/Odd.typ, line 3: "), "{}", error.message);
+        assert_eq!((error.from, error.line), (None, None));
     }
 
     #[test]
