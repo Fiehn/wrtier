@@ -14,6 +14,28 @@
   --chip-hover: #dcd7cc;
   --chip-open: #d3dbe6;
   --editor-font-size: 17px;
+  /* Reviewer colour slots (vault/reviewers.rs): the colour itself, for names and swatches, and
+     a see-through one for highlighting their Comments' text (overlapping highlights darken). A CSS theme can redefine any of them. */
+  --reviewer-teal: #1c7c74;
+  --reviewer-teal-soft: rgb(28 124 116 / 0.2);
+  --reviewer-amber: #946500;
+  --reviewer-amber-soft: rgb(148 101 0 / 0.2);
+  --reviewer-red: #b0343a;
+  --reviewer-red-soft: rgb(176 52 58 / 0.2);
+  --reviewer-violet: #6a4bb0;
+  --reviewer-violet-soft: rgb(106 75 176 / 0.2);
+  --reviewer-green: #4a7c22;
+  --reviewer-green-soft: rgb(74 124 34 / 0.2);
+  --reviewer-orange: #b5531a;
+  --reviewer-orange-soft: rgb(181 83 26 / 0.2);
+  --reviewer-pink: #a83a7c;
+  --reviewer-pink-soft: rgb(168 58 124 / 0.2);
+  --reviewer-brown: #8a5a3c;
+  --reviewer-brown-soft: rgb(138 90 60 / 0.2);
+  --comment-author: #3b5f8a;
+  --comment-author-soft: rgb(59 95 138 / 0.18);
+  --comment-unknown: #77726a;
+  --comment-unknown-soft: rgb(119 114 106 / 0.2);
   color-scheme: light;
 }
 
@@ -32,6 +54,26 @@
     --chip: #2f2d28;
     --chip-hover: #383530;
     --chip-open: #2c3a4a;
+    --reviewer-teal: #6cc7bd;
+    --reviewer-teal-soft: rgb(108 199 189 / 0.26);
+    --reviewer-amber: #e6bd57;
+    --reviewer-amber-soft: rgb(230 189 87 / 0.26);
+    --reviewer-red: #ef8d8f;
+    --reviewer-red-soft: rgb(239 141 143 / 0.26);
+    --reviewer-violet: #b39cf0;
+    --reviewer-violet-soft: rgb(179 156 240 / 0.26);
+    --reviewer-green: #9fcf6f;
+    --reviewer-green-soft: rgb(159 207 111 / 0.26);
+    --reviewer-orange: #f0a06a;
+    --reviewer-orange-soft: rgb(240 160 106 / 0.26);
+    --reviewer-pink: #e98fc4;
+    --reviewer-pink-soft: rgb(233 143 196 / 0.26);
+    --reviewer-brown: #d1a283;
+    --reviewer-brown-soft: rgb(209 162 131 / 0.26);
+    --comment-author: #8fb0d8;
+    --comment-author-soft: rgb(143 176 216 / 0.24);
+    --comment-unknown: #9a958b;
+    --comment-unknown-soft: rgb(154 149 139 / 0.24);
     color-scheme: dark;
   }
 }
@@ -50,6 +92,26 @@
   --chip: #2f2d28;
   --chip-hover: #383530;
   --chip-open: #2c3a4a;
+  --reviewer-teal: #6cc7bd;
+  --reviewer-teal-soft: rgb(108 199 189 / 0.26);
+  --reviewer-amber: #e6bd57;
+  --reviewer-amber-soft: rgb(230 189 87 / 0.26);
+  --reviewer-red: #ef8d8f;
+  --reviewer-red-soft: rgb(239 141 143 / 0.26);
+  --reviewer-violet: #b39cf0;
+  --reviewer-violet-soft: rgb(179 156 240 / 0.26);
+  --reviewer-green: #9fcf6f;
+  --reviewer-green-soft: rgb(159 207 111 / 0.26);
+  --reviewer-orange: #f0a06a;
+  --reviewer-orange-soft: rgb(240 160 106 / 0.26);
+  --reviewer-pink: #e98fc4;
+  --reviewer-pink-soft: rgb(233 143 196 / 0.26);
+  --reviewer-brown: #d1a283;
+  --reviewer-brown-soft: rgb(209 162 131 / 0.26);
+  --comment-author: #8fb0d8;
+  --comment-author-soft: rgb(143 176 216 / 0.24);
+  --comment-unknown: #9a958b;
+  --comment-unknown-soft: rgb(154 149 139 / 0.24);
   color-scheme: dark;
 }
 
@@ -421,14 +483,14 @@ main > :not(#panes) {
 }
 
 #view-mode,
-#preview-toggle {
+#panel-toggle {
   margin-bottom: 6px;
   white-space: nowrap;
 }
 
-/* ---- The Page preview ---- */
+/* ---- The side panel: Pages | Comments, one at a time ---- */
 
-#preview {
+#side-panel {
   width: min(42%, 640px);
   min-width: 260px;
   flex: none;
@@ -438,15 +500,62 @@ main > :not(#panes) {
   border-left: 1px solid var(--line);
 }
 
-#preview[hidden] {
+#side-panel[hidden],
+#side-panel > section[hidden] {
   display: none;
 }
 
-#preview header {
+.panel-tabs {
   display: flex;
   justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.panel-tabs [role="tab"] {
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  padding: 6px 10px;
+  color: var(--muted);
+  margin-bottom: -1px; /* the selected tab's line sits on the row's own */
+}
+
+.panel-tabs [role="tab"][aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+#side-panel > section {
+  flex: 1;
+  min-height: 0; /* so the pages scroll inside the panel, not the panel itself */
+  display: flex;
+  flex-direction: column;
+}
+
+#comments-pane {
+  padding: 12px 16px;
+}
+
+#comments-pane p {
+  margin: 0;
+  font-size: 13px;
+}
+
+/* ---- The Page preview ---- */
+
+#preview header {
+  display: flex;
   align-items: baseline;
-  padding: 12px 16px 8px;
+  gap: 6px;
+  padding: 10px 16px 8px;
+}
+
+#preview header .spacer {
+  flex: 1;
 }
 
 #preview-bar {
@@ -884,10 +993,17 @@ dialog#preamble {
 }
 
 #problems,
-#error {
+#error,
+#info {
   border-radius: 6px;
   padding: 10px 14px;
   margin-bottom: 16px;
+}
+
+/* Something went well (an Export): shown for a few seconds. */
+#info {
+  background: var(--chip-open);
+  overflow-wrap: anywhere;
 }
 
 #problems {
@@ -980,6 +1096,108 @@ dialog h2 {
   margin-top: 10px;
 }
 
+/* ---- The Reviewers dialog ---- */
+
+dialog#reviewers {
+  max-width: 560px;
+  max-height: calc(100vh - 32px);
+}
+
+.reviewers-form > p.muted {
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+
+.dialog-error {
+  background: var(--error-bg);
+  color: var(--error-text);
+  border-radius: 5px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.reviewer-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+}
+
+.reviewer-list li {
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: var(--panel);
+  margin-bottom: 4px;
+}
+
+.reviewer-list .row {
+  flex-wrap: nowrap;
+}
+
+/* Name gets more room than the role. */
+.reviewer-list input:first-of-type {
+  flex: 3;
+  min-width: 0;
+}
+
+.reviewer-list input + input {
+  flex: 2;
+  min-width: 0;
+}
+
+.reviewer-list button.link {
+  flex: none;
+}
+
+.reviewer-label {
+  flex: 1;
+}
+
+.swatch {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.reviewer-colours {
+  display: flex;
+  gap: 6px;
+  margin: 6px 0 0 18px;
+}
+
+.colour-pick {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+}
+
+.colour-pick[aria-checked="true"] {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+
+.reviewer-add {
+  flex-wrap: nowrap;
+  margin-bottom: 10px;
+}
+
+.reviewer-add input {
+  min-width: 0;
+}
+
+#reviewers-removed-box summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+#reviewers-removed-box p.muted {
+  font-size: 12px;
+  margin: 4px 0 6px;
+}
+
 .element-form label {
   display: block;
   margin-top: 10px;
@@ -1028,4 +1246,365 @@ dialog h2 {
 #switcher-list li.chosen,
 #switcher-list li:hover {
   background: var(--line);
+}
+
+/* ---- Comment highlights (comments.ts) ---- */
+
+.cm-comment {
+  border-radius: 2px;
+}
+
+.cm-comment-teal {
+  background: var(--reviewer-teal-soft);
+  box-shadow: inset 0 -2px var(--reviewer-teal);
+}
+
+.comment-sender-teal {
+  color: var(--reviewer-teal);
+}
+
+.cm-comment-amber {
+  background: var(--reviewer-amber-soft);
+  box-shadow: inset 0 -2px var(--reviewer-amber);
+}
+
+.comment-sender-amber {
+  color: var(--reviewer-amber);
+}
+
+.cm-comment-red {
+  background: var(--reviewer-red-soft);
+  box-shadow: inset 0 -2px var(--reviewer-red);
+}
+
+.comment-sender-red {
+  color: var(--reviewer-red);
+}
+
+.cm-comment-violet {
+  background: var(--reviewer-violet-soft);
+  box-shadow: inset 0 -2px var(--reviewer-violet);
+}
+
+.comment-sender-violet {
+  color: var(--reviewer-violet);
+}
+
+.cm-comment-green {
+  background: var(--reviewer-green-soft);
+  box-shadow: inset 0 -2px var(--reviewer-green);
+}
+
+.comment-sender-green {
+  color: var(--reviewer-green);
+}
+
+.cm-comment-orange {
+  background: var(--reviewer-orange-soft);
+  box-shadow: inset 0 -2px var(--reviewer-orange);
+}
+
+.comment-sender-orange {
+  color: var(--reviewer-orange);
+}
+
+.cm-comment-pink {
+  background: var(--reviewer-pink-soft);
+  box-shadow: inset 0 -2px var(--reviewer-pink);
+}
+
+.comment-sender-pink {
+  color: var(--reviewer-pink);
+}
+
+.cm-comment-brown {
+  background: var(--reviewer-brown-soft);
+  box-shadow: inset 0 -2px var(--reviewer-brown);
+}
+
+.comment-sender-brown {
+  color: var(--reviewer-brown);
+}
+
+.cm-comment-author {
+  background: var(--comment-author-soft);
+  box-shadow: inset 0 -2px var(--comment-author);
+}
+
+.comment-sender-author {
+  color: var(--comment-author);
+}
+
+.cm-comment-unknown {
+  background: var(--comment-unknown-soft);
+  box-shadow: inset 0 -2px var(--comment-unknown);
+}
+
+.comment-sender-unknown {
+  color: var(--comment-unknown);
+}
+
+/* Hidden by the setting, or resolved (unless "Show resolved" is on): kept, but not painted. */
+.comments-hidden .cm-comment,
+.cm-editor:not(.resolved-shown) .cm-comment-resolved {
+  background: none;
+  box-shadow: none;
+}
+
+.cm-comment-tooltip {
+  max-width: 360px;
+  padding: 4px 8px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+}
+
+.cm-comment-tooltip > div + div {
+  margin-top: 4px;
+}
+
+#comments-pane label.check {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+/* The text a new Comment will be on, while it's being written. */
+.cm-comment-pending {
+  outline: 1.5px dashed var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* ---- The Comments tab (commentspanel.ts) ---- */
+
+#comments-pane {
+  overflow-y: auto;
+}
+
+#comments-list > p.muted {
+  font-size: 13px;
+}
+
+.comment-card {
+  /* --sender: the sender's colour, set per card */
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--sender, var(--line));
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.comment-card.focused {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.comment-card.resolved {
+  opacity: 0.65;
+}
+
+.comment-card header,
+.comment-reply header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.comment-name {
+  color: var(--sender, var(--text));
+}
+
+.comment-time,
+.comment-state {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.comment-state {
+  margin-left: auto;
+}
+
+.comment-quote {
+  margin: 4px 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--line);
+  color: var(--muted);
+  font-style: italic;
+}
+
+.comment-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 4px 0;
+}
+
+.comment-replies {
+  margin: 6px 0 0 8px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+
+.comment-reply + .comment-reply {
+  margin-top: 6px;
+}
+
+.comment-reply header {
+  border-left: 3px solid var(--sender, var(--line));
+  padding-left: 4px;
+}
+
+.comment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: 2px -6px 0;
+}
+
+.comment-conflict {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  border-radius: 5px;
+  padding: 6px 8px;
+  margin: 6px 0;
+  cursor: auto;
+}
+
+.comment-conflict p {
+  margin: 0;
+}
+
+.comment-conflict .link {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.comment-form {
+  margin: 6px 0;
+  cursor: auto;
+}
+
+#comments-new .comment-form {
+  background: var(--bg);
+  border: 1px dashed var(--accent);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0 0 10px;
+}
+
+.comment-new-heading {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.comment-from {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.comment-form select,
+.comment-form textarea {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 6px;
+}
+
+.comment-form select {
+  flex: 1;
+  min-width: 0;
+}
+
+.comment-form textarea {
+  display: block;
+  width: 100%;
+  resize: vertical;
+}
+
+.comment-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.comment-form-actions button {
+  padding: 3px 10px;
+  font-size: 13px;
+}
+
+.comments-detached-heading {
+  font-size: 13px;
+  margin: 14px 0 2px;
+}
+
+.comments-detached-note {
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+
+/* ---- The Keyboard shortcuts dialog ---- */
+
+dialog#shortcuts {
+  max-width: 520px;
+  max-height: calc(100vh - 32px);
+}
+
+#shortcuts p.muted {
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+
+#shortcuts label.check {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+#shortcuts h3 {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 14px 0 4px;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.shortcut-row > span {
+  flex: 1;
+}
+
+.shortcut-key {
+  min-width: 9em;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  padding: 3px 8px;
+}
+
+.shortcut-key.none {
+  color: var(--muted);
+}
+
+.shortcut-key.recording {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+}
+
+#shortcuts menu {
+  justify-content: space-between;
 }

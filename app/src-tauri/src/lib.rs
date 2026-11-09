@@ -2,6 +2,7 @@
 //! and answers the interface. The interface only displays and captures input (ADR 0005).
 
 pub mod device;
+pub mod docx;
 pub mod library;
 pub mod patch;
 pub mod preamble;
@@ -203,6 +204,87 @@ async fn preview_page(handle: AppHandle, id: String, page: usize, known: Option<
         let state = handle.state::<TypesetState>();
         let typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         typesetter.page(&id, page, known.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What a PDF Export did, for the line that says so.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Exported {
+    path: String,
+    pages: usize,
+    /// Fonts that came from this Device: another Device's PDF of it would differ.
+    device_fonts: Vec<String>,
+}
+
+/// Exports a Work as a PDF in `look` (else its first). Changed Styles are recorded first, and
+/// it's refused (before asking where to save) if the Work doesn't typeset. None if the Author
+/// cancelled the save dialog.
+#[tauri::command]
+async fn export_pdf(handle: AppHandle, id: String, look: Option<String>) -> Result<Option<Exported>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (input, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
+            let vault = open_vault_of(app)?;
+            Ok((vault.export_input(&id, look.as_deref(), now_ms())?, vault.root.join("fonts")))
+        })?;
+        let pdf = {
+            let state = handle.state::<TypesetState>();
+            let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            typesetter.export_pdf(&fonts_dir, &input.header, input.text, input.date_ms, &input.ident)?
+        };
+        let name = id.rsplit('/').next().unwrap_or(&id);
+        let file_name = match &look {
+            Some(look) => format!("{name} ({look}).pdf"),
+            None => format!("{name}.pdf"),
+        };
+        let Some(path) = handle.dialog().file().set_title("Export as PDF").set_file_name(&file_name)
+            .add_filter("PDF", &["pdf"]).blocking_save_file().and_then(|p| p.into_path().ok())
+        else {
+            return Ok(None);
+        };
+        std::fs::write(&path, &pdf.bytes).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+        Ok(Some(Exported { path: path.display().to_string(), pages: pdf.pages, device_fonts: pdf.device_fonts }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What a `.docx` Export did.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportedDocx {
+    path: String,
+    paragraphs: usize,
+    /// What the `.docx` couldn't carry, with its line in the text.
+    left_out: Vec<docx::LeftOut>,
+}
+
+/// Exports a Work as a plain `.docx` in standard manuscript format (`font`: "Times New Roman"
+/// or "Courier New"). Changed Styles are recorded first, so its Story elements do what their
+/// recorded definitions say. None if the Author cancelled the save dialog.
+#[tauri::command]
+async fn export_docx(handle: AppHandle, id: String, font: String) -> Result<Option<ExportedDocx>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !["Times New Roman", "Courier New"].contains(&font.as_str()) {
+            return Err(format!("Not a manuscript font: {font}"));
+        }
+        let input = with_app(&handle.state::<AppState>(), |app| open_vault_of(app)?.export_input(&id, None, now_ms()))?;
+        let name = id.rsplit('/').next().unwrap_or(&id).to_string();
+        let title = if input.preamble.title.trim().is_empty() { name.clone() } else { input.preamble.title.clone() };
+        let manuscript = docx::Manuscript {
+            title: &title, author: &input.preamble.author, language: &input.preamble.language,
+            font: &font, date_ms: input.date_ms,
+        };
+        let made = docx::docx(&input.text, &input.header.elements, &manuscript)?;
+        let Some(path) = handle.dialog().file().set_title("Export as .docx").set_file_name(format!("{name}.docx"))
+            .add_filter("Word document", &["docx"]).blocking_save_file().and_then(|p| p.into_path().ok())
+        else {
+            return Ok(None);
+        };
+        std::fs::write(&path, &made.bytes).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+        Ok(Some(ExportedDocx { path: path.display().to_string(), paragraphs: made.paragraphs, left_out: made.left_out }))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -417,6 +499,45 @@ fn set_setting(state: State<AppState>, name: String, value: String, here: bool) 
     with_app(&state, |app| open_vault_of(app)?.set_setting(&name, &value, here, now_ms()))
 }
 
+/// Gives commands keyboard shortcuts: [command, key] pairs; key "none" for no key, "" for the default.
+#[tauri::command]
+fn set_shortcuts(state: State<AppState>, keys: Vec<(String, String)>) -> Result<vault::Settings, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_shortcuts(&keys, now_ms()))
+}
+
+#[tauri::command]
+fn reset_shortcuts(state: State<AppState>) -> Result<vault::Settings, String> {
+    with_app(&state, |app| open_vault_of(app)?.reset_shortcuts(now_ms()))
+}
+
+/// This Device gets its own shortcuts, or goes back to the Vault's.
+#[tauri::command]
+fn set_shortcuts_here(state: State<AppState>, here: bool) -> Result<vault::Settings, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_shortcuts_here(here, now_ms()))
+}
+
+/// Every Reviewer in the Vault, removed ones too, by name.
+#[tauri::command]
+fn get_reviewers(state: State<AppState>) -> Result<Vec<vault::Reviewer>, String> {
+    with_app(&state, |app| Ok(open_vault_of(app)?.reviewers()))
+}
+
+#[tauri::command]
+fn add_reviewer(state: State<AppState>, name: String, role: String) -> Result<vault::Reviewer, String> {
+    with_app(&state, |app| open_vault_of(app)?.add_reviewer(&name, &role, now_ms()))
+}
+
+#[tauri::command]
+fn update_reviewer(state: State<AppState>, id: String, name: String, role: String, colour: String) -> Result<vault::Reviewer, String> {
+    with_app(&state, |app| open_vault_of(app)?.update_reviewer(&id, &name, &role, &colour, now_ms()))
+}
+
+/// Removes a Reviewer (no longer offered as a sender; their Comments stay as they are), or brings one back.
+#[tauri::command]
+fn set_reviewer_removed(state: State<AppState>, id: String, removed: bool) -> Result<vault::Reviewer, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_reviewer_removed(&id, removed, now_ms()))
+}
+
 /// The tabs that were open in this Vault on this Device last time.
 #[tauri::command]
 fn get_layout(state: State<AppState>) -> Result<device::Layout, String> {
@@ -509,6 +630,13 @@ pub fn run() {
             save_as_new,
             get_settings,
             set_setting,
+            set_shortcuts,
+            reset_shortcuts,
+            set_shortcuts_here,
+            get_reviewers,
+            add_reviewer,
+            update_reviewer,
+            set_reviewer_removed,
             get_layout,
             save_layout,
             compile_preview,
@@ -520,6 +648,8 @@ pub fn run() {
             set_preamble,
             get_milestones,
             make_milestone,
+            export_pdf,
+            export_docx,
             get_library,
             read_library,
             write_library,

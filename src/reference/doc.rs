@@ -207,6 +207,7 @@ impl Doc {
             }
             ChangeKind::SetField { .. } => {} // fields aren't part of what the reference checks
             ChangeKind::Milestone { .. } => {} // nor are Milestones (returning to one is a Revert)
+            ChangeKind::Comment { .. } | ChangeKind::Reply { .. } => {} // nor Comments (they change no text)
         }
     }
 

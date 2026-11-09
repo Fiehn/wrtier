@@ -51,6 +51,71 @@ pub enum Op {
     /// Take in what changed outside the app (`WorkState::outside` said so). It comes through
     /// the editor's queue, so it's in order with the typing and the editor gets patches.
     Sync,
+    /// Send the Comments' highlights with the answer (`WorkState::marks`). Asked through the
+    /// queue, so their positions fit the editor's text the way patches do.
+    Marks,
+    // Comments. Each closes the open burst first (nothing else is recorded while one is open).
+    // `sender` is `author` or `reviewer/<id>`; the Vault fills in `sender_name`, the Reviewer's
+    // current name, which the Work records just before (so its `.db` reads on its own).
+    /// A new Comment on `from..to`.
+    Comment { from: usize, to: usize, sender: String, body: String, #[serde(skip)] sender_name: Option<String> },
+    Reply { comment: String, sender: String, body: String, #[serde(skip)] sender_name: Option<String> },
+    /// A new body for a Comment or Reply.
+    EditComment { id: String, body: String },
+    SetCommentSender { id: String, sender: String, #[serde(skip)] sender_name: Option<String> },
+    Resolve { id: String, resolved: bool },
+    /// Deletes a Comment (with its Replies) or a Reply: a Revert, so it can be restored.
+    DeleteComment { id: String },
+}
+
+impl Op {
+    /// The Reviewer a Comment op names, for the Vault to fill in their name.
+    pub fn sender_mut(&mut self) -> Option<(&str, &mut Option<String>)> {
+        match self {
+            Op::Comment { sender, sender_name, .. } | Op::Reply { sender, sender_name, .. } | Op::SetCommentSender { sender, sender_name, .. } => {
+                Some((sender.as_str(), sender_name))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// A Reply, as the Comments panel shows it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyMark {
+    pub id: String,
+    pub sender: String,
+    pub name: String,
+    pub colour: String,
+    pub body: String,
+    pub time_ms: u64,
+    /// The other version of its body, if two Devices edited it without seeing each other.
+    pub other_body: Option<String>,
+}
+
+/// A Comment's highlight in the editor.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Mark {
+    pub id: String,
+    /// Where its text is: from..to in UTF-16, in reading order. Empty: it's detached.
+    pub ranges: Vec<(usize, usize)>,
+    /// `author` or `reviewer/<id>`.
+    pub sender: String,
+    /// Who sent it, as the app shows them, and their colour slot (or "author", or "unknown").
+    /// Filled in by the Vault, which knows the Reviewers.
+    pub name: String,
+    pub colour: String,
+    pub body: String,
+    pub resolved: bool,
+    /// The text it was attached to, as selected.
+    pub quote: String,
+    /// When it was made (ms since 1970).
+    pub time_ms: u64,
+    pub replies: Vec<ReplyMark>,
+    /// The other version of its body, if two Devices edited it without seeing each other.
+    pub other_body: Option<String>,
 }
 
 impl Op {
@@ -65,7 +130,8 @@ impl Op {
                 let at = if at > from { at - (to - from) } else { *at };
                 replace_utf16(&without, at, at, moved)
             }
-            Op::Cursor { .. } | Op::Undo | Op::Redo | Op::Sync => text.to_string(),
+            // Undo, redo and a sync may change the text (`may_differ`); the rest never do.
+            _ => text.to_string(),
         }
     }
 
@@ -107,6 +173,11 @@ pub struct WorkState {
     pub moved: Option<Whereabouts>,
     /// A Style (or Look, or Story element) changed in the library since the Work recorded it.
     pub style_notice: Option<String>,
+    /// How many Changes the History holds. When it goes up (a burst was recorded, something
+    /// was taken in, a Move or Revert), the editor asks for the highlights again (`Op::Marks`).
+    pub changes: usize,
+    /// The Comments' highlights, in the answer to a batch with `Op::Marks`.
+    pub marks: Option<Vec<Mark>>,
 }
 
 /// Where a Work's History went when it disappeared from under an open tab.
@@ -246,7 +317,103 @@ impl OpenWork {
             sync_problem: self.sync_problem.clone(),
             moved: self.whereabouts.clone(),
             style_notice: self.style_notice.clone(),
+            changes: self.doc.change_count(),
+            marks: None,
         }
+    }
+
+    /// The Comments' highlights, in the text the editor shows (open burst included). Names and
+    /// colours are left for the Vault to fill in.
+    pub fn marks(&self) -> Vec<Mark> {
+        let comments = self.doc.comments();
+        if comments.is_empty() {
+            return Vec::new();
+        }
+        // Bodies edited on two Devices without seeing each other: the version that lost, by Comment or Reply.
+        let mut other: HashMap<String, String> = HashMap::new();
+        for notice in self.doc.merge_notices() {
+            if let Some((record, field, lost)) = self.doc.concurrent_field(notice.key) {
+                if let (Some(id), "body") = (record.strip_prefix("comment/"), field.as_str()) {
+                    other.insert(id.to_string(), lost);
+                }
+            }
+        }
+        comments.into_iter().map(|c| {
+            let id = c.id.to_string();
+            Mark {
+                ranges: c.ranges.iter().map(|&(from, to)| (self.positions.to_utf16(from), self.positions.to_utf16(to))).collect(),
+                sender: c.sender,
+                name: String::new(),
+                colour: String::new(),
+                body: c.body,
+                resolved: c.resolved,
+                quote: c.quote,
+                time_ms: c.hlc.0,
+                replies: c.replies.into_iter().map(|r| {
+                    let id = r.id.to_string();
+                    ReplyMark { other_body: other.get(&id).cloned(), id, sender: r.sender, name: String::new(), colour: String::new(), body: r.body, time_ms: r.hlc.0 }
+                }).collect(),
+                other_body: other.get(&id).cloned(),
+                id,
+            }
+        }).collect()
+    }
+
+    /// A Comment's or Reply's ID from the interface, if it's one the Work has (and not deleted).
+    fn comment_id(&self, id: &str, reply_ok: bool) -> Result<ChangeId, String> {
+        let parsed: ChangeId = id.parse().map_err(|_| format!("Not a Comment: {id}"))?;
+        let found = self.doc.comments().iter().any(|c| c.id == parsed || (reply_ok && c.replies.iter().any(|r| r.id == parsed)));
+        if found { Ok(parsed) } else { Err("That Comment was deleted (perhaps on another Device).".into()) }
+    }
+
+    /// Before a Comment or Reply from a Reviewer is recorded: the Work records their current
+    /// name, if it has none for them or an older one.
+    fn record_sender(&mut self, sender: &str, name: Option<&str>, now_ms: u64) {
+        let Some(name) = name else { return };
+        if sender.starts_with("reviewer/") && self.doc.field(sender, "name") != Some(name) {
+            let change = self.doc.set_field_local(sender, "name", name, now_ms);
+            self.unsaved.push(change);
+        }
+    }
+
+    /// The Comment ops: each closes the open burst (and a waiting cut) first.
+    fn apply_comment_op(&mut self, op: Op, now_ms: u64) -> Result<(), String> {
+        self.close_burst(now_ms);
+        let change = match op {
+            Op::Comment { from, to, sender, body, sender_name } => {
+                let (f, t) = self.chars(from, to)?;
+                if f == t {
+                    return Err("A Comment needs some text to attach to.".into());
+                }
+                self.record_sender(&sender, sender_name.as_deref(), now_ms);
+                self.doc.comment_local(f, t - f, &sender, &body, now_ms)
+            }
+            Op::Reply { comment, sender, body, sender_name } => {
+                let comment = self.comment_id(&comment, false)?;
+                self.record_sender(&sender, sender_name.as_deref(), now_ms);
+                self.doc.reply_local(comment, &sender, &body, now_ms)
+            }
+            Op::EditComment { id, body } => {
+                let id = self.comment_id(&id, true)?;
+                self.doc.edit_comment_local(id, &body, now_ms)
+            }
+            Op::SetCommentSender { id, sender, sender_name } => {
+                let id = self.comment_id(&id, true)?;
+                self.record_sender(&sender, sender_name.as_deref(), now_ms);
+                self.doc.set_comment_sender_local(id, &sender, now_ms)
+            }
+            Op::Resolve { id, resolved } => {
+                let id = self.comment_id(&id, false)?;
+                self.doc.resolve_comment_local(id, resolved, now_ms)
+            }
+            Op::DeleteComment { id } => {
+                let id = self.comment_id(&id, true)?;
+                self.doc.revert_local(id, false, now_ms)
+            }
+            _ => unreachable!("only Comment ops come here"),
+        };
+        self.unsaved.push(change);
+        Ok(())
     }
 
     /// Does this Work need to record the Style library as of `generation` before an edit?
@@ -265,6 +432,19 @@ impl OpenWork {
         let changes = crate::preamble::record_unrecorded(&mut self.doc, shelf, now_ms);
         self.unsaved.extend(changes);
         self.style_notice = None;
+    }
+
+    /// Before an Export: the open burst closes and changed Styles are recorded, so the Export is
+    /// exactly a version in the History. (A cut waiting for its paste stays.)
+    pub fn prepare_export(&mut self, shelf: &crate::preamble::Shelf, generation: u64, now_ms: u64) -> WorkState {
+        if self.cut.is_none() {
+            self.close_burst(now_ms);
+        }
+        self.styles_checked = None;
+        self.record_styles(Some((shelf, generation)), now_ms);
+        self.save();
+        self.keep_recovery(false);
+        self.state(Vec::new())
     }
 
     /// Names the current point in the History. The open burst closes, and changed Styles are
@@ -355,7 +535,8 @@ impl OpenWork {
     /// `library`: the Style library and its generation, if it changed since this Work last
     /// recorded what it uses (see `styles_due`).
     pub fn edit(&mut self, ops: Vec<Op>, device_name: Option<&str>, library: Option<(&crate::preamble::Shelf, u64)>, now_ms: u64) -> Result<WorkState, String> {
-        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync)) {
+        let want_marks = ops.contains(&Op::Marks);
+        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks)) {
             self.name_this_device(device_name, now_ms)?;
             self.record_styles(library, now_ms);
         }
@@ -385,7 +566,8 @@ impl OpenWork {
         #[cfg(debug_assertions)]
         assert_eq!(self.positions, Positions::new(&self.doc.text()), "the position map drifted from the text");
         let took_in = self.took_in.take();
-        result.map(|()| WorkState { took_in, ..self.state(patches) })
+        let marks = want_marks.then(|| self.marks());
+        result.map(|()| WorkState { took_in, marks, ..self.state(patches) })
     }
 
     /// Records this Device's name in the Work before its first edit in a sitting, while no burst
@@ -522,6 +704,9 @@ impl OpenWork {
             Op::Undo => self.undo(now_ms),
             Op::Redo => self.redo(now_ms),
             Op::Sync => self.take_in(now_ms)?,
+            Op::Marks => {} // answered at the end of the batch
+            op @ (Op::Comment { .. } | Op::Reply { .. } | Op::EditComment { .. } | Op::SetCommentSender { .. }
+                | Op::Resolve { .. } | Op::DeleteComment { .. }) => self.apply_comment_op(op, now_ms)?,
         }
         Ok(())
     }
@@ -813,6 +998,81 @@ mod tests {
         let mut changes = vec![phone.set_device_name_local("Phone", 5000)];
         changes.push(phone.insert_local(at, text, 5000));
         storage::save(&w.db, &changes, &phone).unwrap();
+    }
+
+    fn marks(state: &WorkState) -> Vec<(usize, usize)> {
+        state.marks.as_ref().expect("asked for")[0].ranges.clone()
+    }
+
+    #[test]
+    fn highlights_come_in_utf16_and_follow_a_move() {
+        let (_dir, mut w) = work("a😊bcdef");
+        w.doc.comment_local(2, 3, wrtier::change::AUTHOR, "too abrupt?", 500); // "bcd"
+        let state = w.edit(vec![Op::Marks], None, None, 1000).unwrap();
+        assert_eq!(marks(&state), [(3, 6)], "the emoji counts twice");
+        assert_eq!(state.marks.as_ref().unwrap()[0].body, "too abrupt?");
+        // Only asked for: a batch without `Marks` doesn't carry them.
+        let before = state.changes;
+        let state = w.edit(vec![typing(5, "X")], None, None, 1100).unwrap(); // between "c" and "d", still a draft
+        assert!(state.marks.is_none());
+        assert_eq!(state.changes, before, "nothing recorded while the burst is open");
+        let state = w.edit(vec![Op::Marks], None, None, 1200).unwrap();
+        assert_eq!(marks(&state), [(3, 7)], "the draft typed inside is covered");
+        // Dragging "cd" to the end records a Move: the count goes up, and the Comment is in both places.
+        let state = w.edit(vec![Op::Move { from: 4, to: 7, at: 9 }], None, None, 1300).unwrap();
+        assert_eq!(w.text(), "a😊befcXd");
+        assert!(state.changes > before);
+        let state = w.edit(vec![Op::Marks], None, None, 1400).unwrap();
+        assert_eq!(marks(&state), [(3, 4), (6, 9)]);
+    }
+
+    fn comment_op(from: usize, to: usize, sender: &str, body: &str) -> Op {
+        Op::Comment { from, to, sender: sender.into(), body: body.into(), sender_name: None }
+    }
+
+    #[test]
+    fn adding_a_comment_closes_the_burst_and_everything_else_is_recorded_too() {
+        let (_dir, mut w) = work("The rain had stopped.");
+        w.edit(vec![typing(21, " Then")], None, None, 1000).unwrap(); // a burst is open
+        let state = w.edit(vec![comment_op(4, 8, wrtier::change::AUTHOR, "too wet?"), Op::Marks], None, None, 1100).unwrap();
+        assert!(state.burst.is_none(), "the burst was recorded first");
+        let mark = state.marks.unwrap().remove(0);
+        assert_eq!((mark.ranges.as_slice(), mark.quote.as_str(), mark.body.as_str()), ([(4, 8)].as_slice(), "rain", "too wet?"));
+        let id = mark.id;
+        let reviewer = Op::Reply { comment: id.clone(), sender: "reviewer/7f3a0001".into(), body: "agreed".into(), sender_name: Some("Anna".into()) };
+        let state = w.edit(vec![reviewer, Op::EditComment { id: id.clone(), body: "far too wet?".into() }, Op::Resolve { id: id.clone(), resolved: true }, Op::Marks], None, None, 1200).unwrap();
+        let mark = state.marks.unwrap().remove(0);
+        assert_eq!((mark.body.as_str(), mark.resolved, mark.replies.len()), ("far too wet?", true, 1));
+        assert_eq!(w.doc.field("reviewer/7f3a0001", "name"), Some("Anna"), "the Reviewer's name was recorded with the Reply");
+        // Saved: reopening the Work has them.
+        let (_, reopened) = storage::load(&w.db, DeviceId(1)).unwrap();
+        assert_eq!(reopened.comments()[0].replies.len(), 1);
+        // Deleting it takes the Reply along; acting on it afterwards is refused, and undo never touches Comments.
+        let state = w.edit(vec![Op::DeleteComment { id: id.clone() }, Op::Marks], None, None, 1300).unwrap();
+        assert!(state.marks.unwrap().is_empty());
+        assert!(w.edit(vec![Op::Resolve { id, resolved: false }], None, None, 1400).is_err());
+        w.edit(vec![Op::Undo], None, None, 1500).unwrap();
+        assert_eq!(w.text(), "The rain had stopped.", "undo took back the typing, not the deletion of the Comment");
+        assert!(w.doc.comments().is_empty());
+        assert!(w.edit(vec![comment_op(3, 3, wrtier::change::AUTHOR, "")], None, None, 1600).is_err(), "no text to attach to");
+    }
+
+    #[test]
+    fn a_body_edited_on_two_devices_shows_the_other_version() {
+        let (_dir, mut w) = work("abcdef");
+        let state = w.edit(vec![comment_op(1, 4, wrtier::change::AUTHOR, "first"), Op::Marks], None, None, 1000).unwrap();
+        let id = state.marks.unwrap().remove(0).id;
+        // The phone edits the body offline; so does this Device.
+        let (_, mut phone) = storage::load(&w.db, DeviceId(2)).unwrap();
+        w.edit(vec![Op::EditComment { id: id.clone(), body: "the laptop's".into() }], None, None, 3000).unwrap();
+        let change = phone.edit_comment_local(id.parse().unwrap(), "the phone's", 2000);
+        storage::save(&w.db, &[change], &phone).unwrap(); // Syncthing delivers the phone's copy
+        notice_and_sync(&mut w, 4000);
+        let mark = w.edit(vec![Op::Marks], None, None, 5000).unwrap().marks.unwrap().remove(0);
+        assert_eq!((mark.body.as_str(), mark.other_body.as_deref()), ("the laptop's", Some("the phone's")));
+        // Editing it again settles it.
+        let mark = w.edit(vec![Op::EditComment { id, body: "the phone's".into() }, Op::Marks], None, None, 6000).unwrap().marks.unwrap().remove(0);
+        assert_eq!((mark.body.as_str(), mark.other_body), ("the phone's", None));
     }
 
     /// The timer noticed something; the editor sends a `Sync`, as it does when `outside` goes up.

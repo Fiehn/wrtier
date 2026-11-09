@@ -16,6 +16,10 @@ enum Action {
     Rename { device: usize, name: u8 },
     Mark { device: usize },
     Return { device: usize, pick: u16 },
+    Comment { device: usize, at: u16, len: u8 },
+    Reply { device: usize, pick: u16 },
+    EditComment { device: usize, pick: u16, body: u8 },
+    Resolve { device: usize, pick: u16, resolved: bool },
 }
 
 // Generate a random Action.
@@ -32,6 +36,10 @@ fn action() -> impl Strategy<Value = Action> {
         (0..3usize, 0..4u8).prop_map(|(device, name)| Action::Rename { device, name }),
         (0..3usize).prop_map(|device| Action::Mark { device }),
         (0..3usize, any::<u16>()).prop_map(|(device, pick)| Action::Return { device, pick }),
+        (0..3usize, any::<u16>(), 1..6u8).prop_map(|(device, at, len)| Action::Comment { device, at, len }),
+        (0..3usize, any::<u16>()).prop_map(|(device, pick)| Action::Reply { device, pick }),
+        (0..3usize, any::<u16>(), 0..3u8).prop_map(|(device, pick, body)| Action::EditComment { device, pick, body }),
+        (0..3usize, any::<u16>(), any::<bool>()).prop_map(|(device, pick, resolved)| Action::Resolve { device, pick, resolved }),
     ]
 }
 
@@ -178,12 +186,65 @@ fn run(actions: &[Action]) {
                     continue;
                 }
                 let milestone = milestones[*pick as usize % milestones.len()].id;
+                let comments_before = docs[*device].comments().len();
                 if let Some(change) = docs[*device].return_to_milestone_local(milestone, &[], now_ms - skew[*device]) {
                     assert_eq!(docs[*device].text(), docs[*device].text_at_milestone(milestone), "returning gives the Milestone's text");
+                    assert_eq!(docs[*device].comments().len(), comments_before, "returning keeps every Comment");
                     all.push(change.clone());
                     changes[*device].push(change);
                     now_ms += 1;
                 }
+            }
+            Action::Comment { device, at, len } => {
+                let n = docs[*device].text().chars().count();
+                if n == 0 {
+                    continue;
+                }
+                let at = *at as usize % n;
+                let len = (*len as usize).min(n - at);
+                let quote: String = docs[*device].text().chars().skip(at).take(len).collect();
+                let change = docs[*device].comment_local(at, len, AUTHOR, "note", now_ms - skew[*device]);
+                // A new Comment covers exactly the selection.
+                let made = docs[*device].comments().into_iter().find(|c| c.id == change.id).unwrap();
+                assert_eq!((made.quote.as_str(), made.ranges.as_slice()), (quote.as_str(), [(at, at + len)].as_slice()));
+                all.push(change.clone());
+                changes[*device].push(change);
+                now_ms += 1;
+            }
+            Action::Reply { device, pick } => {
+                let comments = docs[*device].comments();
+                if comments.is_empty() {
+                    continue;
+                }
+                let id = comments[*pick as usize % comments.len()].id;
+                let change = docs[*device].reply_local(id, AUTHOR, "reply", now_ms - skew[*device]);
+                all.push(change.clone());
+                changes[*device].push(change);
+                now_ms += 1;
+            }
+            Action::EditComment { device, pick, body } => {
+                let comments = docs[*device].comments();
+                if comments.is_empty() {
+                    continue;
+                }
+                let id = comments[*pick as usize % comments.len()].id;
+                let body = ["one", "two", "three"][*body as usize];
+                let change = docs[*device].edit_comment_local(id, body, now_ms - skew[*device]);
+                assert_eq!(docs[*device].comments().into_iter().find(|c| c.id == id).unwrap().body, body);
+                all.push(change.clone());
+                changes[*device].push(change);
+                now_ms += 1;
+            }
+            Action::Resolve { device, pick, resolved } => {
+                let comments = docs[*device].comments();
+                if comments.is_empty() {
+                    continue;
+                }
+                let id = comments[*pick as usize % comments.len()].id;
+                let change = docs[*device].resolve_comment_local(id, *resolved, now_ms - skew[*device]);
+                all.push(change.clone());
+                changes[*device].push(change);
+                now_ms += 1;
             }
         }
     }
@@ -205,6 +266,15 @@ fn run(actions: &[Action]) {
     // ...and the same Merge notices, since every Device works them out from the same History.
     assert_eq!(docs[0].merge_notices(), docs[1].merge_notices());
     assert_eq!(docs[1].merge_notices(), docs[2].merge_notices());
+    // ...and the same Comments, covering the same text, with the same Replies and state.
+    assert_eq!(docs[0].comments(), docs[1].comments());
+    assert_eq!(docs[1].comments(), docs[2].comments());
+    // Every Comment's ranges are in order, apart, and inside the text.
+    let len = docs[0].text().chars().count();
+    for comment in docs[0].comments() {
+        assert!(comment.ranges.windows(2).all(|w| w[0].1 < w[1].0), "ranges in order and apart: {:?}", comment.ranges);
+        assert!(comment.ranges.iter().all(|&(start, end)| start < end && end <= len));
+    }
     // Compare the final text with what would be expected if all changes were applied in order of their HLC and DeviceId.
     let expected = expected_chars(&all);
     for doc in &docs {
@@ -261,7 +331,7 @@ fn reverted_by(all: &[Change]) -> HashMap<ChangeId, Vec<ChangeId>> {
 }
 
 use std::collections::HashMap;
-use wrtier::change::ChangeKind;
+use wrtier::change::{ChangeKind, AUTHOR};
 use wrtier::ids::{ChangeId, CharId};
 
 /// The "in effect" rule, written a second time without using Doc:
@@ -292,7 +362,8 @@ fn expected_chars(all: &[Change]) -> Vec<char> {
             ChangeKind::Delete(r) => r,
             ChangeKind::Replace { deleted, .. } => deleted,
             ChangeKind::Insert(_) | ChangeKind::Revert { .. } => continue,
-            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } | ChangeKind::Milestone { .. } => continue, // they don't delete characters
+            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } | ChangeKind::Milestone { .. }
+            | ChangeKind::Comment { .. } | ChangeKind::Reply { .. } => continue, // they don't delete characters
         };
         for r in ranges {
             for offset in r.first.offset..r.first.offset + r.len {
@@ -307,7 +378,8 @@ fn expected_chars(all: &[Change]) -> Vec<char> {
             ChangeKind::Insert(run) => run,
             ChangeKind::Replace { inserted, .. } => inserted,
             ChangeKind::Delete(_) | ChangeKind::Revert { .. } => continue,
-            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } | ChangeKind::Milestone { .. } => continue, // they don't add characters
+            ChangeKind::Move { .. } | ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } | ChangeKind::Milestone { .. }
+            | ChangeKind::Comment { .. } | ChangeKind::Reply { .. } => continue, // they don't add characters
         };
         if !in_effect(c.id, &reverted_by) {
             continue;

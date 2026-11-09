@@ -252,6 +252,39 @@ pub struct CompletionItem {
     pub story_element: bool,
 }
 
+/// A PDF Export.
+#[derive(Debug)]
+pub struct ExportedPdf {
+    pub bytes: Vec<u8>,
+    /// Families that came from this Device, not the Vault: another Device's PDF would differ.
+    pub device_fonts: Vec<String>,
+    pub pages: usize,
+}
+
+/// A time (ms since 1970) as a date and time in UTC, for the PDF's metadata.
+fn datetime_utc(ms: u64) -> Datetime {
+    let (year, month, day, hour, minute, second) = utc_parts(ms);
+    Datetime::from_ymd_hms(year, month, day, hour, minute, second)
+        .unwrap_or_else(|| Datetime::from_ymd(1970, 1, 1).expect("a valid date"))
+}
+
+/// A time (ms since 1970) as year, month, day, hour, minute and second in UTC.
+pub fn utc_parts(ms: u64) -> (i32, u8, u8, u8, u8, u8) {
+    let secs = (ms / 1000) as i64;
+    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Days since 1970-01-01 to a calendar date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let year = (yoe + era * 400 + i64::from(month <= 2)) as i32;
+    (year, month, day, (rest / 3600) as u8, (rest % 3600 / 60) as u8, (rest % 60) as u8)
+}
+
 /// What a compile gives the Page preview.
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -460,6 +493,33 @@ impl Typesetter {
     pub fn locate(&self, id: &str, at: usize) -> Option<Spot> {
         let preview = self.previews.get(id)?;
         locate(preview.last_good.as_ref()?, &preview.world.main, preview.to_source(at)?)
+    }
+
+    /// A PDF of a Work's text after its Preamble, refused if it doesn't compile. The same
+    /// version gives the same bytes on every Device: the date is `date_ms` (the newest Change in
+    /// it, never today's), the document's ID comes from `ident` (the Work's own ID), and fonts
+    /// come from the Vault or the app (a Device font is flagged in what's returned).
+    pub fn export_pdf(&mut self, fonts_dir: &Path, header: &Header, text: String, date_ms: u64, ident: &str) -> Result<ExportedPdf, String> {
+        const KEY: &str = "\u{0}export"; // apart from every Work's preview
+        let compiled = self.compile_with(KEY, fonts_dir, header, text);
+        let result = (|| {
+            if let Some(error) = compiled.errors.first() {
+                let line = error.line.map(|l| format!("line {l}: ")).unwrap_or_default();
+                return Err(format!("It doesn't typeset: {line}{}. Nothing was exported.", error.message));
+            }
+            let document = self.previews.get(KEY).and_then(|p| p.last_good.as_ref()).ok_or("Nothing to export.")?;
+            let options = typst_pdf::PdfOptions {
+                ident: typst::foundations::Smart::Custom(ident.to_string()),
+                creator: typst::foundations::Smart::Custom(Some("Wrtier".to_string())),
+                timestamp: Some(typst_pdf::Timestamp::new_utc(datetime_utc(date_ms))),
+                ..typst_pdf::PdfOptions::default()
+            };
+            let bytes = typst_pdf::pdf(document, &options)
+                .map_err(|errors| format!("The PDF couldn't be made: {}", errors.first().map(|e| e.message.as_str()).unwrap_or("unknown")))?;
+            Ok(ExportedPdf { bytes, device_fonts: compiled.device_fonts.clone(), pages: compiled.pages.len() })
+        })();
+        self.previews.remove(KEY);
+        result
     }
 
     /// The Work's tab closed (or it was renamed): its preview isn't needed.
@@ -691,8 +751,22 @@ mod tests {
         let spot = t.locate("Rain", text.find("edited").unwrap()).unwrap();
         eprintln!("found the cursor on page {} in {} ms", spot.page + 1, start.elapsed().as_millis());
         assert!((140..170).contains(&spot.page));
-        // Generous, for slow test machines; on desktop it's far below this.
-        assert!(edited.ms < 1000, "recompile took {} ms", edited.ms);
+    }
+
+    /// The timing behind Phase 3's "previews smoothly": run on its own
+    /// (`cargo test -p wrtier_app novel_timing -- --ignored --nocapture`). Typst's cache is
+    /// shared by the whole program and every compile clears what it didn't use, so tests
+    /// compiling at the same time would make this recompile start from scratch. (The app
+    /// compiles one Work at a time.)
+    #[test]
+    #[ignore]
+    fn novel_timing() {
+        let mut t = Typesetter::new(false);
+        let first = compile(&mut t, &novel(""));
+        let edited = compile(&mut t, &novel("edited "));
+        eprintln!("{} pages: first compile {} ms, recompile {} ms", first.pages.len(), first.ms, edited.ms);
+        // Generous, for slow machines: well under the 300 ms pause on desktop.
+        assert!(edited.ms < 300, "recompile took {} ms", edited.ms);
     }
 
     /// UTF-16 position of `needle` in `text` (the texts here are ASCII, so bytes will do).
@@ -834,6 +908,14 @@ mod tests {
         let t = Typesetter::new(false);
         assert_eq!(t.locate("Rain", 0), None);
         assert_eq!(t.jump("Rain", 0, 10.0, 10.0), None);
+    }
+
+    #[test]
+    fn a_pdfs_date_is_the_right_day() {
+        assert_eq!(datetime_utc(0), Datetime::from_ymd_hms(1970, 1, 1, 0, 0, 0).unwrap());
+        assert_eq!(datetime_utc(1_700_000_000_000), Datetime::from_ymd_hms(2023, 11, 14, 22, 13, 20).unwrap());
+        assert_eq!(datetime_utc(1_709_164_800_000), Datetime::from_ymd_hms(2024, 2, 29, 0, 0, 0).unwrap()); // a leap day
+        assert_eq!(datetime_utc(1_794_268_799_000), Datetime::from_ymd_hms(2026, 11, 9, 23, 59, 59).unwrap());
     }
 
     #[test]

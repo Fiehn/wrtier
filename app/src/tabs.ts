@@ -13,6 +13,9 @@ import { formattedView } from "./formatted";
 import { toggleMarkup } from "./shortcuts";
 import { dragToMove } from "./dragging";
 import { completions } from "./completion";
+import { commentClasses, commentHighlights, pendingRange, rangesOf, setMarks, setPending, type CommentOptions } from "./comments";
+import type { CommentOp, Mark } from "./sync";
+import { bindings, withKey, type CommandId } from "./keys";
 
 export type OpenedWork = { id: string; name: string; text: string; problems: { path: string; reason: string }[]; notice: string | null };
 
@@ -38,6 +41,14 @@ export type TabEvents = {
   closed(id: string): void;
   /** "Add it?" was clicked on a Story element the Work doesn't have yet. */
   addElement(id: string, name: string): void;
+  /** Highlighted text was clicked: these Comments (by ID) are on it. */
+  openComments(id: string, comments: string[]): void;
+  /** A Work's Comments, as they are now (after anything changed them). */
+  marks(id: string, marks: Mark[]): void;
+  /** Its key (Ctrl+Shift+M at first), or "Add Comment" in the menu: a new Comment on the selection or the word at the cursor. */
+  addComment(id: string): void;
+  /** Right-click inside a selection: the app's own menu, at (x, y). */
+  selectionMenu(id: string, x: number, y: number): void;
 };
 
 const historyCompartment = new Compartment();
@@ -47,6 +58,10 @@ const viewCompartment = new Compartment();
 const linesCompartment = new Compartment();
 /** The Story elements the Work has (from its Preamble and the Style library). */
 const elementsCompartment = new Compartment();
+/** Which Comment highlights are painted (a setting, and "Show resolved"). */
+const commentsCompartment = new Compartment();
+/** The editor's commands on the keys the Author gave them. */
+const keysCompartment = new Compartment();
 
 export type EditorOptions = { lineNumbers: boolean; highlightLine: boolean };
 
@@ -69,6 +84,8 @@ class Tab {
   /** The last word from Rust about it, and a line to show at its top (recovered, took in…). */
   state: WorkState | null = null;
   notice: string | null;
+  /** Its Comments, as Rust last gave them. */
+  marks: Mark[] = [];
 
   /** A Work's sync (only Work tabs have one). */
   get sync(): WorkSync {
@@ -110,7 +127,7 @@ class Tab {
     const close = document.createElement("button");
     close.type = "button";
     close.className = "tab-close";
-    close.title = "Close (Ctrl+W)";
+    close.title = withKey("Close", "closeTab");
     close.textContent = "×";
     close.addEventListener("click", () => void tabs.close(this.id));
     this.label.append(name, close);
@@ -141,14 +158,6 @@ class Tab {
     }
     const work = content;
 
-    // Ctrl+Z and redo: the sync decides between the editor's own undo (inside a draft) and the History's.
-    const undoKeys = keymap.of([
-      { key: "Mod-z", run: () => this.sync.undo(), preventDefault: true },
-      { key: "Mod-Shift-z", run: () => this.sync.redo(), preventDefault: true },
-      { key: "Mod-y", run: () => this.sync.redo(), preventDefault: true },
-      { key: "Mod-b", run: toggleMarkup("strong"), preventDefault: true },
-      { key: "Mod-i", run: toggleMarkup("emph"), preventDefault: true },
-    ]);
     this.view = new EditorView({
       parent: editor,
       state: EditorState.create({
@@ -156,7 +165,7 @@ class Tab {
         extensions: [
           EditorView.lineWrapping,
           historyCompartment.of(history()),
-          undoKeys,
+          keysCompartment.of(this.editorKeys(tabs)),
           // Only the basics: no shortcuts that move lines, which would bypass Moves.
           keymap.of(standardKeymap),
           dropCursor(),
@@ -165,6 +174,8 @@ class Tab {
           elementsCompartment.of(storyElements([])),
           viewCompartment.of(tabs.formatted ? formattedView() : []),
           linesCompartment.of(lineExtensions(tabs.options)),
+          commentHighlights(() => tabs.commentOptions, (ids) => tabs.events.openComments(this.id, ids)),
+          commentsCompartment.of(commentClasses(tabs.commentOptions)),
           EditorView.updateListener.of((update) => {
             for (const tr of update.transactions) this.sync.track(tr);
             if (update.docChanged) tabs.events.edited(this.sync.id);
@@ -184,9 +195,25 @@ class Tab {
         this.view.dispatch({ effects: historyCompartment.reconfigure(history()) });
         tabs.events.committed(this.sync.id);
       },
+      marks: (marks) => {
+        this.marks = marks;
+        this.view.dispatch({ effects: setMarks.of(marks) });
+        tabs.events.marks(this.id, marks);
+      },
       error: (message) => tabs.events.error(message),
     });
     this.rename(work.id, work.name);
+    this.sync.requestMarks();
+
+    // Right-click inside a selection: the app's menu (Add Comment, Cut, Copy, Paste). Anywhere
+    // else the system's own, which has the spelling suggestions.
+    this.view.contentDOM.addEventListener("contextmenu", (e) => {
+      const selection = this.view.state.selection.main;
+      const pos = this.view.posAtCoords({ x: e.clientX, y: e.clientY });
+      if (selection.empty || pos === null || pos < selection.from || pos > selection.to) return;
+      e.preventDefault();
+      tabs.events.selectionMenu(this.id, e.clientX, e.clientY);
+    });
     this.pane.addEventListener("wrtier-add-element", (e) => tabs.events.addElement(this.id, (e as CustomEvent<string>).detail));
 
     // A click anywhere in the writing area (the margins beside the text, the space below it)
@@ -200,6 +227,29 @@ class Tab {
       this.view.focus();
       this.view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
     });
+  }
+
+  /**
+   * The editor's commands on the keys the Author gave them (keys.ts). Undo and redo: the sync
+   * decides between the editor's own undo (inside a draft) and the History's.
+   */
+  editorKeys(tabs: Tabs) {
+    const run: Partial<Record<CommandId, () => boolean>> = {
+      undo: () => this.sync.undo(),
+      redo: () => this.sync.redo(),
+      redoAlt: () => this.sync.redo(),
+      strong: () => toggleMarkup("strong")(this.view),
+      emph: () => toggleMarkup("emph")(this.view),
+      addComment: () => {
+        tabs.events.addComment(this.id);
+        return true;
+      },
+    };
+    const keys = bindings();
+    return keymap.of(Object.entries(run).flatMap(([command, action]) => {
+      const key = keys[command as CommandId];
+      return key ? [{ key, run: action, preventDefault: true }] : [];
+    }));
   }
 
   rename(id: string, name: string) {
@@ -238,6 +288,83 @@ export class Tabs {
     for (const tab of this.open) {
       tab.view.dispatch({ effects: linesCompartment.reconfigure(lineExtensions(options)) });
     }
+  }
+
+  /** Which Comment highlights are painted, in every Work. */
+  commentOptions: CommentOptions = { highlights: true, resolved: false };
+
+  setCommentOptions(options: CommentOptions) {
+    this.commentOptions = options;
+    for (const tab of this.open) {
+      if (tab.isWork) tab.view.dispatch({ effects: commentsCompartment.reconfigure(commentClasses(options)) });
+    }
+  }
+
+  // ---- Comments ----
+
+  /** A Work's Comments, as Rust last gave them. */
+  marksOf(id: string): Mark[] {
+    return this.find(id)?.marks ?? [];
+  }
+
+  /** Does something to a Work's Comments, in order with its typing. */
+  comment(id: string, op: CommentOp) {
+    const tab = this.find(id);
+    if (tab?.isWork) tab.sync.comment(op);
+  }
+
+  /** What a new Comment would be on: the selection, or else the word at the cursor. */
+  commentTarget(id: string): { from: number; to: number } | null {
+    const tab = this.find(id);
+    if (!tab?.isWork) return null;
+    const { state } = tab.view;
+    const selection = state.selection.main;
+    if (!selection.empty) return { from: selection.from, to: selection.to };
+    const word = state.wordAt(selection.head);
+    return word ? { from: word.from, to: word.to } : null;
+  }
+
+  /** Outlines the text a new Comment will be on (null: no longer). */
+  setPending(id: string, range: { from: number; to: number } | null) {
+    const tab = this.find(id);
+    if (tab?.isWork) tab.view.dispatch({ effects: setPending.of(range) });
+  }
+
+  /** Where the new Comment's text is now, if it's still there. */
+  pendingRange(id: string): { from: number; to: number } | null {
+    const tab = this.find(id);
+    return tab?.isWork ? pendingRange(tab.view) : null;
+  }
+
+  /** Selects part `part` of a Comment's text (a Move may have split it). Returns how many parts it has. */
+  showComment(id: string, comment: string, part: number): number {
+    const tab = this.find(id);
+    if (!tab?.isWork) return 0;
+    const ranges = rangesOf(tab.view, comment);
+    if (ranges.length === 0) return 0;
+    const [from, to] = ranges[part % ranges.length];
+    tab.view.dispatch({ selection: { anchor: from, head: to }, scrollIntoView: true });
+    tab.view.focus(); // the selection only shows in a focused editor
+    return ranges.length;
+  }
+
+  /** The editor of a Work (for the selection menu's Cut, Copy and Paste). */
+  viewOf(id: string): EditorView | null {
+    const tab = this.find(id);
+    return tab?.isWork ? tab.view : null;
+  }
+
+  /** The keys changed (keys.ts): every editor and tab label follows. */
+  keysChanged() {
+    for (const tab of this.open) {
+      (tab.label.querySelector(".tab-close") as HTMLElement).title = withKey("Close", "closeTab");
+      if (tab.isWork) tab.view.dispatch({ effects: keysCompartment.reconfigure(tab.editorKeys(this)) });
+    }
+  }
+
+  /** Every open Work asks for its highlights again (a Reviewer's name or colour changed). */
+  refreshMarks() {
+    for (const tab of this.open) if (tab.isWork) tab.sync.requestMarks();
   }
 
   /** Switches every tab between the Formatted and the Raw view. */

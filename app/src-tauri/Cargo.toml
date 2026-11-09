@@ -30,6 +30,8 @@ wrtier = { path = "../.." }  # the History engine
 typst = "0.15.1"
 typst-layout = "0.15.1"
 typst-svg = "0.15.1"     # the Page preview's pages
+typst-pdf = "0.15.1"     # PDF Exports
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2"] }  # a .docx is a zip of XML files
 typst-ide = "0.15.1"     # click-to-jump from the pages to the text
 typst-kit = { version = "0.15.1", default-features = false, features = ["embedded-fonts", "scan-fonts"] }  # Vault, bundled and Device fonts
 comemo = "0.5"           # Typst's cache, evicted after every compile
@@ -37,5 +39,6 @@ comemo = "0.5"           # Typst's cache, evicted after every compile
 [dev-dependencies]
 tempfile = "3"
 rusqlite = { version = "0.41.1", features = ["bundled"] }  # tests write files as another program would
+roxmltree = "0.21"  # tests check a .docx's XML is well-formed (already built for Typst)
 
 # Build profiles live in the workspace root Cargo.toml.

@@ -21,9 +21,50 @@ type Op =
   | { op: "move"; from: number; to: number; at: number }
   | { op: "undo" }
   | { op: "redo" }
-  | { op: "sync" };
+  | { op: "sync" }
+  | { op: "marks" }
+  | CommentOp;
+
+/** Something done to Comments. Sent in order with the typing; Rust closes the open burst first. */
+export type CommentOp =
+  | { op: "comment"; from: number; to: number; sender: string; body: string }
+  | { op: "reply"; comment: string; sender: string; body: string }
+  | { op: "editComment"; id: string; body: string }
+  | { op: "setCommentSender"; id: string; sender: string }
+  | { op: "resolve"; id: string; resolved: boolean }
+  | { op: "deleteComment"; id: string };
 
 type Patch = { from: number; to: number; insert: string };
+
+/** A Reply, as the Comments panel shows it (work.rs `ReplyMark`). */
+export type ReplyMark = {
+  id: string;
+  sender: string;
+  name: string;
+  colour: string;
+  body: string;
+  timeMs: number;
+  /** The other version of its body, if two Devices edited it without seeing each other. */
+  otherBody: string | null;
+};
+
+/** A Comment: its highlight, and what the Comments panel shows (work.rs `Mark`). Positions are UTF-16, in the editor's text. */
+export type Mark = {
+  id: string;
+  /** Empty: the Comment is detached. */
+  ranges: [number, number][];
+  sender: string;
+  name: string;
+  /** A colour slot, "author" or "unknown". */
+  colour: string;
+  body: string;
+  resolved: boolean;
+  /** The text it was attached to, as selected. */
+  quote: string;
+  timeMs: number;
+  replies: ReplyMark[];
+  otherBody: string | null;
+};
 
 export type WorkState = {
   len: number;
@@ -41,6 +82,10 @@ export type WorkState = {
   moved: Whereabouts | null;
   /** A Style it uses changed in the Style library since the Work recorded it. */
   styleNotice: string | null;
+  /** How many Changes the History holds: when it goes up, the highlights are asked for again. */
+  changes: number;
+  /** The Comments' highlights (in the answer to a batch that asked for them). */
+  marks: Mark[] | null;
 };
 
 export type Whereabouts = { kind: "renamed"; to: string } | { kind: "trashed" } | { kind: "gone" } | { kind: "diverged" };
@@ -54,7 +99,9 @@ type Item =
   | { kind: "cursor"; pos: number }
   | { kind: "undo" }
   | { kind: "redo" }
-  | { kind: "sync" };
+  | { kind: "sync" }
+  | { kind: "marks" }
+  | { kind: "comment"; op: CommentOp };
 
 const EVENTS = ["move.drop", "input.paste", "input.drop", "delete.cut"];
 
@@ -70,7 +117,10 @@ function toOps(item: Item): Op[] {
     case "undo":
     case "redo":
     case "sync":
+    case "marks":
       return [{ op: item.kind }];
+    case "comment":
+      return [item.op];
   }
   const parts: { from: number; to: number; text: string }[] = [];
   item.changes.iterChanges((from, to, _fromB, _toB, inserted) => parts.push({ from, to, text: inserted.toString() }));
@@ -92,8 +142,26 @@ export type SyncEvents = {
   state(state: WorkState): void;
   /** The open burst closed: the editor's undo steps no longer apply. */
   burstClosed(): void;
+  /** The Comments' highlights, fitted to the editor's text as it is now. */
+  marks(marks: Mark[]): void;
   error(message: string): void;
 };
+
+/**
+ * Highlights fitted around edits made since Rust worked them out. A highlight doesn't grow at
+ * its edges (text typed there is outside it), only when text is typed strictly inside.
+ */
+export function fitMarks(marks: Mark[], edits: ChangeSet[]): Mark[] {
+  return marks.map((mark) => {
+    let ranges = mark.ranges;
+    for (const edit of edits) {
+      ranges = ranges
+        .map(([from, to]): [number, number] => [edit.mapPos(from, 1), edit.mapPos(to, -1)])
+        .filter(([from, to]) => from < to);
+    }
+    return { ...mark, ranges };
+  });
+}
 
 export class WorkSync {
   private queue: Item[] = [];
@@ -103,6 +171,8 @@ export class WorkSync {
   private lastUndo: "editor" | "history" | null = null;
   /** The last `outside` count asked about (see `WorkState.outside`). */
   private outside = 0;
+  /** The History's size when the highlights were last asked for (see `WorkState.changes`). */
+  private changes = -1;
 
   constructor(
     /** The Work's ID; it changes when the Work is renamed. */
@@ -169,7 +239,35 @@ export class WorkSync {
   status(state: WorkState) {
     this.noteBurst(state.burst);
     this.noteOutside(state.outside);
+    this.noteChanges(state.changes);
     this.events.state(state);
+  }
+
+  /**
+   * Does something to Comments, in order with the typing (a new Comment's positions are in the
+   * text as it is now). The History grows, so the highlights and the panel follow by themselves.
+   */
+  comment(op: CommentOp) {
+    this.queue.push({ kind: "comment", op });
+    void this.flush();
+  }
+
+  /** Asks for the Comments' highlights (when the tab opens, or a Reviewer's colour changed). */
+  requestMarks() {
+    if (!this.queue.some((item) => item.kind === "marks")) {
+      this.queue.push({ kind: "marks" });
+      void this.flush();
+    }
+  }
+
+  /**
+   * The History changed (a burst was recorded, something taken in, a Move, a Revert): where
+   * the Comments are may differ from what the editor worked out by itself, so it asks again.
+   */
+  private noteChanges(changes: number) {
+    if (changes <= this.changes) return;
+    this.changes = changes;
+    this.requestMarks();
   }
 
   /**
@@ -229,13 +327,21 @@ export class WorkSync {
           patch = patch.map(mine, true);
         } else if (item.kind === "cursor") {
           item.pos = patch.mapPos(item.pos);
+        } else if (item.kind === "comment" && item.op.op === "comment") {
+          item.op = { ...item.op, from: patch.mapPos(item.op.from, 1), to: patch.mapPos(item.op.to, -1) };
         }
       }
       this.view.dispatch({ changes: patch, annotations: [fromHistory.of(true), Transaction.addToHistory.of(false)] });
     }
     if (state.len !== expected) throw new Error(`The editor and the History disagree about the text's length (${expected} and ${state.len}).`);
+    if (state.marks) {
+      // For the text right after the batch (and its patches): fitted around what was typed since.
+      const since = this.queue.flatMap((item) => (item.kind === "edit" ? [item.changes] : []));
+      this.events.marks(fitMarks(state.marks, since));
+    }
     this.noteBurst(state.burst, undone);
     this.noteOutside(state.outside);
+    this.noteChanges(state.changes);
     this.events.state(state);
   }
 
@@ -253,6 +359,7 @@ export class WorkSync {
       this.burst = state.burst;
       this.events.burstClosed();
       this.events.state(state);
+      this.requestMarks();
     } catch (e) {
       this.events.error(String(e));
     }

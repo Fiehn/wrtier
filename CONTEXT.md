@@ -80,8 +80,12 @@ _Avoid_: sender, commenter, critic
 A note attached to a range of text in a **Work**, sent by the **Author** or by a **Reviewer**; it is either open or resolved.
 _Avoid_: annotation, note, remark
 
+**Reply**:
+A short answer to a **Comment**, with its own sender (the **Author** or a **Reviewer**); it belongs to exactly one **Comment**, is never attached to text, and can't itself be replied to.
+_Avoid_: response, sub-comment, thread entry
+
 **Detached comment**:
-A **Comment** whose text has all been deleted; it is kept in a side list with a quote of the text it was attached to.
+A **Comment** none of whose text is visible any more (the text it was attached to and anything later added inside it have all been deleted); it is kept in a side list with a quote of the text it was attached to, and reattaches by itself as soon as any of that text is back.
 _Avoid_: orphan, deleted comment
 
 ### History
@@ -154,6 +158,7 @@ _Avoid_: device settings, local settings
 - A **Collection** includes other **Works** live; it never holds copies of them.
 - A **Vault** holds many **Works**, many **Reviewers** and one **Style library**.
 - A **Reviewer** can comment on any **Work** in the **Vault**.
+- Removing a **Reviewer** from the **Vault** only stops them being offered as a sender; their **Comments** and **Replies** keep their name and colour, and they can be brought back.
 - The app ships built-in **Story elements**; the **Author** can define more in the **Style library**.
 - Every **Work** has the built-in **Story elements**. The **Author**'s own are added to each **Work** explicitly, in its **Preamble**; a **Work** never picks one up just because its text uses it.
 - Every **Story element** has a default appearance; **Styles** change how it looks, and its definition says what a `.docx` **Export** does with it.
@@ -169,12 +174,16 @@ _Avoid_: device settings, local settings
 - Fonts are only referenced by name: the app looks in the **Vault**'s fonts folder first, then the **Device**'s fonts, and otherwise warns and uses a default that ships with the app. A font found only on the **Device** is flagged, since other **Devices** may render the **Work** differently.
 - The same version of a **Work** with the same fonts gives the same PDF on every **Device**.
 - A **Comment** has exactly one sender: the **Author** or one **Reviewer**.
+- Every **Reviewer** has one colour from a fixed set, the same in every **Work**; the **Author**'s **Comments** use the app's accent colour.
 - Replying to a resolved **Comment** doesn't reopen it.
+- A **Comment** has zero or more **Replies**, in the order they were made; deleting a **Comment** removes its **Replies** with it.
+- The text and sender of a **Comment** or **Reply** can be changed after it's made. When two **Devices** change the same text without seeing each other's change, the later one wins and the **Author** gets a **Merge notice** that shows the other version, as with the **Preamble**'s raw Typst.
 - When two **Devices** set the same setting differently, the later one wins; the other value stays in the **History**. Raw Typst in the **Preamble** works the same way, and when two **Devices** edited it without seeing each other's edit, the **Author** gets a **Merge notice** that shows the other version.
 - **Reviewers** only comment; only the **Author** changes the text.
+- **Comments** live only in the **Work**'s **History** and the app: they're never written to the **Text file** or to any **Export**.
 - An AI is always a **Reviewer**, never an **Author**: it can add **Comments** but can never change the text.
 - A **Comment** follows its text through **Moves**. If all its text is deleted it becomes a **Detached comment**; restoring the text reattaches it.
-- A **Comment** covers the characters it was attached to, plus any text later added strictly inside them; text added at either edge isn't covered. If part of its text is **Moved** away, the **Comment** covers both parts and stays one **Comment**.
+- A **Comment** covers the characters it was attached to, plus any text later added strictly inside them; text added at either edge isn't covered. If part of its text is **Moved** away, the **Comment** covers both parts and stays one **Comment**. Text **Moved** into the middle of it from elsewhere isn't covered, so the highlight has a gap there.
 - Text added inside a passage on one **Device** while another **Device** **Moves** that passage ends up inside the passage at its new place.
 - When two **Devices** **Move** overlapping text, the text both moved goes with the later of the two **Moves**; the rest of each **Move** still happens, and the **Author** gets a **Merge notice**.
 - When two **Devices** **Move** passages into each other, only the earlier **Move** happens; the later one's text stays where it was, and the **Author** gets a **Merge notice**.
@@ -186,9 +195,9 @@ _Avoid_: device settings, local settings
 - A **Session** belongs to one **Device** and one **Work**. A new one starts when the **Work** is opened, or after a long pause in writing.
 - Reverting a **Change** also reverts, by default, every later **Change** that added text inside the text it wrote (and anything added inside that, in turn). Later deletions and **Moves** of that text are not reverted with it.
 - A **Revert** can itself be reverted.
-- Undo (Ctrl+Z) only edits text typed in the last few seconds that isn't a **Change** yet; beyond that it's a **Revert** of the latest **Change** this **Device** made that's still in effect, and redo restores it.
+- Undo (Ctrl+Z) only edits text typed in the last few seconds that isn't a **Change** yet; beyond that it's a **Revert** of the latest **Change** to the text this **Device** made that's still in effect, and redo restores it. Undo never touches **Comments**.
 - A **Change** stays undone while any **Revert** of it is in effect; restoring a **Change** cancels every **Revert** of it.
-- Returning to a **Milestone** reverts every **Change** to the **Work**'s content that isn't part of it, including later **Reverts**; nothing is removed. **Device** names, other **Milestones** and dismissed **Merge notices** stay as they are.
+- Returning to a **Milestone** reverts every **Change** to the **Work**'s content that isn't part of it, including later **Reverts**; nothing is removed. **Device** names, other **Milestones**, dismissed **Merge notices**, and **Comments** and their **Replies** stay as they are; a **Comment** whose text the return removes becomes a **Detached comment**.
 - A **Milestone** holds exactly the **Changes** the **Device** that named it had seen. A **Change** made earlier on another **Device** that hadn't synced yet is not part of it.
 - A **Work**'s images are stored in its **History**; inserting or replacing an image is a **Change**.
 - A **Text file** is always derived from its **History**, never the other way round.

@@ -15,10 +15,11 @@
           <div class="row">
             <button id="choose-vault" type="button">Open Vault…</button>
             <button id="open-settings" type="button" title="Settings" hidden>Settings</button>
+            <button id="open-reviewers" type="button" title="The people whose feedback you record as Comments" hidden>Reviewers</button>
           </div>
           <div id="vault-root" class="muted"></div>
           <div id="vault-actions" class="row" hidden>
-            <button id="open-switcher" type="button" title="Ctrl+O">Find… <kbd>Ctrl+O</kbd></button>
+            <button id="open-switcher" type="button" title="Find a Work (Ctrl+O)">Find… <kbd id="open-switcher-key">Ctrl+O</kbd></button>
           </div>
         </header>
         <ul id="works"></ul>
@@ -42,11 +43,12 @@
       <main>
         <div id="problems" hidden></div>
         <div id="error" hidden></div>
+        <div id="info" hidden></div>
         <div id="tabrow">
           <button id="sidebar-toggle" type="button" title="Hide the Works (Ctrl+\)" aria-label="Show or hide the Works">☰</button>
           <nav id="tabbar"></nav>
           <button id="view-mode" type="button" class="link" title="Ctrl+E" hidden>Raw view</button>
-        <button id="preview-toggle" type="button" class="link" title="Ctrl+Shift+P" hidden>Pages</button>
+          <button id="panel-toggle" type="button" class="link" title="The Page preview and the Comments (Ctrl+Shift+P)" hidden>Show panel</button>
         </div>
         <div id="notice" hidden></div>
         <div id="style-notice" hidden></div>
@@ -56,15 +58,32 @@
         <p id="empty" class="muted">Open a Vault, then choose a Work on the left, or press Ctrl+O.</p>
       </main>
 
-      <aside id="preview" hidden>
-        <header>
-          <strong>Page preview</strong>
-          <select id="preview-version" title="The Work now, or as it was at one of its Milestones" hidden></select>
-          <select id="preview-look" title="Which of the Work's Looks the pages are in (remembered on this Device)" hidden></select>
-          <button id="preview-close" type="button" class="link" title="Hide the Page preview (Ctrl+Shift+P)">Hide</button>
+      <!-- The panel beside the editor: the Page preview and the Comments (and the History, in
+           Phase 5), one tab at a time. Shown and hidden as a whole. -->
+      <aside id="side-panel" hidden>
+        <header class="panel-tabs">
+          <div role="tablist" aria-label="Panel">
+            <button id="panel-tab-pages" type="button" role="tab" aria-controls="preview" data-tab="pages">Pages</button>
+            <button id="panel-tab-comments" type="button" role="tab" aria-controls="comments-pane" data-tab="comments">Comments</button>
+          </div>
+          <button id="panel-close" type="button" class="link" title="Hide the panel (Ctrl+Shift+P)">Hide</button>
         </header>
-        <div id="preview-bar" hidden></div>
-        <div id="preview-pages"></div>
+        <section id="preview" role="tabpanel" aria-labelledby="panel-tab-pages">
+          <header>
+            <select id="preview-version" title="The Work now, or as it was at one of its Milestones" hidden></select>
+            <select id="preview-look" title="Which of the Work's Looks the pages are in (remembered on this Device)" hidden></select>
+            <span class="spacer"></span>
+            <button id="preview-pdf" type="button" class="link" title="Export the Work as a PDF">PDF…</button>
+            <button id="preview-docx" type="button" class="link" title="Export the Work as a manuscript .docx">.docx…</button>
+          </header>
+          <div id="preview-bar" hidden></div>
+          <div id="preview-pages"></div>
+        </section>
+        <section id="comments-pane" role="tabpanel" aria-labelledby="panel-tab-comments" hidden>
+          <label class="check"><input type="checkbox" id="comments-show-resolved" /> Show resolved</label>
+          <div id="comments-new" hidden></div>
+          <div id="comments-list"></div>
+        </section>
       </aside>
     </div>
 
@@ -109,6 +128,37 @@
         <menu>
           <button type="button" data-close="cancel">Cancel</button>
           <button value="yes" id="ask-confirm-yes">Yes</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="ask-export">
+      <form method="dialog">
+        <h2 id="ask-export-heading">Export as PDF</h2>
+        <label>In the Look
+          <select id="ask-export-look"></select>
+        </label>
+        <p class="muted">Styles changed in the Style library are recorded in the Work first, so the PDF is exactly a version in its History.</p>
+        <menu>
+          <button type="button" data-close="cancel">Cancel</button>
+          <button value="export">Export…</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="ask-docx">
+      <form method="dialog">
+        <h2 id="ask-docx-heading">Export as .docx</h2>
+        <p class="muted">Standard manuscript format: US Letter, 1-inch margins, double-spaced, with your surname, the title and the page number at the top. Only the structure and emphasis are kept; Looks don't apply.</p>
+        <label>Font
+          <select id="ask-docx-font">
+            <option value="Times New Roman">Times New Roman</option>
+            <option value="Courier New">Courier New</option>
+          </select>
+        </label>
+        <menu>
+          <button type="button" data-close="cancel">Cancel</button>
+          <button value="export">Export…</button>
         </menu>
       </form>
     </dialog>
@@ -198,6 +248,43 @@
       </form>
     </dialog>
 
+    <dialog id="reviewers">
+      <form method="dialog" class="reviewers-form">
+        <h2>Reviewers</h2>
+        <p class="muted">The people whose feedback you record as Comments. They belong to the Vault, so they can comment on any Work, and their colour is the same everywhere.</p>
+        <p id="reviewers-error" class="dialog-error" hidden></p>
+        <ul id="reviewers-list" class="reviewer-list"></ul>
+        <p id="reviewers-none" class="muted" hidden>No Reviewers yet.</p>
+        <div class="row reviewer-add">
+          <input id="reviewer-name" maxlength="100" placeholder="Name" autocomplete="off" />
+          <input id="reviewer-role" maxlength="60" placeholder="Role, e.g. editor" autocomplete="off" />
+          <button type="button" id="reviewer-add">Add</button>
+        </div>
+        <details id="reviewers-removed-box" hidden>
+          <summary>Removed</summary>
+          <p class="muted">No longer offered when adding a Comment. Their Comments keep their name and colour.</p>
+          <ul id="reviewers-removed" class="reviewer-list"></ul>
+        </details>
+        <menu>
+          <button value="done">Done</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="shortcuts">
+      <form method="dialog">
+        <h2>Keyboard shortcuts</h2>
+        <p class="muted">Click a key, then press the new one. Esc keeps the old key; Backspace leaves the command without one.</p>
+        <label class="check"><input type="checkbox" id="shortcuts-here" /> Only on this device (for a different keyboard). Otherwise every device that opens the Vault uses these.</label>
+        <p id="shortcuts-error" class="dialog-error" hidden></p>
+        <div id="shortcuts-list"></div>
+        <menu>
+          <button type="button" id="shortcuts-reset">Reset all…</button>
+          <button value="done">Done</button>
+        </menu>
+      </form>
+    </dialog>
+
     <dialog id="switcher">
       <form method="dialog">
         <input id="switcher-input" placeholder="Find a Work…" autocomplete="off" />
@@ -226,6 +313,9 @@
         <label class="here"><input type="checkbox" id="highlight-line-here" /> Only on this device</label>
         <label class="check"><input type="checkbox" id="preview-follows" /> The Page preview follows the cursor</label>
         <label class="here"><input type="checkbox" id="preview-follows-here" /> Only on this device</label>
+        <label class="check"><input type="checkbox" id="comment-highlights" /> Show Comment highlights in the text</label>
+        <label class="here"><input type="checkbox" id="comment-highlights-here" /> Only on this device</label>
+        <p><button type="button" id="open-shortcuts">Keyboard shortcuts…</button></p>
         <p class="muted">Settings are kept in the Vault, so every device that opens it uses them, unless it has its own.</p>
         <menu>
           <button value="done">Done</button>

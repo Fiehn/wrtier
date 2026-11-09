@@ -1,6 +1,6 @@
-// The Page preview: the active Work's compiled pages, beside the editor.
+// The Page preview: the active Work's compiled pages, in the Pages tab of the side panel.
 //
-// It compiles only while it's open, about 300 ms after the last edit, from the text as Rust
+// It compiles only while it's in view, about 300 ms after the last edit, from the text as Rust
 // has it (the open typing burst included). Each page comes as its own SVG, and only pages in
 // view whose content changed are drawn again. When the Work doesn't compile, the last pages
 // that did stay, faded, under a bar with the first error.
@@ -89,7 +89,6 @@ export class PagePreview {
   }
 
   constructor(
-    private readonly root: HTMLElement,
     private readonly bar: HTMLElement,
     private readonly list: HTMLElement,
     private readonly picker: HTMLSelectElement,
@@ -204,11 +203,17 @@ export class PagePreview {
     }
   }
 
+  /** Whether the pages are in view (the panel shows its Pages tab): only then does it compile.
+   *  Coming into view compiles at once, so the pages catch up with what was typed meanwhile. */
   setOpen(open: boolean) {
+    if (open === this.open) return;
     this.open = open;
-    this.root.hidden = !open;
-    if (open) this.compileSoon(0);
-    else clearTimeout(this.timer);
+    if (open) {
+      this.compileSoon(0);
+    } else {
+      clearTimeout(this.timer);
+      clearTimeout(this.followTimer);
+    }
   }
 
   /** The Work in front changed (or none is). */
@@ -256,6 +261,16 @@ export class PagePreview {
    *  don't change with it. */
   edited(work: string) {
     if (work === this.work && this.open && !this.milestone) this.compileSoon(PAUSE_MS);
+  }
+
+  /** The Look the pages of this Work are shown in, if they're shown (an Export starts from it). */
+  lookFor(work: string): string | null {
+    return work === this.work ? this.look : null;
+  }
+
+  /** The Work shown, if any. */
+  get shown(): string | null {
+    return this.work;
   }
 
   /** The Work's Milestones changed (one was named): the picker offers them. */

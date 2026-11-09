@@ -44,6 +44,29 @@ pub enum ChangeKind {
     /// highest counter it had from each Device. Rename it with a field on `milestone_record`;
     /// delete it by reverting this Change.
     Milestone { name: String, seen: Vec<(DeviceId, u32)> },
+    /// A Comment on some text. Its ID is the Comment's ID. It covers every node in its pieces'
+    /// ranges (in the tree's fixed order), so text later typed inside it is covered too; the
+    /// pieces are split wherever the selection skipped visible text, so they cover exactly what
+    /// was selected. `quote` is the selected text, kept for the Comments panel and readable rows.
+    /// `sender` is `AUTHOR` or a `reviewer_record`. Later edits are fields on `comment_record`.
+    Comment { pieces: Vec<Span>, quote: String, sender: String, body: String },
+    /// A Reply to a Comment. Later edits are fields on its own `comment_record`.
+    Reply { comment: ChangeId, sender: String, body: String },
+}
+
+/// The sender of a Comment or Reply written by the Author (not a Reviewer).
+pub const AUTHOR: &str = "author";
+
+/// A Reviewer: the sender of their Comments, and the record holding their name in a Work
+/// (and their name, role and colour in `vault.db`). `id` is the Reviewer's random ID.
+pub fn reviewer_record(id: &str) -> String {
+    format!("reviewer/{id}")
+}
+
+/// The record holding a Comment's or Reply's later edits: its body, sender, and (for a
+/// Comment) whether it's resolved.
+pub fn comment_record(comment: ChangeId) -> String {
+    format!("comment/{comment}")
 }
 
 /// The record holding a Device's own settings, such as its readable name.
@@ -62,8 +85,9 @@ pub fn session_record(session: ChangeId) -> String {
 }
 
 /// Records that aren't part of the Work's content: returning to a Milestone leaves them alone.
+/// Comments aren't content either: feedback stays when the text goes back.
 pub fn is_meta_record(record: &str) -> bool {
-    record.starts_with("device/") || record.starts_with("milestone/") || record.starts_with("session/")
+    ["device/", "milestone/", "session/", "comment/", "reviewer/"].iter().any(|prefix| record.starts_with(prefix))
 }
 
 /// The record holding a Work's Preamble: its Looks, extra Styles, Story elements and settings.
@@ -73,7 +97,7 @@ pub const PREAMBLE_RECORD: &str = "preamble";
 /// Devices editing one without seeing each other's edit get a Merge notice, so the version that
 /// lost can be copied back. Other fields (names, settings) just take the later value quietly.
 pub fn is_free_text(record: &str, field: &str) -> bool {
-    record == PREAMBLE_RECORD && field == "raw"
+    (record == PREAMBLE_RECORD && field == "raw") || (record.starts_with("comment/") && field == "body")
 }
 
 /// Names a Merge notice the same way on every Device, by the Moves involved.

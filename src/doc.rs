@@ -6,7 +6,7 @@
 //! such shortcut is checked against a full recompute. `crate::reference::doc` is the first,
 //! simple version; this one must behave identically (`tests/against_reference.rs`).
 
-use crate::change::{device_record, is_free_text, is_meta_record, milestone_record, session_record, Change, ChangeKind, InsertRun, CharRange, NoticeKey, Span};
+use crate::change::{comment_record, device_record, is_free_text, is_meta_record, milestone_record, session_record, Change, ChangeKind, InsertRun, CharRange, NoticeKey, Span};
 use crate::text_file;
 use crate::fugue::Tree;
 use crate::ids::{ChangeId, DeviceId, Hlc, CharId};
@@ -29,6 +29,8 @@ pub struct Doc {
     content: Vec<(ChangeId, Hlc)>,                 // every Change to the Work's content, as applied
     content_set: HashSet<ChangeId>,                // the same, for lookups
     milestones: Vec<(ChangeId, Hlc, String, Vec<(DeviceId, u32)>)>, // every Milestone: id, time, name, what it holds
+    comments: Vec<CommentMade>,                    // every Comment, as made
+    replies: Vec<ReplyMade>,                       // every Reply, as made
     session: Option<(ChangeId, u64)>,              // this Device's current Session: (its first Change, time of the last)
     sessions: HashMap<ChangeId, Vec<ChangeId>>,    // every Session → its Changes
     layout: Layout,
@@ -118,6 +120,63 @@ pub struct Milestone {
     pub seen: Vec<(DeviceId, u32)>,
 }
 
+/// A Comment as its Change made it (later edits are fields).
+#[derive(Clone, Debug)]
+struct CommentMade {
+    id: ChangeId,
+    hlc: Hlc,
+    pieces: Vec<Span>,
+    quote: String,
+    sender: String,
+    body: String,
+}
+
+/// A Reply as its Change made it (later edits are fields).
+#[derive(Clone, Debug)]
+struct ReplyMade {
+    id: ChangeId,
+    hlc: Hlc,
+    comment: ChangeId,
+    sender: String,
+    body: String,
+}
+
+/// A Comment as it is now, for the Comments panel and the editor's highlights.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommentView {
+    pub id: ChangeId,
+    /// When it was made (edits don't change it).
+    pub hlc: Hlc,
+    /// `change::AUTHOR` or a `change::reviewer_record`.
+    pub sender: String,
+    pub body: String,
+    pub resolved: bool,
+    /// The text it was attached to, as selected.
+    pub quote: String,
+    /// Where its visible characters are in the text the Author sees (`text()`): start..end in
+    /// characters, in reading order. Several when a Move split its text or text was Moved into
+    /// it; empty when it's a Detached comment.
+    pub ranges: Vec<(usize, usize)>,
+    /// Its Replies still in effect, in the fixed Change order.
+    pub replies: Vec<ReplyView>,
+}
+
+impl CommentView {
+    /// None of its text is visible: it's listed apart, with its quote, until some comes back.
+    pub fn is_detached(&self) -> bool {
+        self.ranges.is_empty()
+    }
+}
+
+/// A Reply as it is now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplyView {
+    pub id: ChangeId,
+    pub hlc: Hlc,
+    pub sender: String,
+    pub body: String,
+}
+
 /// What returning to a Milestone would do, for the Revert preview.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReturnPreview {
@@ -157,6 +216,8 @@ impl Doc {
             content: Vec::new(),
             content_set: HashSet::new(),
             milestones: Vec::new(),
+            comments: Vec::new(),
+            replies: Vec::new(),
             session: None, // a Work just opened: the first Change starts a new Session
             sessions: HashMap::new(),
             layout: Layout::default(),
@@ -267,6 +328,11 @@ impl Doc {
         self.device
     }
 
+    /// How many Changes the History holds: it goes up whenever one is made or taken in.
+    pub fn change_count(&self) -> usize {
+        self.applied.len()
+    }
+
     /// The version this Device has: the highest Change counter it has applied from each Device.
     pub fn version(&self) -> Vec<(DeviceId, u32)> {
         let mut version: Vec<(DeviceId, u32)> = self.seen.iter().map(|(&d, &c)| (d, c)).collect();
@@ -291,6 +357,28 @@ impl Doc {
             .iter()
             .filter(|v| self.is_in_effect(v.id))
             .max_by_key(|v| (v.hlc, v.id.device))
+    }
+
+    /// Every field of a record that has a value in effect, with that value, sorted by field.
+    pub fn fields_of(&self, record: &str) -> Vec<(String, String)> {
+        let mut found: Vec<(String, String)> = self.fields.keys()
+            .filter(|(r, _)| r == record)
+            .filter_map(|(r, field)| Some((field.clone(), self.field(r, field)?.to_string())))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The records whose name starts with `prefix` (such as "reviewer/") that have a field in
+    /// effect, sorted.
+    pub fn records(&self, prefix: &str) -> Vec<String> {
+        let mut found: Vec<String> = self.fields.keys()
+            .filter(|(record, field)| record.starts_with(prefix) && self.field_value(record, field).is_some())
+            .map(|(record, _)| record.clone())
+            .collect();
+        found.sort();
+        found.dedup();
+        found
     }
 
     /// The value a field had in an earlier Change, such as the version a Merge notice says lost.
@@ -371,8 +459,9 @@ impl Doc {
         let new = !self.applied.contains(&change.id);
         self.apply_change(change);
         match &change.kind {
-            // Dismissing a notice or setting a field changes no text: nothing to recompute.
-            ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } | ChangeKind::Milestone { .. } => self.debug_check(),
+            // Dismissing a notice, setting a field or commenting changes no text: nothing to recompute.
+            ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } | ChangeKind::Milestone { .. }
+            | ChangeKind::Comment { .. } | ChangeKind::Reply { .. } => self.debug_check(),
             _ if new => self.refresh(),
             _ => {} // already had it
         }
@@ -436,13 +525,13 @@ impl Doc {
             self.next_counter = self.next_counter.max(change.id.counter + 1);
         }
         // Is it part of the Work's content (what a Milestone captures and returning reverts)?
-        // A Revert is content if anything it reverts is; Device names, Milestones and dismissed
-        // notices aren't.
+        // A Revert is content if anything it reverts is; Device names, Milestones, dismissed
+        // notices and Comments aren't.
         let is_content = match &change.kind {
             ChangeKind::Insert(_) | ChangeKind::Delete(_) | ChangeKind::Replace { .. } | ChangeKind::Move { .. } => true,
             ChangeKind::Revert { targets } => targets.iter().any(|t| self.content_set.contains(t)),
             ChangeKind::SetField { record, .. } => !is_meta_record(record),
-            ChangeKind::Dismiss { .. } | ChangeKind::Milestone { .. } => false,
+            ChangeKind::Dismiss { .. } | ChangeKind::Milestone { .. } | ChangeKind::Comment { .. } | ChangeKind::Reply { .. } => false,
         };
         if is_content {
             self.content.push((change.id, change.hlc));
@@ -487,6 +576,16 @@ impl Doc {
             ChangeKind::Milestone { name, seen } => {
                 // Changes nothing in the text; milestones() lists them.
                 self.milestones.push((change.id, change.hlc, name.clone(), seen.clone()));
+            }
+            ChangeKind::Comment { pieces, quote, sender, body } => {
+                // Changes nothing in the text; comments() works out what it covers.
+                self.comments.push(CommentMade {
+                    id: change.id, hlc: change.hlc, pieces: pieces.clone(),
+                    quote: quote.clone(), sender: sender.clone(), body: body.clone(),
+                });
+            }
+            ChangeKind::Reply { comment, sender, body } => {
+                self.replies.push(ReplyMade { id: change.id, hlc: change.hlc, comment: *comment, sender: sender.clone(), body: body.clone() });
             }
         }
     }
@@ -1022,6 +1121,151 @@ impl Doc {
         Some(self.commit_local(ChangeKind::Revert { targets }, now_ms))
     }
 
+    // ---- Comments ----
+
+    /// Adds a Comment on the `len` characters at `index` of the text (no burst may be open; the
+    /// caller closes it first). The first body and sender are part of the Change itself.
+    pub fn comment_local(&mut self, index: usize, len: usize, sender: &str, body: &str, now_ms: u64) -> Change {
+        self.assert_no_burst();
+        assert!(len > 0, "a Comment needs some text to attach to");
+        assert!(index + len <= self.len(), "the selection reaches past the end of the text ({})", self.len());
+        let selected = &self.visible[index..index + len];
+        let quote: String = selected.iter().filter_map(|&n| self.tree.char_at(n)).collect();
+        let pieces = self.comment_pieces(selected);
+        self.commit_local(ChangeKind::Comment { pieces, quote, sender: sender.to_string(), body: body.to_string() }, now_ms)
+    }
+
+    /// Ranges in the tree's fixed order that hold exactly the `selected` nodes: a new piece
+    /// starts wherever a visible character that wasn't selected lies between them in the tree
+    /// (such as text Moved out of the passage earlier, now shown elsewhere). Deleted characters
+    /// and anchors don't split a piece; text later typed inside a piece is covered by it.
+    fn comment_pieces(&self, selected: &[u32]) -> Vec<Span> {
+        let order = self.tree.order();
+        let pos = positions(&order, self.tree.len());
+        let chosen: FxHashSet<u32> = selected.iter().copied().collect();
+        let lo = selected.iter().map(|&n| pos[n as usize]).min().expect("a Comment covers some text") as usize;
+        let hi = selected.iter().map(|&n| pos[n as usize]).max().expect("a Comment covers some text") as usize;
+        let mut pieces: Vec<Span> = Vec::new();
+        let mut open: Option<Span> = None;
+        for &node in &order[lo..=hi] {
+            if chosen.contains(&node) {
+                let id = self.tree.id_of(node);
+                match open.as_mut() {
+                    Some(span) => span.last = id,
+                    None => open = Some(Span { first: id, last: id, from: None }),
+                }
+            } else if self.tree.is_visible_at(node) {
+                pieces.extend(open.take());
+            }
+        }
+        pieces.extend(open);
+        pieces
+    }
+
+    /// Replies to a Comment.
+    pub fn reply_local(&mut self, comment: ChangeId, sender: &str, body: &str, now_ms: u64) -> Change {
+        assert!(self.comments.iter().any(|c| c.id == comment), "no such Comment");
+        self.commit_local(ChangeKind::Reply { comment, sender: sender.to_string(), body: body.to_string() }, now_ms)
+    }
+
+    /// Changes the body of a Comment or Reply.
+    pub fn edit_comment_local(&mut self, id: ChangeId, body: &str, now_ms: u64) -> Change {
+        self.set_field_local(&comment_record(id), "body", body, now_ms)
+    }
+
+    /// Changes who sent a Comment or Reply.
+    pub fn set_comment_sender_local(&mut self, id: ChangeId, sender: &str, now_ms: u64) -> Change {
+        self.set_field_local(&comment_record(id), "sender", sender, now_ms)
+    }
+
+    /// Resolves a Comment, or opens it again.
+    pub fn resolve_comment_local(&mut self, id: ChangeId, resolved: bool, now_ms: u64) -> Change {
+        self.set_field_local(&comment_record(id), "resolved", if resolved { "yes" } else { "no" }, now_ms)
+    }
+
+    /// The Comments not deleted (reverted), as they are now: Comments with visible text in text
+    /// order, then Detached comments in the fixed Change order. Every Device gets the same list.
+    /// A deleted Comment's Replies go with it.
+    pub fn comments(&self) -> Vec<CommentView> {
+        if self.comments.is_empty() {
+            return Vec::new(); // most Works: no need to walk the tree
+        }
+        let order = self.tree.order();
+        let pos = positions(&order, self.tree.len());
+        let shown = self.shown_positions();
+        let mut list: Vec<CommentView> = self.comments.iter()
+            .filter(|c| self.is_in_effect(c.id))
+            .map(|c| {
+                // Every visible character in its pieces' ranges, as positions in the shown text.
+                let mut at: Vec<u32> = Vec::new();
+                for span in &c.pieces {
+                    let (Some(first), Some(last)) = (self.tree.index_of(span.first), self.tree.index_of(span.last)) else { continue };
+                    let (lo, hi) = (pos[first as usize] as usize, pos[last as usize] as usize);
+                    if lo <= hi {
+                        at.extend(order[lo..=hi].iter().map(|&n| shown[n as usize]).filter(|&p| p != NOT_SHOWN));
+                    }
+                }
+                at.sort_unstable();
+                at.dedup();
+                // The open burst's draft isn't in the tree yet: typed between two characters the
+                // Comment covers, it will be covered once it's recorded, so it's shown that way now.
+                if let Some(b) = self.burst.as_ref().filter(|b| !b.draft.is_empty() && b.at > 0) {
+                    let (start, len) = (b.at as u32, b.draft.chars().count() as u32);
+                    if at.binary_search(&(start - 1)).is_ok() && at.binary_search(&(start + len)).is_ok() {
+                        let i = at.partition_point(|&p| p < start);
+                        at.splice(i..i, start..start + len);
+                    }
+                }
+                let mut ranges: Vec<(usize, usize)> = Vec::new();
+                for p in at.into_iter().map(|p| p as usize) {
+                    match ranges.last_mut() {
+                        Some((_, end)) if *end == p => *end = p + 1,
+                        _ => ranges.push((p, p + 1)),
+                    }
+                }
+                let record = comment_record(c.id);
+                let mut replies: Vec<&ReplyMade> = self.replies.iter().filter(|r| r.comment == c.id && self.is_in_effect(r.id)).collect();
+                replies.sort_by_key(|r| (r.hlc, r.id.device));
+                CommentView {
+                    id: c.id,
+                    hlc: c.hlc,
+                    sender: self.field(&record, "sender").unwrap_or(&c.sender).to_string(),
+                    body: self.field(&record, "body").unwrap_or(&c.body).to_string(),
+                    resolved: self.field(&record, "resolved") == Some("yes"),
+                    quote: c.quote.clone(),
+                    ranges,
+                    replies: replies.into_iter().map(|r| {
+                        let record = comment_record(r.id);
+                        ReplyView {
+                            id: r.id,
+                            hlc: r.hlc,
+                            sender: self.field(&record, "sender").unwrap_or(&r.sender).to_string(),
+                            body: self.field(&record, "body").unwrap_or(&r.body).to_string(),
+                        }
+                    }).collect(),
+                }
+            })
+            .collect();
+        // Attached ones by where they start; Detached ones after them; ties in the fixed Change order.
+        list.sort_by_key(|c| (c.ranges.first().map_or(usize::MAX, |r| r.0), c.hlc, c.id.device));
+        list
+    }
+
+    /// Per tree node: its position in the text the Author sees (open burst included), or
+    /// NOT_SHOWN if it isn't shown (deleted, an anchor, or hidden by the open burst).
+    fn shown_positions(&self) -> Vec<u32> {
+        let mut shown = vec![NOT_SHOWN; self.tree.len()];
+        let hidden = self.burst.as_ref().map(|b| self.hidden_by(b)).unwrap_or_default();
+        // The draft shows just before the character at `at`, pushing it and the rest along.
+        let (at, draft) = self.burst.as_ref().map_or((usize::MAX, 0), |b| (b.at, b.draft.chars().count()));
+        let mut i = 0;
+        for &node in self.visible.iter().filter(|n| !hidden.contains(n)) {
+            shown[node as usize] = (if i >= at { i + draft } else { i }) as u32;
+            i += 1;
+        }
+        shown
+    }
+
     /// The text if only the Changes `member` accepts had ever happened: Reverts outside the set
     /// don't count, and nor do deletions or Moves outside it.
     fn text_among(&self, member: &dyn Fn(ChangeId) -> bool) -> String {
@@ -1179,6 +1423,18 @@ impl Doc {
         self.apply(&change);
         change
     }
+}
+
+/// A node that isn't shown, in `Doc::shown_positions`.
+const NOT_SHOWN: u32 = u32::MAX;
+
+/// Per tree node: its position in `order` (the tree's fixed order).
+fn positions(order: &[u32], len: usize) -> Vec<u32> {
+    let mut pos = vec![0u32; len];
+    for (i, &node) in order.iter().enumerate() {
+        pos[node as usize] = i as u32;
+    }
+    pos
 }
 
 /// The byte position of the `chars`-th character of `s` (or its end).
@@ -2113,5 +2369,219 @@ mod test {
         assert_eq!(doc.text(), "abcdef");
         assert!(doc.burst().is_none());
         assert_eq!(doc.insert_local(0, "!", 4000).id.counter, 2);
+    }
+
+    // ---- Comments ----
+
+    use crate::change::AUTHOR;
+
+    /// "abcdef" with an open Comment by the Author on "bcd".
+    fn commented() -> (Doc, ChangeId) {
+        let mut doc = abcdef();
+        let id = doc.comment_local(1, 3, AUTHOR, "too abrupt?", 2000).id;
+        (doc, id)
+    }
+
+    fn ranges(doc: &Doc) -> Vec<(usize, usize)> {
+        doc.comments()[0].ranges.clone()
+    }
+
+    #[test]
+    fn a_comment_covers_what_was_selected() {
+        let (doc, id) = commented();
+        let comments = doc.comments();
+        assert_eq!(comments.len(), 1);
+        let c = &comments[0];
+        assert_eq!((c.id, c.sender.as_str(), c.body.as_str(), c.quote.as_str(), c.resolved), (id, AUTHOR, "too abrupt?", "bcd", false));
+        assert_eq!(c.ranges, [(1, 4)]);
+        assert!(c.replies.is_empty());
+    }
+
+    #[test]
+    fn a_comment_follows_a_move_into_every_part() {
+        let (mut doc, _) = commented();
+        doc.move_local(2, 2, 6, 3000); // "cd" to the end
+        assert_eq!(doc.text(), "abefcd");
+        assert_eq!(ranges(&doc), [(1, 2), (4, 6)]);
+    }
+
+    #[test]
+    fn a_comment_survives_a_partial_deletion() {
+        let (mut doc, _) = commented();
+        doc.delete_local(2, 1, 3000); // "c"
+        assert_eq!(doc.text(), "abdef");
+        assert_eq!(ranges(&doc), [(1, 3)]);
+    }
+
+    #[test]
+    fn a_full_deletion_detaches_it_and_a_revert_reattaches_it() {
+        let (mut doc, _) = commented();
+        let deletion = doc.delete_local(1, 3, 3000);
+        let c = &doc.comments()[0];
+        assert!(c.is_detached());
+        assert_eq!(c.quote, "bcd");
+        doc.revert_local(deletion.id, false, 4000);
+        assert_eq!(ranges(&doc), [(1, 4)]);
+    }
+
+    #[test]
+    fn text_typed_inside_is_covered_but_not_at_the_edges() {
+        let (mut doc, _) = commented();
+        doc.insert_local(2, "X", 3000);
+        assert_eq!(doc.text(), "abXcdef");
+        assert_eq!(ranges(&doc), [(1, 5)]);
+        doc.insert_local(1, "<", 4000);
+        doc.insert_local(6, ">", 5000);
+        assert_eq!(doc.text(), "a<bXcd>ef");
+        assert_eq!(ranges(&doc), [(2, 6)]);
+    }
+
+    #[test]
+    fn what_remains_after_the_original_text_is_deleted_keeps_it_attached() {
+        let (mut doc, _) = commented();
+        doc.insert_local(2, "XY", 3000); // "abXYcdef"
+        doc.delete_local(1, 1, 4000); // "b"
+        doc.delete_local(3, 2, 5000); // "cd"
+        assert_eq!(doc.text(), "aXYef");
+        assert_eq!(ranges(&doc), [(1, 3)]);
+    }
+
+    #[test]
+    fn text_moved_into_it_leaves_a_gap() {
+        let (mut doc, _) = commented();
+        doc.move_local(5, 1, 2, 3000); // "f" between "b" and "c"
+        assert_eq!(doc.text(), "abfcde");
+        assert_eq!(ranges(&doc), [(1, 2), (3, 5)]);
+    }
+
+    #[test]
+    fn text_moved_out_earlier_isnt_covered() {
+        let mut doc = abcdef();
+        doc.move_local(2, 2, 6, 2000); // "cd" to the end
+        assert_eq!(doc.text(), "abefcd");
+        let change = doc.comment_local(0, 4, AUTHOR, "", 3000); // "abef"
+        let ChangeKind::Comment { pieces, quote, .. } = &change.kind else { panic!("a Comment") };
+        assert_eq!((pieces.len(), quote.as_str()), (2, "abef"));
+        assert_eq!(ranges(&doc), [(0, 4)]);
+    }
+
+    #[test]
+    fn ranges_count_the_open_burst() {
+        let (mut doc, _) = commented();
+        doc.type_text(0, "XY", 3000); // still a draft
+        assert_eq!(doc.text(), "XYabcdef");
+        assert_eq!(ranges(&doc), [(3, 6)]);
+        doc.delete_text(4, 1, 3100); // closes the typing burst, then hides "c" in a deletion burst
+        assert_eq!(doc.text(), "XYabdef");
+        assert_eq!(ranges(&doc), [(3, 5)]);
+    }
+
+    #[test]
+    fn a_draft_typed_inside_counts_as_covered_before_it_is_recorded() {
+        let (mut doc, _) = commented();
+        doc.type_text(2, "XY", 3000); // inside "bcd", still a draft
+        assert_eq!(doc.text(), "abXYcdef");
+        assert_eq!(ranges(&doc), [(1, 6)]);
+        doc.close_burst(4000);
+        assert_eq!(ranges(&doc), [(1, 6)], "the same once it's recorded");
+        doc.type_text(6, "!", 5000); // right after "d": at the edge
+        assert_eq!(ranges(&doc), [(1, 6)]);
+    }
+
+    #[test]
+    fn comments_come_in_text_order_with_detached_ones_last() {
+        let mut doc = abcdef();
+        let late = doc.comment_local(4, 2, AUTHOR, "ef", 2000).id;
+        let early = doc.comment_local(0, 2, AUTHOR, "ab", 3000).id;
+        let gone = doc.comment_local(2, 2, AUTHOR, "cd", 4000).id;
+        doc.delete_local(2, 2, 5000);
+        let order: Vec<ChangeId> = doc.comments().iter().map(|c| c.id).collect();
+        assert_eq!(order, [early, late, gone]);
+        assert!(doc.comments()[2].is_detached());
+    }
+
+    #[test]
+    fn replies_edits_and_resolving() {
+        let (mut doc, id) = commented();
+        let reply = doc.reply_local(id, "reviewer/anna", "agreed", 3000).id;
+        doc.reply_local(id, AUTHOR, "fixed", 4000);
+        doc.edit_comment_local(id, "far too abrupt?", 5000);
+        doc.edit_comment_local(reply, "agreed!", 6000);
+        doc.set_comment_sender_local(id, "reviewer/anna", 7000);
+        let resolve = doc.resolve_comment_local(id, true, 8000);
+        let c = &doc.comments()[0];
+        assert_eq!((c.body.as_str(), c.sender.as_str(), c.resolved), ("far too abrupt?", "reviewer/anna", true));
+        let replies: Vec<(&str, &str)> = c.replies.iter().map(|r| (r.sender.as_str(), r.body.as_str())).collect();
+        assert_eq!(replies, [("reviewer/anna", "agreed!"), (AUTHOR, "fixed")]);
+        // Replying to a resolved Comment doesn't reopen it; reopening is a field like resolving.
+        doc.reply_local(id, AUTHOR, "one more thing", 9000);
+        assert!(doc.comments()[0].resolved);
+        doc.revert_local(resolve.id, false, 10_000);
+        assert!(!doc.comments()[0].resolved);
+    }
+
+    #[test]
+    fn deleting_a_comment_takes_its_replies_and_restoring_brings_them_back() {
+        let (mut laptop, mut phone) = laptop_and_phone();
+        let comment = laptop.comment_local(1, 3, AUTHOR, "too abrupt?", 2000);
+        phone.apply(&comment);
+        // Offline: the phone deletes it, the laptop replies to it.
+        let delete = phone.revert_local(comment.id, false, 3000);
+        let reply = laptop.reply_local(comment.id, AUTHOR, "or is it?", 4000);
+        phone.apply(&reply);
+        laptop.apply(&delete);
+        for doc in [&laptop, &phone] {
+            assert!(doc.comments().is_empty());
+        }
+        let restore = laptop.restore_local(comment.id, 5000).unwrap();
+        phone.apply(&restore);
+        for doc in [&laptop, &phone] {
+            assert_eq!(doc.comments()[0].replies.len(), 1);
+        }
+        // Deleting just a Reply.
+        laptop.revert_local(reply.id, false, 6000);
+        assert!(laptop.comments()[0].replies.is_empty());
+    }
+
+    #[test]
+    fn a_body_edited_on_two_devices_gets_a_notice_and_resolving_just_takes_the_later() {
+        let (mut laptop, mut phone) = laptop_and_phone();
+        let comment = laptop.comment_local(1, 3, AUTHOR, "too abrupt?", 2000);
+        phone.apply(&comment);
+        let a = phone.edit_comment_local(comment.id, "too slow?", 3000);
+        let b = laptop.edit_comment_local(comment.id, "too abrupt!", 4000);
+        let resolve = phone.resolve_comment_local(comment.id, true, 5000);
+        let reopen = laptop.resolve_comment_local(comment.id, false, 6000);
+        for change in [&a, &resolve] { laptop.apply(change); }
+        for change in [&b, &reopen] { phone.apply(change); }
+        for doc in [&laptop, &phone] {
+            let c = &doc.comments()[0];
+            assert_eq!((c.body.as_str(), c.resolved), ("too abrupt!", false));
+            let notices = doc.merge_notices();
+            assert_eq!(notices.len(), 1, "only the body gets a notice");
+            assert_eq!(notices[0].key, NoticeKey::ConcurrentField { later: b.id, earlier: a.id });
+            let (record, field, lost) = doc.concurrent_field(notices[0].key).unwrap();
+            assert_eq!((record, field.as_str(), lost.as_str()), (comment_record(comment.id), "body", "too slow?"));
+        }
+    }
+
+    #[test]
+    fn returning_to_a_milestone_keeps_comments() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "abc", 1000);
+        let milestone = doc.make_milestone_local("Draft 1", 2000).id;
+        doc.insert_local(3, "def", 3000);
+        let on_new = doc.comment_local(3, 3, AUTHOR, "new text", 4000).id;
+        let on_old = doc.comment_local(0, 3, "reviewer/anna", "old text", 5000).id;
+        doc.reply_local(on_old, AUTHOR, "noted", 6000);
+        doc.resolve_comment_local(on_old, true, 7000);
+        let preview = doc.return_preview(milestone);
+        assert_eq!(preview.reverts.len(), 1, "only the typing: Comments aren't content");
+        doc.return_to_milestone_local(milestone, &[], 8000).unwrap();
+        assert_eq!(doc.text(), "abc");
+        let comments = doc.comments();
+        assert_eq!(comments.iter().map(|c| c.id).collect::<Vec<_>>(), [on_old, on_new]);
+        assert_eq!((comments[0].ranges.as_slice(), comments[0].resolved, comments[0].replies.len()), ([(0, 3)].as_slice(), true, 1));
+        assert!(comments[1].is_detached(), "its text went with the return");
     }
 }

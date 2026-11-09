@@ -282,6 +282,8 @@ pub struct ElementForm {
     pub body: bool,
     /// Its name and what it's for, from its header comment ("Epigraph: A quotation…").
     pub detail: Option<String>,
+    /// What a `.docx` Export does with it: its header's ".docx:" line (see `library::DOCX`).
+    pub docx: Option<String>,
 }
 
 impl ElementForm {
@@ -289,11 +291,14 @@ impl ElementForm {
     pub fn of(name: &str, content: &str) -> ElementForm {
         let body = !content.lines().any(|l| l.trim().starts_with(&format!("#let {name}()")));
         let mut title = None;
+        let mut docx = None;
         let mut description = Vec::new();
         for line in content.lines().map(str::trim).take_while(|l| l.starts_with("//")) {
             let line = line.trim_start_matches('/').trim();
             if let Some(t) = line.strip_prefix("Story element:") {
                 title = Some(t.trim().to_string());
+            } else if let Some(d) = line.strip_prefix(".docx:") {
+                docx = Some(d.trim().to_string());
             } else if !line.is_empty() && !["Written as:", "Shown as:", ".docx:"].iter().any(|k| line.starts_with(k)) {
                 description.push(line);
             }
@@ -305,7 +310,7 @@ impl ElementForm {
             (None, false) => Some(description),
             (None, true) => None,
         };
-        ElementForm { name: name.to_string(), body, detail }
+        ElementForm { name: name.to_string(), body, detail, docx }
     }
 }
 

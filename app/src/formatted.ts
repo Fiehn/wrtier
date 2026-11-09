@@ -8,6 +8,7 @@ import { fromHistory } from "./sync";
 import { Decoration, type DecorationSet, EditorView, hoverTooltip, ViewPlugin, type ViewUpdate, WidgetType } from "@codemirror/view";
 import { parseMarkup, type Span } from "./markup";
 import { callAt, ElementChip, elementsFacet } from "./elements";
+import { withKey } from "./keys";
 
 /** Where the paragraph around `from`..`to` starts and ends (blank lines separate paragraphs). */
 export function paragraphAround(doc: Text, from: number, to: number): [number, number] {
@@ -315,8 +316,8 @@ const formatting = ViewPlugin.fromClass(
 
 const explained: Partial<Record<Span["kind"], string>> = {
   heading: "Heading: written with = at the start of the line (== for a level 2 heading, and so on).",
-  strong: "Strong: written between *stars* (Ctrl+B).",
-  emph: "Emphasis: written between _underscores_ (Ctrl+I).",
+  strong: "Strong: written between *stars*",
+  emph: "Emphasis: written between _underscores_",
   raw: "Raw text, shown as typed: written between `backticks`.",
   escape: "A character written with a backslash before it, so Typst doesn't read it as markup.",
   glyph: "Typed as -- (en dash), --- (em dash) or ... (ellipsis).",
@@ -338,7 +339,9 @@ const tooltips = hoverTooltip((view, pos) => {
     create: () => {
       const dom = document.createElement("div");
       dom.className = "cm-tp-tooltip";
-      dom.textContent = explained[span.kind]!;
+      // Strong and emphasis name their keys (whatever the Author made them).
+      const text = explained[span.kind]!;
+      dom.textContent = span.kind === "strong" || span.kind === "emph" ? `${withKey(text, span.kind)}.` : text;
       return { dom };
     },
   };

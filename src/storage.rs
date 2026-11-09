@@ -54,7 +54,7 @@ CREATE TABLE deletions (
 
 /// The newest storage version this app writes. A file with a higher one was written by a newer
 /// app, which may store things this one doesn't understand, so it isn't touched.
-pub const STORAGE_VERSION: i64 = 9;
+pub const STORAGE_VERSION: i64 = 10;
 
 /// What a `.db` file is, for listing a Vault.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,6 +294,70 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
+    if version < 10 {
+        // Comments and Replies, and the readable view rebuilt so their rows read as sentences
+        // ("Anna commented on "The rain had stopped": too abrupt?").
+        conn.execute_batch("
+        BEGIN;
+        CREATE TABLE comments (
+            change  TEXT PRIMARY KEY REFERENCES changes(id),
+            sender  TEXT NOT NULL,  -- 'author' or 'reviewer/<id>' (later changes are fields)
+            body    TEXT NOT NULL,  -- as first written (later edits are fields)
+            quote   TEXT NOT NULL   -- the text it was attached to, as selected
+        );
+        CREATE TABLE comment_pieces (  -- what it covers: every node from first to last in the tree's fixed order
+            change      TEXT NOT NULL REFERENCES changes(id),
+            piece       INTEGER NOT NULL,
+            first_char  TEXT NOT NULL,
+            last_char   TEXT NOT NULL,
+            PRIMARY KEY (change, piece)
+        );
+        CREATE TABLE replies (
+            change  TEXT PRIMARY KEY REFERENCES changes(id),
+            comment TEXT NOT NULL,  -- the Comment it answers
+            sender  TEXT NOT NULL,
+            body    TEXT NOT NULL
+        );
+        DROP VIEW history;
+        CREATE VIEW history AS
+        WITH sender_names AS (  -- a sender's latest recorded name: 'author' reads as Author
+            SELECT f.record AS sender, f.value AS name, MAX(fc.hlc) AS hlc
+            FROM fields f JOIN changes fc ON fc.id = f.change
+            WHERE f.record LIKE 'reviewer/%' AND f.field = 'name'
+            GROUP BY f.record
+        )
+        SELECT
+            c.time                          AS time,
+            COALESCE(names.name, c.device)  AS device,
+            COALESCE(c.session, c.id)       AS session,
+            c.kind                          AS kind,
+            COALESCE(
+                i.text,
+                (SELECT group_concat(d.deleted_text, '') FROM deletions d WHERE d.change = c.id),
+                (SELECT group_concat(p.moved_text, ' | ') FROM move_pieces p WHERE p.change = c.id),
+                (SELECT f.record || ' ' || f.field || ' = ' || f.value FROM fields f WHERE f.change = c.id),
+                (SELECT m.name FROM milestones m WHERE m.change = c.id),
+                (SELECT CASE cm.sender WHEN 'author' THEN 'Author' ELSE COALESCE(sn.name, cm.sender) END
+                        || ' commented on \"' || cm.quote || '\": ' || cm.body
+                 FROM comments cm LEFT JOIN sender_names sn ON sn.sender = cm.sender WHERE cm.change = c.id),
+                (SELECT CASE r.sender WHEN 'author' THEN 'Author' ELSE COALESCE(sn.name, r.sender) END
+                        || ' replied: ' || r.body
+                 FROM replies r LEFT JOIN sender_names sn ON sn.sender = r.sender WHERE r.change = c.id)
+            )                               AS text,
+            c.id                            AS id
+        FROM changes c
+        LEFT JOIN insertions i ON i.change = c.id
+        LEFT JOIN (
+            SELECT substr(f.record, 8) AS device, f.value AS name, MAX(fc.hlc) AS hlc
+            FROM fields f JOIN changes fc ON fc.id = f.change
+            WHERE f.record LIKE 'device/%' AND f.field = 'name'
+            GROUP BY f.record
+        ) names ON names.device = c.device
+        ORDER BY c.hlc, c.device;
+        PRAGMA user_version = 10;
+        COMMIT;
+        ")?;
+    }
     Ok(())
 }
 /// One row in `insertions`. Insert and Replace both write one.
@@ -331,6 +395,8 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                 ChangeKind::Dismiss { .. } => "dismiss",
                 ChangeKind::SetField { .. } => "field",
                 ChangeKind::Milestone { .. } => "milestone",
+                ChangeKind::Comment { .. } => "comment",
+                ChangeKind::Reply { .. } => "reply",
             },
             change.session.to_string(),
         ],
@@ -442,6 +508,24 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                     params![change.id.to_string(), device.to_string(), counter],
                 )?;
             }
+        }
+        ChangeKind::Comment { pieces, quote, sender, body } => {
+            conn.execute(
+                "INSERT OR IGNORE INTO comments (change, sender, body, quote) VALUES (?1, ?2, ?3, ?4)",
+                params![change.id.to_string(), sender, body, quote],
+            )?;
+            for (k, span) in pieces.iter().enumerate() {
+                conn.execute(
+                    "INSERT OR IGNORE INTO comment_pieces (change, piece, first_char, last_char) VALUES (?1, ?2, ?3, ?4)",
+                    params![change.id.to_string(), k as i64, span.first.to_string(), span.last.to_string()],
+                )?;
+            }
+        }
+        ChangeKind::Reply { comment, sender, body } => {
+            conn.execute(
+                "INSERT OR IGNORE INTO replies (change, comment, sender, body) VALUES (?1, ?2, ?3, ?4)",
+                params![change.id.to_string(), comment.to_string(), sender, body],
+            )?;
         }
     }
     Ok(())
@@ -580,6 +664,28 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
         milestone_seen.entry(change).or_default().push((device, row.get(2)?));
     }
 
+    // Pass 3g: Comments, what each covers, and Replies.
+    let mut comments: HashMap<ChangeId, (String, String, String)> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT change, sender, body, quote FROM comments")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        comments.insert(column(row, 0)?.parse()?, (row.get(1)?, row.get(2)?, row.get(3)?));
+    }
+    let mut comment_pieces: HashMap<ChangeId, Vec<Span>> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT change, first_char, last_char FROM comment_pieces ORDER BY change, piece")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let change: ChangeId = column(row, 0)?.parse()?;
+        let span = Span { first: column(row, 1)?.parse()?, last: column(row, 2)?.parse()?, from: None };
+        comment_pieces.entry(change).or_default().push(span);
+    }
+    let mut replies: HashMap<ChangeId, (ChangeId, String, String)> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT change, comment, sender, body FROM replies")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        replies.insert(column(row, 0)?.parse()?, (column(row, 1)?.parse()?, row.get(2)?, row.get(3)?));
+    }
+
     // Pass 4: read every change
     let mut stmt = conn.prepare(
         "SELECT c.id, c.hlc, c.kind, i.text, i.parent, i.side, i.right_origin, i.into_anchor, c.session
@@ -629,6 +735,15 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
                 // A Milestone made before its Device had seen anything holds nothing; that's not an error.
                 let seen = milestone_seen.remove(&id).unwrap_or_default();
                 ChangeKind::Milestone { name, seen }
+            }
+            "comment" => {
+                let (sender, body, quote) = comments.remove(&id).ok_or(format!("Missing Comment for change {}", id))?;
+                let pieces = comment_pieces.remove(&id).ok_or(format!("Missing Comment pieces for change {}", id))?;
+                ChangeKind::Comment { pieces, quote, sender, body }
+            }
+            "reply" => {
+                let (comment, sender, body) = replies.remove(&id).ok_or(format!("Missing Reply for change {}", id))?;
+                ChangeKind::Reply { comment, sender, body }
             }
             other => return Err(format!("Unknown change kind: {}", other).into()),
         };
@@ -737,6 +852,9 @@ const TABLES: &[(&str, &str, &str, &str)] = &[
     ("fields", "change", "change, record, field, value, replaces", "change, record, field, value, replaces"),
     ("milestones", "change", "change, name", "change, name"),
     ("milestone_seen", "change", "change, device, counter", "change, device, counter"),
+    ("comments", "change", "change, sender, body, quote", "change, sender, body, quote"),
+    ("comment_pieces", "change", "change, piece, first_char, last_char", "change, piece, first_char, last_char"),
+    ("replies", "change", "change, comment, sender, body", "change, comment, sender, body"),
 ];
 
 /// Two copies of a History hold the same Change ID with different content. That can only
@@ -1160,6 +1278,46 @@ mod test {
         let conn = Connection::open(&path).unwrap();
         let text: String = conn.query_row("SELECT text FROM history WHERE kind = 'milestone'", [], |r| r.get(0)).unwrap();
         assert_eq!(text, "Draft 2, sent to editor");
+    }
+
+    #[test]
+    fn comments_round_trip_read_well_and_merge() {
+        use crate::change::{reviewer_record, AUTHOR};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work.db");
+        let (mut doc, mut changes) = named_history();
+        let anna = reviewer_record("7f3a");
+        changes.push(doc.set_field_local(&anna, "name", "Anna", 4000));
+        doc.move_local(0, 4, 13, 4500); // "rain had The ."
+        // "had The ": in the tree, "rain " lies between the two, so it's two pieces.
+        let comment = doc.comment_local(5, 8, &anna, "too abrupt?", 5000);
+        let ChangeKind::Comment { pieces, .. } = &comment.kind else { panic!("a Comment") };
+        assert_eq!(pieces.len(), 2);
+        changes.push(comment.clone());
+        changes.push(doc.reply_local(comment.id, AUTHOR, "agreed", 6000));
+        changes.push(doc.resolve_comment_local(comment.id, true, 7000));
+        save(&path, &changes, &doc).unwrap();
+        let (loaded, loaded_doc) = load(&path, DeviceId(1)).unwrap();
+        // (The Move wasn't saved, so the loaded text differs; the Comment's Change is what's compared.)
+        assert!(loaded.contains(&comment));
+        assert_eq!(loaded_doc.comments()[0].replies[0].body, "agreed");
+        assert!(loaded_doc.comments()[0].resolved);
+
+        let conn = Connection::open(&path).unwrap();
+        let rows: Vec<String> = conn.prepare("SELECT text FROM history WHERE kind IN ('comment', 'reply')").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(rows, ["Anna commented on \"had The \": too abrupt?", "Author replied: agreed"]);
+        drop(conn);
+
+        // A Conflict copy holding another Device's Reply merges in.
+        let other_path = dir.path().join("work (conflict).db");
+        let mut other = Doc::new(DeviceId(2));
+        other.apply_all(&loaded);
+        let reply = other.reply_local(comment.id, &anna, "thanks", 8000);
+        save(&other_path, &[&loaded[..], &[reply.clone()]].concat(), &other).unwrap();
+        merge(&path, &other_path).unwrap();
+        let (_, merged) = load(&path, DeviceId(1)).unwrap();
+        assert_eq!(merged.comments()[0].replies.len(), 2);
     }
 
     #[test]

@@ -28,7 +28,7 @@ const NOT_WORKS: &[&str] = &["styles", "themes", "fonts"];
 pub struct Vault {
     pub root: PathBuf,
     device: DeviceId,
-    /// `vault.db`: the Vault's Devices and Vault settings.
+    /// `vault.db`: the Vault's Devices, Reviewers and Vault settings.
     vault_doc: Doc,
     /// Open Works by ID: the path from the Vault's folder without the extension ("Short stories/Rain").
     pub works: HashMap<String, OpenWork>,
@@ -51,6 +51,18 @@ pub struct Vault {
     library_generation: u64,
     /// Why the default Styles couldn't be written, if they couldn't.
     defaults_problem: Option<String>,
+}
+
+/// What an Export needs (see `Vault::export_input`).
+pub struct ExportInput {
+    pub text: String,
+    pub header: preamble::Header,
+    /// Its title, author and language, for a `.docx`'s running header and properties.
+    pub preamble: Preamble,
+    /// The time of the Work's newest Change: the PDF's date, the same on every Device.
+    pub date_ms: u64,
+    /// The Work's own ID: the PDF's document ID comes from it.
+    pub ident: String,
 }
 
 /// A Milestone, for the Page preview's picker.
@@ -77,8 +89,10 @@ pub struct PreambleView {
 const DEFAULTS_RECORD: &str = "defaults";
 
 mod moves;
+mod reviewers;
 mod settings;
 pub use moves::TrashedWork;
+pub use reviewers::{Reviewer, COLOURS};
 pub use settings::Settings;
 
 fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
@@ -702,8 +716,14 @@ impl Vault {
 
     /// Edits from the editor. Any edit elsewhere means a cut waiting in another Work won't be
     /// pasted there: it's recorded as a deletion.
-    pub fn edit(&mut self, id: &str, ops: Vec<Op>, now_ms: u64) -> Result<WorkState, String> {
-        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. })) {
+    pub fn edit(&mut self, id: &str, mut ops: Vec<Op>, now_ms: u64) -> Result<WorkState, String> {
+        // A Comment from a Reviewer: the Work records their current name with it.
+        for op in &mut ops {
+            if let Some((sender, name)) = op.sender_mut() {
+                *name = sender.strip_prefix("reviewer/").and_then(|r| self.reviewer(r)).map(|r| r.name);
+            }
+        }
+        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Marks)) {
             let others: Vec<String> = self.works.iter().filter(|(other, w)| *other != id && w.has_cut()).map(|(o, _)| o.clone()).collect();
             for other in others {
                 let _ = self.with_work(&other, now_ms, |w, _| {
@@ -716,10 +736,19 @@ impl Vault {
         // Before the first edit since the Style library last changed, the Work records the
         // versions of everything it uses (read here only when that's due).
         let (root, generation) = (self.root.clone(), self.library_generation);
-        self.with_work(id, now_ms, |w, name| {
+        let mut state = self.with_work(id, now_ms, |w, name| {
             let shelf = w.styles_due(generation).then(|| Shelf::read(&root));
             w.edit(ops, name, shelf.as_ref().map(|s| (s, generation)), now_ms)
-        })
+        })?;
+        if let (Some(marks), Some(work)) = (state.marks.as_mut(), self.works.get(&self.current_id(id))) {
+            for mark in marks {
+                (mark.name, mark.colour) = self.sender_label(&work.doc, &mark.sender);
+                for reply in &mut mark.replies {
+                    (reply.name, reply.colour) = self.sender_label(&work.doc, &reply.sender);
+                }
+            }
+        }
+        Ok(state)
     }
 
     /// A Work's Preamble, as its History has it now. The Work needn't be open.
@@ -834,6 +863,37 @@ impl Vault {
         let doc = self.at_milestone(id, milestone, now_ms)?;
         let uses = preamble::uses(&doc, &Shelf::read(&self.root), Version::Recorded);
         Ok((doc.committed_text(), preamble::header(&doc, uses, look)))
+    }
+
+    /// What a PDF Export of a Work needs, after recording changed Styles (so the Export is
+    /// exactly a version in its History): its text, the header from its recorded copies in
+    /// `look` (else its first), the time of its newest Change, and its ID.
+    pub fn export_input(&mut self, id: &str, look: Option<&str>, now_ms: u64) -> Result<ExportInput, String> {
+        let shelf = Shelf::read(&self.root);
+        let generation = self.library_generation;
+        let typeset = |doc: &Doc| (doc.committed_text(), preamble::header(doc, preamble::uses(doc, &shelf, Version::Recorded), look), Preamble::of(doc));
+        let (db, (text, header, preamble)) = if self.works.contains_key(&self.current_id(id)) {
+            self.with_work(id, now_ms, |w, _| {
+                w.prepare_export(&shelf, generation, now_ms);
+                if let Some(problem) = &w.state(Vec::new()).save_error {
+                    return Err(problem.clone());
+                }
+                Ok((w.db.clone(), typeset(&w.doc)))
+            })?
+        } else {
+            let (db, _) = self.paths(id)?;
+            let (me, name) = (self.device, self.device_name());
+            let (_, mut doc) = storage::load(&db, me).map_err(err)?;
+            let changes = preamble::record_unrecorded(&mut doc, &shelf, now_ms);
+            if !changes.is_empty() {
+                storage::save(&db, &changes, &doc).map_err(err)?;
+                record_name(&db, &mut doc, name.as_deref(), now_ms)?;
+            }
+            (db, typeset(&doc))
+        };
+        let date_ms = storage::read_all(&db).map_err(err)?.iter().map(|c| c.hlc.0).max().unwrap_or(0);
+        let ident = storage::identity(&db).map_err(err)?.unwrap_or_else(|| id.to_string());
+        Ok(ExportInput { text, header, preamble, date_ms, ident })
     }
 
     /// The Style update notice of every open Work, as the library is now.
@@ -1225,6 +1285,44 @@ mod tests {
         let (text, header) = vault.typeset_input_at("Rain", &milestone.id, None, 54_000).unwrap();
         assert_eq!(pictures(&mut t, "then", &header, text), before);
         assert!(vault.typeset_input_at("Rain", "00000001:999", None, 54_000).is_err());
+    }
+
+    fn export(vault: &mut Vault, look: Option<&str>, now_ms: u64) -> Result<Vec<u8>, String> {
+        let input = vault.export_input("Rain", look, now_ms)?;
+        crate::typeset::Typesetter::new(false)
+            .export_pdf(Path::new("no-fonts"), &input.header, input.text, input.date_ms, &input.ident)
+            .map(|pdf| pdf.bytes)
+    }
+
+    /// Step 8's check: the same version gives the same PDF, byte for byte, whenever and on
+    /// whichever Device it's exported.
+    #[test]
+    fn a_pdf_is_the_same_byte_for_byte_on_every_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, _) = written_work(dir.path());
+        vault.open_work("Rain", 4000).unwrap();
+        let first = export(&mut vault, None, 5000).unwrap();
+        assert!(first.starts_with(b"%PDF"));
+        assert_eq!(export(&mut vault, None, 999_000).unwrap(), first, "exported later: the same");
+        // Its date is the newest Change's, not the day it was exported (these run in 1970).
+        let pdf = String::from_utf8_lossy(&first);
+        assert!(pdf.contains("1970"), "dated from the History");
+        // Another Device, with its own copy of the Vault, exporting the same version.
+        vault.close_work("Rain", 6000);
+        let Opened::Vault(mut other) = Vault::open(dir.path(), OTHER, false, &dir.path().join(".recovery2")).unwrap() else { panic!() };
+        assert_eq!(export(&mut other, None, 7000).unwrap(), first, "another Device: the same");
+        // Another Look is another PDF.
+        assert_ne!(export(&mut other, Some("Paperback"), 8000).unwrap(), first);
+    }
+
+    #[test]
+    fn a_work_that_doesnt_typeset_isnt_exported() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open(dir.path());
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "The rain.\n\n#nothing-like-this")], 2000).unwrap();
+        let refused = export(&mut vault, None, 3000).unwrap_err();
+        assert!(refused.contains("line 3") && refused.contains("Nothing was exported"), "{refused}");
     }
 
     #[test]

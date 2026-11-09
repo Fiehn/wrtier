@@ -8,6 +8,11 @@ import { PagePreview, type Milestone } from "./preview";
 import { LibraryPanel } from "./library";
 import { libraryPath } from "./libraryfile";
 import { PreambleDialog, type Preamble } from "./preambledialog";
+import { openReviewers, type Reviewer } from "./reviewers";
+import { SidePanel } from "./sidepanel";
+import { CommentsPanel } from "./commentspanel";
+import { bindingsFrom, isCommand, keyLabel, onBindingsChanged, setBindings, withKey, type CommandId } from "./keys";
+import { openShortcuts } from "./shortcutsdialog";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -37,6 +42,11 @@ type Settings = {
   highlightLineHere: boolean;
   previewFollows: boolean;
   previewFollowsHere: boolean;
+  commentHighlights: boolean;
+  commentHighlightsHere: boolean;
+  /** Shortcuts changed from the defaults: command → key, or "none". */
+  shortcuts: Record<string, string>;
+  shortcutsHere: boolean;
 };
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -51,6 +61,16 @@ function showError(e: unknown) {
 
 function clearError() {
   $("error").hidden = true;
+}
+
+/** A line saying something went well (an Export), for a few seconds. */
+let infoTimer: number | undefined;
+function showInfo(text: string) {
+  const el = $("info");
+  el.textContent = text;
+  el.hidden = false;
+  clearTimeout(infoTimer);
+  infoTimer = window.setTimeout(() => (el.hidden = true), 10_000);
 }
 
 function showProblems(problems: SyncProblem[]) {
@@ -122,8 +142,9 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     $("empty").hidden = tabs.active !== null;
     // A library file is plain Typst: no Formatted view, and no pages of its own.
     $("view-mode").hidden = !tabs.activeIsWork;
-    $("preview-toggle").hidden = !tabs.activeIsWork;
+    $("panel-toggle").hidden = !tabs.activeIsWork;
     preview.show(tabs.activeIsWork ? tabs.active : null);
+    commentsPanel.render();
     rememberSoon();
     highlightOpen();
   },
@@ -134,11 +155,20 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
   cursor: (id) => preview.cursor(id),
   closed: (id) => preview.forget(id),
   addElement: (id, name) => act(() => addElement(id, name)),
+  openComments: (_id, ids) => {
+    panel.setTab("comments");
+    commentsPanel.focus(ids);
+  },
+  marks: (id) => {
+    if (id === tabs.active) commentsPanel.render();
+  },
+  addComment: (id) => startComment(id),
+  selectionMenu: (id, x, y) => showMenu(x, y, selectionMenu(id)),
 });
 
-// ---- The Page preview (Ctrl+Shift+P), open or not remembered on this Device ----
+// ---- The side panel (Ctrl+Shift+P): the Page preview and the Comments ----
 
-const preview = new PagePreview($("preview"), $("preview-bar"), $("preview-pages"), $<HTMLSelectElement>("preview-look"), $<HTMLSelectElement>("preview-version"), {
+const preview = new PagePreview($("preview-bar"), $("preview-pages"), $<HTMLSelectElement>("preview-look"), $<HTMLSelectElement>("preview-version"), {
   settled: (id) => tabs.settled(id),
   reveal: (id, from, to) => void tabs.reveal(id, from, to),
   cursorOf: (id) => tabs.cursorOf(id),
@@ -147,29 +177,108 @@ const preview = new PagePreview($("preview"), $("preview-bar"), $("preview-pages
   error: showError,
 });
 
-function setPreview(open: boolean) {
-  preview.setOpen(open);
-  $("preview-toggle").textContent = open ? "Hide pages" : "Pages";
+// Shown or not, and which tab, are remembered on this Device. The pages only compile while
+// their tab is showing.
+const panel = new SidePanel(
+  $("side-panel"),
+  [$("panel-tab-pages"), $("panel-tab-comments")],
+  { pages: $("preview"), comments: $("comments-pane") },
+  $("panel-toggle"),
+  (pagesInView) => preview.setOpen(pagesInView),
+);
+
+// Resolved Comments' highlights: shown or not on this Device.
+const showResolved = $<HTMLInputElement>("comments-show-resolved");
+try {
+  showResolved.checked = localStorage.getItem("comments-resolved") === "shown";
+} catch {
+  // not remembered: hidden
+}
+tabs.setCommentOptions({ ...tabs.commentOptions, resolved: showResolved.checked });
+showResolved.addEventListener("change", () => {
+  tabs.setCommentOptions({ ...tabs.commentOptions, resolved: showResolved.checked });
+  commentsPanel.render();
   try {
-    localStorage.setItem("preview", open ? "open" : "closed");
+    localStorage.setItem("comments-resolved", showResolved.checked ? "shown" : "hidden");
   } catch {
     // not remembered, then: no harm done
   }
+});
+
+// ---- Comments ----
+
+const commentsPanel = new CommentsPanel($("comments-list"), $("comments-new"), {
+  work: () => (tabs.activeIsWork ? tabs.active : null),
+  marks: (work) => tabs.marksOf(work),
+  act: (work, op) => tabs.comment(work, op),
+  show: (work, comment, part) => tabs.showComment(work, comment, part),
+  setPending: (work, range) => tabs.setPending(work, range),
+  pendingRange: (work) => tabs.pendingRange(work),
+  reviewers: () => invoke<Reviewer[]>("get_reviewers"),
+  authorName: async (work) => {
+    try {
+      const author = (await invoke<{ preamble: Preamble }>("get_preamble", { id: work })).preamble.author.trim();
+      return author || "Author";
+    } catch {
+      return "Author";
+    }
+  },
+  newReviewer: async () => {
+    const name = await askText("Who is the new Reviewer?", "", "Add", "They're added to the Vault, so they can comment on any Work. Their role and colour can be changed under Reviewers.");
+    if (name === null || !name.trim()) return null;
+    return invoke<Reviewer>("add_reviewer", { name, role: "" });
+  },
+  showResolved: () => showResolved.checked,
+  counted: (open) => {
+    $("panel-tab-comments").textContent = open > 0 ? `Comments (${open})` : "Comments";
+  },
+  error: showError,
+});
+
+/** Its key (Ctrl+Shift+M at first) or "Add Comment": a new Comment on the selection, or the word at the cursor. */
+function startComment(id: string) {
+  const target = tabs.commentTarget(id);
+  if (!target) {
+    showError("Select some text to comment on, or put the cursor in a word.");
+    return;
+  }
+  panel.setTab("comments");
+  act(() => commentsPanel.startAdding(id, target));
 }
 
-try {
-  setPreview(localStorage.getItem("preview") === "open");
-} catch {
-  setPreview(false);
+/** Right-click inside a selection: Add Comment, and the editing the system menu would have. */
+function selectionMenu(id: string): MenuItem[] {
+  const view = tabs.viewOf(id);
+  if (!view) return [];
+  // Cut and Copy go through the editor, so a cut pasted back is still a Move.
+  const command = (name: "cut" | "copy") => () => {
+    view.focus();
+    document.execCommand(name);
+  };
+  return [
+    { label: withKey("Add Comment", "addComment"), run: () => startComment(id) },
+    "separator",
+    { label: "Cut", run: command("cut") },
+    { label: "Copy", run: command("copy") },
+    {
+      label: "Paste",
+      run: () => act(async () => {
+        let text: string;
+        try {
+          text = await navigator.clipboard.readText();
+        } catch {
+          throw new Error("The clipboard can't be read from this menu here. Use Ctrl+V.");
+        }
+        const { from, to } = view.state.selection.main;
+        view.focus();
+        view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length }, userEvent: "input.paste", scrollIntoView: true });
+      }),
+    },
+  ];
 }
-$("preview-toggle").addEventListener("click", () => setPreview(!preview.open));
-$("preview-close").addEventListener("click", () => setPreview(false));
-window.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "p") {
-    e.preventDefault();
-    setPreview(!preview.open);
-  }
-}, { capture: true });
+
+$("panel-toggle").addEventListener("click", () => panel.toggle());
+$("panel-close").addEventListener("click", () => panel.setShown(false));
 
 /** The tabs (and cursors) are remembered for next time, a moment after they change. */
 let rememberTimer: number | undefined;
@@ -215,6 +324,71 @@ async function editPreamble(id: string) {
   await preambleChanged(id);
 }
 
+/** Exports a Work as a PDF, in a Look picked here if it has more than one. */
+async function exportPdf(id: string) {
+  await tabs.settled(id);
+  const { preamble } = await invoke<{ preamble: Preamble }>("get_preamble", { id });
+  let look: string | null = preamble.looks[0] ?? null;
+  if (preamble.looks.length > 1) {
+    const select = $<HTMLSelectElement>("ask-export-look");
+    select.replaceChildren(...preamble.looks.map((name, i) => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = i === 0 ? `${name} (the Work's own)` : name;
+      return option;
+    }));
+    select.value = preview.lookFor(id) ?? preamble.looks[0];
+    $("ask-export-heading").textContent = `Export ${id.split("/").pop()} as PDF`;
+    if ((await ask($<HTMLDialogElement>("ask-export"))) !== "export") return;
+    look = select.value;
+  }
+  type Exported = { path: string; pages: number; deviceFonts: string[] };
+  const done = await invoke<Exported | null>("export_pdf", { id, look });
+  if (!done) return; // cancelled
+  const pages = done.pages === 1 ? "1 page" : `${done.pages} pages`;
+  const fonts = done.deviceFonts.length
+    ? ` ${done.deviceFonts.join(", ")} came from this Device, not the Vault, so a PDF from another Device would differ.`
+    : "";
+  showInfo(`Exported ${pages} to ${done.path}.${fonts}`);
+}
+
+$("preview-pdf").addEventListener("click", () => act(async () => {
+  if (preview.shown) await exportPdf(preview.shown);
+}));
+
+/** Exports a Work as a manuscript .docx, and says what it couldn't carry. */
+async function exportDocx(id: string) {
+  await tabs.settled(id);
+  $("ask-docx-heading").textContent = `Export ${id.split("/").pop()} as .docx`;
+  const select = $<HTMLSelectElement>("ask-docx-font");
+  try {
+    select.value = localStorage.getItem("docx-font") ?? "Times New Roman";
+  } catch {
+    // nothing remembered
+  }
+  if ((await ask($<HTMLDialogElement>("ask-docx"))) !== "export") return;
+  try {
+    localStorage.setItem("docx-font", select.value);
+  } catch {
+    // not remembered, then: no harm done
+  }
+  type LeftOut = { line: number; what: string };
+  type Exported = { path: string; paragraphs: number; leftOut: LeftOut[] };
+  const done = await invoke<Exported | null>("export_docx", { id, font: select.value });
+  if (!done) return; // cancelled
+  let line = `Exported ${done.paragraphs} paragraphs to ${done.path}.`;
+  if (done.leftOut.length > 0) {
+    const shown = done.leftOut.slice(0, 3).map((l) => `line ${l.line}: ${l.what}`).join("; ");
+    const more = done.leftOut.length > 3 ? `, and ${done.leftOut.length - 3} more` : "";
+    line += ` Left out (a .docx can't carry it): ${shown}${more}.`;
+  }
+  showInfo(line);
+}
+
+$("preview-docx").addEventListener("click", () => act(async () => {
+  if (preview.shown) await exportDocx(preview.shown);
+}));
+
 /** Names the current point in a Work's History, to look back at later. (A stopgap until the
  *  History view in Phase 5, which is where Milestones will be made and compared.) */
 async function nameMilestone(id: string) {
@@ -259,14 +433,6 @@ async function addElement(id: string, name: string) {
   }
   await preambleChanged(id);
 }
-
-// Ctrl+Shift+L: the Preamble of the Work in front.
-window.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "l" && tabs.activeIsWork && tabs.active) {
-    e.preventDefault();
-    act(() => editPreamble(tabs.active!));
-  }
-}, { capture: true });
 
 $("new-style").addEventListener("click", () => act(async () => {
   const name = await askText("What's the new Style called?", "", "Create", "One small thing it does, e.g. Drop caps or Large print.");
@@ -341,6 +507,7 @@ async function openVault(path: string) {
   loadOpenFolders();
   $("vault-actions").hidden = false;
   $("open-settings").hidden = false;
+  $("open-reviewers").hidden = false;
   if (opened.deviceName === null) await askDeviceName(opened.suggestedName);
   applySettings(await invoke<Settings>("get_settings"));
   await refreshList();
@@ -429,7 +596,7 @@ function workItem(entry: Entry): HTMLElement {
   actions.className = "entry-actions";
   if (entry.kind === "work") {
     actions.append(
-      actionButton("Preamble…", `Looks, Styles, Story elements and settings of ${entry.id} (Ctrl+Shift+L)`, () => editPreamble(entry.id)),
+      actionButton("Preamble…", withKey(`Looks, Styles, Story elements and settings of ${entry.id}`, "preamble"), () => editPreamble(entry.id)),
       actionButton("Rename", `Rename ${entry.id}`, () => renameWork(entry.id)),
       actionButton("Trash", `Move ${entry.id} to the trash`, () => trashWork(entry.id)),
     );
@@ -580,6 +747,8 @@ $("sidebar").addEventListener("contextmenu", (e) => {
         { label: "Open", run: run(() => openWork(entry.id)) },
         { label: "Preamble…", run: run(() => editPreamble(entry.id)) },
         { label: "Name a Milestone…", run: run(() => nameMilestone(entry.id)) },
+        { label: "Export PDF…", run: run(() => exportPdf(entry.id)) },
+        { label: "Export .docx…", run: run(() => exportDocx(entry.id)) },
         "separator",
         { label: "Rename…", run: run(() => renameWork(entry.id)) },
         { label: "Move to trash", run: run(() => trashWork(entry.id)) },
@@ -742,7 +911,7 @@ $("open-switcher").addEventListener("click", () => void openSwitcher());
 
 function setSidebar(shown: boolean) {
   $("app").classList.toggle("sidebar-hidden", !shown);
-  $("sidebar-toggle").title = shown ? "Hide the Works (Ctrl+\\)" : "Show the Works (Ctrl+\\)";
+  $("sidebar-toggle").title = withKey(shown ? "Hide the Works" : "Show the Works", "toggleWorks");
   $("sidebar-toggle").setAttribute("aria-expanded", String(shown));
   try {
     localStorage.setItem("sidebar", shown ? "shown" : "hidden");
@@ -758,20 +927,6 @@ try {
 }
 $("sidebar-toggle").addEventListener("click", () => setSidebar($("app").classList.contains("sidebar-hidden")));
 
-// App-wide keys: Ctrl+O finds a Work, Ctrl+W closes the tab in front, Ctrl+\ hides or shows the Works.
-window.addEventListener("keydown", (e) => {
-  const mod = e.ctrlKey || e.metaKey;
-  if (mod && !e.shiftKey && e.key === "\\") {
-    e.preventDefault();
-    setSidebar($("app").classList.contains("sidebar-hidden"));
-  } else if (mod && !e.shiftKey && e.key.toLowerCase() === "o") {
-    e.preventDefault();
-    void openSwitcher();
-  } else if (mod && !e.shiftKey && e.key.toLowerCase() === "w" && tabs.active) {
-    e.preventDefault();
-    act(() => tabs.close(tabs.active!));
-  }
-}, { capture: true });
 
 // ---- Formatted and Raw view (Ctrl+E), remembered on this Device ----
 
@@ -791,12 +946,65 @@ try {
   setFormatted(true);
 }
 $("view-mode").addEventListener("click", () => setFormatted(!tabs.formatted));
-window.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "e" && tabs.active) {
-    e.preventDefault();
+
+// ---- Keyboard shortcuts: the app-wide ones (the editor's are in each editor's keymap) ----
+
+/** What each app-wide command does; false: it doesn't apply right now (the key is left alone). */
+const appCommands: Partial<Record<CommandId, () => boolean>> = {
+  toggleWorks: () => {
+    setSidebar($("app").classList.contains("sidebar-hidden"));
+    return true;
+  },
+  quickSwitcher: () => {
+    void openSwitcher();
+    return true;
+  },
+  closeTab: () => {
+    if (!tabs.active) return false;
+    act(() => tabs.close(tabs.active!));
+    return true;
+  },
+  toggleView: () => {
+    if (!tabs.active) return false;
     setFormatted(!tabs.formatted);
+    return true;
+  },
+  togglePanel: () => {
+    panel.toggle();
+    return true;
+  },
+  preamble: () => {
+    if (!tabs.activeIsWork || !tabs.active) return false;
+    act(() => editPreamble(tabs.active!));
+    return true;
+  },
+};
+
+window.addEventListener("keydown", (e) => {
+  for (const [command, run] of Object.entries(appCommands)) {
+    if (isCommand(e, command as CommandId) && run()) {
+      e.preventDefault();
+      return;
+    }
   }
 }, { capture: true });
+
+/** Everything that names a key says the current one. */
+function showKeys() {
+  $("open-switcher").title = withKey("Find a Work", "quickSwitcher");
+  $("open-switcher-key").textContent = keyLabel("quickSwitcher");
+  $("open-switcher-key").hidden = !keyLabel("quickSwitcher");
+  $("view-mode").title = withKey("Switch between the Formatted and the Raw view", "toggleView");
+  $("panel-toggle").title = withKey("The Page preview and the Comments", "togglePanel");
+  $("panel-close").title = withKey("Hide the panel", "togglePanel");
+  const switcher = keyLabel("quickSwitcher");
+  $("empty").textContent = `Open a Vault, then choose a Work on the left${switcher ? `, or press ${switcher}` : ""}.`;
+  $("sidebar-toggle").title = withKey($("app").classList.contains("sidebar-hidden") ? "Show the Works" : "Hide the Works", "toggleWorks");
+  tabs.keysChanged();
+  commentsPanel.render();
+}
+onBindingsChanged(showKeys);
+showKeys(); // the defaults, until a Vault's settings say otherwise
 
 // ---- Settings ----
 
@@ -815,7 +1023,11 @@ function applySettings(settings: Settings) {
   $<HTMLInputElement>("highlight-line-here").checked = settings.highlightLineHere;
   $<HTMLInputElement>("preview-follows").checked = settings.previewFollows;
   $<HTMLInputElement>("preview-follows-here").checked = settings.previewFollowsHere;
+  $<HTMLInputElement>("comment-highlights").checked = settings.commentHighlights;
+  $<HTMLInputElement>("comment-highlights-here").checked = settings.commentHighlightsHere;
   tabs.setOptions({ lineNumbers: settings.lineNumbers, highlightLine: settings.highlightLine });
+  tabs.setCommentOptions({ ...tabs.commentOptions, highlights: settings.commentHighlights });
+  setBindings(bindingsFrom(settings.shortcuts));
   preview.setFollows(settings.previewFollows);
 }
 
@@ -828,6 +1040,7 @@ function onOff(name: string, box: string, here: string) {
 onOff("lineNumbers", "line-numbers", "line-numbers-here");
 onOff("highlightLine", "highlight-line", "highlight-line-here");
 onOff("previewFollows", "preview-follows", "preview-follows-here");
+onOff("commentHighlights", "comment-highlights", "comment-highlights-here");
 
 function setting(name: string, value: string, here: boolean) {
   act(async () => applySettings(await invoke<Settings>("set_setting", { name, value, here })));
@@ -837,9 +1050,21 @@ $("theme").addEventListener("change", () => setting("theme", $<HTMLSelectElement
 $("theme-here").addEventListener("change", () => setting("theme", $<HTMLSelectElement>("theme").value, $<HTMLInputElement>("theme-here").checked));
 $("font-size").addEventListener("change", () => setting("fontSize", $<HTMLInputElement>("font-size").value, $<HTMLInputElement>("font-size-here").checked));
 $("font-size-here").addEventListener("change", () => setting("fontSize", $<HTMLInputElement>("font-size").value, $<HTMLInputElement>("font-size-here").checked));
+// Afterwards the highlights take any new names and colours.
+$("open-reviewers").addEventListener("click", () => act(async () => {
+  await openReviewers(confirmAsk);
+  tabs.refreshMarks();
+}));
+
 $("open-settings").addEventListener("click", () => act(async () => {
   applySettings(await invoke<Settings>("get_settings")); // another Device may have changed them
   await ask($<HTMLDialogElement>("settings"));
+}));
+
+$("open-shortcuts").addEventListener("click", () => act(async () => {
+  const settings = await invoke<Settings>("get_settings");
+  applySettings(settings);
+  await openShortcuts(settings, { apply: applySettings, confirm: confirmAsk });
 }));
 
 // ---- Start ----
