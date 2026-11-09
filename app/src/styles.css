@@ -474,6 +474,19 @@ main > :not(#panes) {
   color: var(--muted);
 }
 
+/* The pages of a Milestone: the Work as it was, not as it is. */
+.preview-milestone {
+  background: var(--chip-open);
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+
+#preview-version {
+  font: inherit;
+  font-size: 13px;
+  max-width: 50%;
+}
+
 #preview-pages {
   flex: 1;
   overflow-y: auto;

@@ -66,9 +66,12 @@ export type Pair = { hash: number; open: number; close: number };
 /** The Story elements with a body written in the text now, as Pairs. */
 function recognized(state: EditorState): Pair[] {
   const elements = state.facet(elementsFacet);
-  if (elements.length === 0) return [];
+  // (A state without the Formatted view, such as the Raw view's just before switching back:
+  // there's no markup to read in it.)
+  const spans = state.field(spansField, false);
+  if (elements.length === 0 || !spans) return [];
   const pairs: Pair[] = [];
-  for (const span of state.field(spansField)) {
+  for (const span of spans) {
     if (span.kind !== "code") continue;
     const call = callAt(state.doc, span.from, span.to, elements);
     if (call?.close) pairs.push({ hash: call.from, open: call.head[1] - 1, close: call.close[0] });
@@ -106,7 +109,7 @@ const pairsField = StateField.define<Pair[]>({
 
 /** Every Story element's brackets in a state: the ones followed, and any just written. */
 export function pairsIn(state: EditorState): Pair[] {
-  const pairs = [...state.field(pairsField)];
+  const pairs = [...(state.field(pairsField, false) ?? [])];
   for (const p of recognized(state)) if (!pairs.some((k) => k.open === p.open)) pairs.push(p);
   return pairs;
 }

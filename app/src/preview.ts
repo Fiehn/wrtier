@@ -14,6 +14,7 @@ type Problem = { message: string; hints: string[]; from: number | null; to: numb
 /** A spot on the pages: the page (from 0), and points from its top left. */
 type Spot = { page: number; x: number; y: number };
 type JumpTo = { kind: "text"; at: number } | { kind: "pages"; spot: Spot };
+export type Milestone = { id: string; name: string; timeMs: number };
 type Compiled = { pages: PageSize[]; stale: boolean; errors: Problem[]; warnings: Problem[]; deviceFonts: string[]; ms: number };
 
 /** What the rest of the page does for the preview. */
@@ -26,6 +27,8 @@ export type PreviewHooks = {
   cursorOf(id: string): number | null;
   /** The Work's Looks, in its Preamble's order. */
   looksOf(id: string): Promise<string[]>;
+  /** The Work's Milestones, oldest first. */
+  milestonesOf(id: string): Promise<Milestone[]>;
   error(message: string): void;
 };
 
@@ -75,14 +78,29 @@ export class PagePreview {
 
   /** The Look the pages are in: picked here, remembered on this Device for each Work. */
   private look: string | null = null;
+  /** The Milestone shown instead of the Work as it is now (null: now). Its pages are read-only. */
+  private milestone: Milestone | null = null;
+  private milestones: Milestone[] = [];
+
+  /** The pages' name on the Rust side: the Work's, or the Work at a Milestone's. */
+  private get key(): string | null {
+    if (!this.work) return null;
+    return this.milestone ? `${this.work}@${this.milestone.id}` : this.work;
+  }
 
   constructor(
     private readonly root: HTMLElement,
     private readonly bar: HTMLElement,
     private readonly list: HTMLElement,
     private readonly picker: HTMLSelectElement,
+    private readonly versionPicker: HTMLSelectElement,
     private readonly hooks: PreviewHooks,
   ) {
+    this.versionPicker.addEventListener("change", () => {
+      this.milestone = this.milestones.find((m) => m.id === this.versionPicker.value) ?? null;
+      this.clear();
+      this.compileSoon(0);
+    });
     this.picker.addEventListener("change", () => {
       this.look = this.picker.value || null;
       try {
@@ -103,11 +121,12 @@ export class PagePreview {
     }, { root: this.list, rootMargin: "100% 0px" });
     this.mark = document.createElement("div");
     this.mark.className = "cursor-mark";
-    // A click on a page puts the cursor at that place in the text.
+    // A click on a page puts the cursor at that place in the text (not on a Milestone's pages:
+    // the text has changed since).
     this.list.addEventListener("click", (e) => {
       const el = (e.target as HTMLElement).closest<HTMLElement>(".page");
       const page = el ? this.pages[Number(el.dataset.page)] : undefined;
-      if (!page || !this.work) return;
+      if (!page || !this.work || this.milestone) return;
       const box = el!.getBoundingClientRect();
       const x = ((e.clientX - box.left) / box.width) * page.width;
       const y = ((e.clientY - box.top) / box.height) * page.height;
@@ -123,7 +142,7 @@ export class PagePreview {
 
   /** A typing burst was recorded: compile, so the pages are those of the History as it is. */
   committed(work: string) {
-    if (work === this.work && this.open) this.compileSoon(0);
+    if (work === this.work && this.open && !this.milestone) this.compileSoon(0);
   }
 
   /** The cursor moved in a Work. */
@@ -143,7 +162,7 @@ export class PagePreview {
   }
 
   private followSoon(delay: number) {
-    if (!this.follows || !this.open) return;
+    if (!this.follows || !this.open || this.milestone) return;
     clearTimeout(this.followTimer);
     this.followTimer = window.setTimeout(() => void this.follow(), delay);
   }
@@ -196,8 +215,10 @@ export class PagePreview {
   show(work: string | null) {
     if (work === this.work) return;
     this.work = work;
+    this.milestone = null; // another Work: shown as it is now
     this.clear();
     this.showBar(null);
+    void this.milestonesChanged(work);
     void this.preambleChanged(work);
   }
 
@@ -231,15 +252,43 @@ export class PagePreview {
     if (work && this.open) this.compileSoon(0);
   }
 
-  /** The text of a Work changed (typed here, or taken in from elsewhere). */
+  /** The text of a Work changed (typed here, or taken in from elsewhere). A Milestone's pages
+   *  don't change with it. */
   edited(work: string) {
-    if (work === this.work && this.open) this.compileSoon(PAUSE_MS);
+    if (work === this.work && this.open && !this.milestone) this.compileSoon(PAUSE_MS);
+  }
+
+  /** The Work's Milestones changed (one was named): the picker offers them. */
+  async milestonesChanged(work: string | null) {
+    if (work !== this.work) return;
+    let list: Milestone[] = [];
+    if (work) {
+      try {
+        list = await this.hooks.milestonesOf(work);
+      } catch {
+        // not readable right now: only "now"
+      }
+    }
+    if (work !== this.work) return;
+    this.milestones = list;
+    if (this.milestone && !list.some((m) => m.id === this.milestone!.id)) this.milestone = null;
+    const option = (value: string, text: string) => {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = text;
+      return o;
+    };
+    const date = (ms: number) => new Date(ms).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+    this.versionPicker.replaceChildren(option("", "Now"), ...[...list].reverse().map((m) => option(m.id, `${m.name} (${date(m.timeMs)})`)));
+    this.versionPicker.value = this.milestone?.id ?? "";
+    this.versionPicker.hidden = list.length === 0;
   }
 
   /** A Work's tab closed: its pages aren't needed any more. */
   forget(work: string) {
     if (work === this.work) this.show(null);
     invoke("forget_preview", { id: work }).catch(() => {});
+    for (const m of this.milestones) invoke("forget_preview", { id: `${work}@${m.id}` }).catch(() => {});
   }
 
   private compileSoon(delay: number) {
@@ -249,6 +298,7 @@ export class PagePreview {
 
   private async compile() {
     const work = this.work;
+    const key = this.key;
     if (!work || !this.open) return;
     if (this.running) {
       this.again = true;
@@ -257,10 +307,10 @@ export class PagePreview {
     this.running = true;
     try {
       await this.hooks.settled(work);
-      const compiled = await invoke<Compiled>("compile_preview", { id: work, look: this.look });
-      if (work === this.work) this.showCompiled(compiled);
+      const compiled = await invoke<Compiled>("compile_preview", { id: work, look: this.look, milestone: this.milestone?.id ?? null });
+      if (key === this.key) this.showCompiled(compiled);
     } catch (e) {
-      if (work === this.work) this.hooks.error(String(e));
+      if (key === this.key) this.hooks.error(String(e));
     } finally {
       this.running = false;
       if (this.again) {
@@ -323,12 +373,12 @@ export class PagePreview {
   }
 
   private async draw(page: Page, index: number) {
-    const work = this.work;
+    const key = this.key;
     const generation = this.generation;
     page.drawing = true;
     try {
-      const picture = await invoke<PagePicture>("preview_page", { id: work, page: index, known: page.drawn });
-      if (work !== this.work || this.pages[index] !== page) return;
+      const picture = await invoke<PagePicture>("preview_page", { id: key, page: index, known: page.drawn });
+      if (key !== this.key || this.pages[index] !== page) return;
       page.checked = generation;
       if (picture.svg === null) return; // the same as the one shown
       const url = URL.createObjectURL(new Blob([picture.svg], { type: "image/svg+xml" }));
@@ -359,7 +409,13 @@ export class PagePreview {
       this.bar.hidden = true;
       return;
     }
-    const work = this.work;
+    const work = this.milestone ? null : this.work; // a Milestone's text isn't in the editor
+    if (this.milestone) {
+      const line = document.createElement("p");
+      line.className = "preview-milestone";
+      line.textContent = `The Work as it was at the Milestone “${this.milestone.name}”, with the Styles it had then. Read-only: pick Now to see it as it is.`;
+      this.bar.append(line);
+    }
     const error = compiled.errors[0];
     if (error) {
       const line = document.createElement("p");

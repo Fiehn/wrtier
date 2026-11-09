@@ -169,7 +169,7 @@ mod tests {
         let mut laptop = Doc::new(DeviceId(1));
         let changes = vec![laptop.insert_local(0, "abcdef", 1000)];
         storage::save(&db, &changes, &laptop).unwrap();
-        storage::write_text_file(&db, &typ, &laptop, 1500).unwrap();
+        storage::write_text_file(&db, &typ, &laptop, "", 1500).unwrap();
         (db, typ, laptop, changes)
     }
 

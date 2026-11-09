@@ -53,6 +53,16 @@ pub struct Vault {
     defaults_problem: Option<String>,
 }
 
+/// A Milestone, for the Page preview's picker.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MilestoneInfo {
+    pub id: String,
+    pub name: String,
+    /// When it was named (ms since 1970).
+    pub time_ms: u64,
+}
+
 /// A Work's Preamble as the dialog shows it.
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -476,6 +486,7 @@ impl Vault {
         if let Err(problem) = self.recover(id, now_ms) {
             problems.push(problem);
         }
+        let mut header_dropped = false;
         // The History, and the Changes this Device made in it (see `OpenWork::mine`).
         let result = catch_unwind(AssertUnwindSafe(|| -> Result<(Doc, Vec<Change>), String> {
             if db.exists() {
@@ -493,8 +504,15 @@ impl Vault {
                     mine.extend(absorbed.changes.into_iter().filter(|c| c.id.device == me));
                     problems.extend(absorbed.kept.into_iter().map(|(path, reason)| self.problem(&path, reason)));
                 }
-                // An External edit made while the app was closed becomes Changes now.
-                mine.extend(storage::sync_text_file(&db, &typ, &mut doc, now_ms).map_err(err)?);
+                // An External edit made while the app was closed becomes Changes now. Edits
+                // inside the header are dropped (it's written again from the History): said so,
+                // but only for a file the app didn't write itself.
+                let header = preamble::text_file_header(&doc, &Shelf::read(&self.root));
+                if let Ok(contents) = std::fs::read_to_string(&typ) {
+                    let in_file = wrtier::text_file::split_header(&wrtier::text_file::split_marker(&contents).0).0;
+                    header_dropped = !storage::wrote_text(&db, &contents).unwrap_or(true) && in_file.is_some_and(|h| h != header);
+                }
+                mine.extend(storage::sync_text_file(&db, &typ, &mut doc, &header, now_ms).map_err(err)?);
                 if mine.len() > saved_before {
                     record_name(&db, &mut doc, device_name.as_deref(), now_ms)?;
                 }
@@ -503,11 +521,14 @@ impl Vault {
                 // A Text file without a History: the whole file is one External edit, written
                 // from an empty version (so it's not "unknown", and there's no Merge notice).
                 // (Without any marker line: that names a version of another History.)
+                // (A header from another Work's Text file isn't text either.)
                 let (text, _) = wrtier::text_file::split_marker(&std::fs::read_to_string(&typ).map_err(err)?);
+                let (_, text) = wrtier::text_file::split_header(&text);
                 let mut doc = Doc::new(me);
                 let changes = doc.import_text(Some(&[]), &text, now_ms);
                 storage::save(&db, &changes, &doc).map_err(err)?;
-                storage::write_text_file(&db, &typ, &doc, now_ms).map_err(err)?;
+                let header = preamble::text_file_header(&doc, &Shelf::read(&self.root));
+                storage::write_text_file(&db, &typ, &doc, &header, now_ms).map_err(err)?;
                 record_name(&db, &mut doc, device_name.as_deref(), now_ms)?;
                 Ok((doc, changes))
             } else {
@@ -521,13 +542,19 @@ impl Vault {
                 panic_message(panic.as_ref()))),
         };
         let text = doc.text();
-        let (sitting, notice) = match self.recovered.remove(id) {
+        let (sitting, mut notice) = match self.recovered.remove(id) {
             Some((changes, notice)) => (changes, Some(notice)),
             None => (Vec::new(), None),
         };
+        if header_dropped {
+            let line = format!("Edits to the Preamble at the top of {name}.typ were dropped: it's made from the Work's History. \
+                Change it with Preamble… on the Work.");
+            notice = Some(notice.map_or(line.clone(), |n| format!("{n} {line}")));
+        }
         let recovery = Recovery::for_work(&self.recovery_dir, &self.root, id);
         let mut work = OpenWork::new(db, typ, doc, now_ms, recovery, sitting, mine);
         work.style_notice = preamble::update_notice(&work.doc, &Shelf::read(&self.root));
+        work.vault_root = self.root.clone();
         self.works.insert(id.to_string(), work);
         Ok(OpenedWork { id: id.to_string(), name, text, problems, notice })
     }
@@ -554,7 +581,7 @@ impl Vault {
         if storage::probe(&db) != Probe::History {
             return Err(problem(format!("{id}.db isn't a History in the Vault right now")));
         }
-        let (me, device_name) = (self.device, self.device_name());
+        let (me, device_name, root) = (self.device, self.device_name(), self.root.clone());
         let result = catch_unwind(AssertUnwindSafe(|| -> Result<(Vec<ChangeId>, Vec<String>), String> {
             let (_, mut doc) = storage::load(&db, me).map_err(err)?;
             let mut recovered: Vec<ChangeId> = Vec::new();
@@ -588,7 +615,8 @@ impl Vault {
             if !recovered.is_empty() {
                 record_name(&db, &mut doc, device_name.as_deref(), now_ms)?;
             }
-            storage::sync_text_file(&db, &typ, &mut doc, now_ms).map_err(err)?;
+            let header = preamble::text_file_header(&doc, &Shelf::read(&root));
+            storage::sync_text_file(&db, &typ, &mut doc, &header, now_ms).map_err(err)?;
             Ok((recovered, lines))
         }));
         let (changes, lines) = match result {
@@ -630,7 +658,8 @@ impl Vault {
             changes.extend(preamble.record(&mut doc, now_ms));
         }
         storage::save(&db, &changes, &doc).map_err(err)?;
-        storage::write_text_file(&db, &typ, &doc, now_ms).map_err(err)?;
+        let header = preamble::text_file_header(&doc, &Shelf::read(&self.root));
+        storage::write_text_file(&db, &typ, &doc, &header, now_ms).map_err(err)?;
         self.open_work(&id, now_ms)
     }
 
@@ -737,6 +766,74 @@ impl Vault {
             let uses = preamble::uses(&w.doc, &shelf, Version::Library);
             Ok((w.text(), preamble::header(&w.doc, uses, look)))
         })
+    }
+
+    /// A Work's Milestones, oldest first. The Work needn't be open.
+    pub fn milestones(&mut self, id: &str, now_ms: u64) -> Result<Vec<MilestoneInfo>, String> {
+        let list = |doc: &Doc| doc.milestones().into_iter()
+            .map(|m| MilestoneInfo { id: m.id.to_string(), name: m.name, time_ms: m.hlc.0 })
+            .collect();
+        if self.works.contains_key(&self.current_id(id)) {
+            return self.with_work(id, now_ms, |w, _| Ok(list(&w.doc)));
+        }
+        let (db, _) = self.paths(id)?;
+        let (_, doc) = storage::load(&db, self.device).map_err(err)?;
+        Ok(list(&doc))
+    }
+
+    /// Names the current point in a Work's History. Changed Styles are recorded first, so the
+    /// Milestone holds the versions the Page preview shows now.
+    pub fn make_milestone(&mut self, id: &str, name: &str, now_ms: u64) -> Result<Option<WorkState>, String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 200 {
+            return Err("A Milestone's name needs 1 to 200 characters.".into());
+        }
+        let shelf = Shelf::read(&self.root);
+        let generation = self.library_generation;
+        if self.works.contains_key(&self.current_id(id)) {
+            return self.with_work(id, now_ms, |w, _| Ok(Some(w.make_milestone(name, &shelf, generation, now_ms))));
+        }
+        let (db, _) = self.paths(id)?;
+        let (me, device_name) = (self.device, self.device_name());
+        let (_, mut doc) = storage::load(&db, me).map_err(err)?;
+        let mut changes = preamble::record_unrecorded(&mut doc, &shelf, now_ms);
+        changes.push(doc.make_milestone_local(name, now_ms));
+        storage::save(&db, &changes, &doc).map_err(err)?;
+        record_name(&db, &mut doc, device_name.as_deref(), now_ms)?;
+        Ok(None)
+    }
+
+    /// The Work as it was at a Milestone: built from only the Changes the Milestone holds, so
+    /// its text, its Preamble and its recorded Styles are exactly as they were then.
+    fn at_milestone(&mut self, id: &str, milestone: &str, now_ms: u64) -> Result<Doc, String> {
+        let milestone: ChangeId = milestone.parse().map_err(|_| format!("Not a Milestone: {milestone}"))?;
+        let device = self.device;
+        // What it holds: the highest counter the naming Device had seen from each Device.
+        let seen = |doc: &Doc| doc.milestones().into_iter().find(|m| m.id == milestone).map(|m| m.seen);
+        let (db, seen) = if self.works.contains_key(&self.current_id(id)) {
+            self.with_work(id, now_ms, |w, _| {
+                w.save(); // the Milestone (and what it holds) must be in the file
+                Ok((w.db.clone(), seen(&w.doc)))
+            })?
+        } else {
+            let (db, _) = self.paths(id)?;
+            let (_, doc) = storage::load(&db, device).map_err(err)?;
+            (db, seen(&doc))
+        };
+        let seen = seen.ok_or_else(|| "That Milestone isn't in this Work (deleted, or not here yet).".to_string())?;
+        let held = |c: ChangeId| seen.iter().any(|&(d, n)| d == c.device && c.counter <= n);
+        let changes = storage::read_all(&db).map_err(err)?;
+        let mut doc = Doc::new(device);
+        doc.apply_all(&changes.into_iter().filter(|c| held(c.id)).collect::<Vec<_>>());
+        Ok(doc)
+    }
+
+    /// What a compile of a Work as it was at a Milestone needs: its text then, and a header
+    /// from the copies it had recorded then (never today's Style library).
+    pub fn typeset_input_at(&mut self, id: &str, milestone: &str, look: Option<&str>, now_ms: u64) -> Result<(String, preamble::Header), String> {
+        let doc = self.at_milestone(id, milestone, now_ms)?;
+        let uses = preamble::uses(&doc, &Shelf::read(&self.root), Version::Recorded);
+        Ok((doc.committed_text(), preamble::header(&doc, uses, look)))
     }
 
     /// The Style update notice of every open Work, as the library is now.
@@ -1022,6 +1119,114 @@ mod tests {
         assert!(header.text.contains("#set document(title: \"Rain\")"));
     }
 
+    /// A Work with two Looks and Story elements, written, closed: its Text file on disk.
+    fn written_work(dir: &Path) -> (Vault, String) {
+        let mut vault = open(dir);
+        vault.create_work("Rain", 1000).unwrap();
+        let p = Preamble { looks: vec!["Manuscript".into(), "Paperback".into()], title: "Rain".into(), language: "en".into(), ..Preamble::default() };
+        vault.set_preamble("Rain", &p, 1500).unwrap();
+        let text = "= The Long Night\n\n#epigraph[The night is long.]\n\nThe rain had stopped.\n\n#scene-break()\n\nShe went.";
+        vault.edit("Rain", vec![typing(0, text)], 2000).unwrap();
+        vault.close_work("Rain", 3000);
+        let file = std::fs::read_to_string(dir.join("Rain.typ")).unwrap();
+        (vault, file)
+    }
+
+    /// Step 6's check: the Text file alone (as `typst compile` sees it) gives the app's pages.
+    #[test]
+    fn the_text_file_compiles_on_its_own_to_the_apps_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, file) = written_work(dir.path());
+        assert!(file.starts_with(wrtier::text_file::HEADER_START), "{file}");
+        assert!(file.contains("// Look: Manuscript\n#let wrtier-look-1"));
+        let mut t = crate::typeset::Typesetter::new(false);
+        let alone = t.compile("Rain.typ", Path::new("no-fonts"), file.clone());
+        assert!(alone.errors.is_empty() && alone.warnings.is_empty(), "{:?} {:?}", alone.errors, alone.warnings);
+        // The app, in the Work's first Look.
+        vault.open_work("Rain", 4000).unwrap();
+        let (text, header) = vault.typeset_input("Rain", None, 4000).unwrap();
+        assert!(!text.contains("Preamble"), "the header isn't the Work's text");
+        let app = t.compile_with("Rain", Path::new("no-fonts"), &header, text);
+        assert_eq!(alone.pages, app.pages);
+        for i in 0..app.pages.len() {
+            assert_eq!(t.page("Rain.typ", i, None).unwrap().svg, t.page("Rain", i, None).unwrap().svg, "page {}", i + 1);
+        }
+    }
+
+    #[test]
+    fn edits_in_the_header_are_dropped_and_edits_in_the_text_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, file) = written_work(dir.path());
+        let edited = file.replace("#show: wrtier-look-1", "#show: wrtier-look-2").replace("had stopped", "had eased");
+        std::fs::write(dir.path().join("Rain.typ"), &edited).unwrap();
+        let opened = vault.open_work("Rain", 5000).unwrap();
+        assert!(opened.text.contains("The rain had eased."), "{}", opened.text);
+        assert!(!opened.text.contains("wrtier-look"));
+        assert!(opened.notice.is_some_and(|n| n.contains("Edits to the Preamble at the top of Rain.typ were dropped")));
+        // Written again with the History's header (when the Text file is next brought up to date).
+        vault.leave("Rain", 6000).unwrap();
+        let again = std::fs::read_to_string(dir.path().join("Rain.typ")).unwrap();
+        assert!(again.contains("#show: wrtier-look-1") && again.contains("had eased"), "{again}");
+    }
+
+    #[test]
+    fn an_older_text_file_without_a_header_is_still_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, file) = written_work(dir.path());
+        // As an app from before step 6 would have written it, then edited elsewhere.
+        let (body, _) = wrtier::text_file::split_marker(&file);
+        let (_, text) = wrtier::text_file::split_header(&body);
+        std::fs::write(dir.path().join("Rain.typ"), text.replace("She went.", "She went home.")).unwrap();
+        let opened = vault.open_work("Rain", 5000).unwrap();
+        assert!(opened.text.ends_with("She went home."), "{}", opened.text);
+        assert!(opened.notice.is_none());
+    }
+
+    /// Every page of a compile, as SVG.
+    fn pictures(t: &mut crate::typeset::Typesetter, key: &str, header: &preamble::Header, text: String) -> Vec<String> {
+        let c = t.compile_with(key, Path::new("no-fonts"), header, text);
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        (0..c.pages.len()).map(|i| t.page(key, i, None).unwrap().svg.unwrap()).collect()
+    }
+
+    /// Step 7's check: an old Milestone renders unchanged after a Style is edited.
+    #[test]
+    fn a_milestone_renders_as_it_was_after_a_style_is_edited() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open(dir.path());
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "= The Long Night\n\nThe rain had stopped.")], 2000).unwrap();
+        vault.tick(20_000);
+        let mut t = crate::typeset::Typesetter::new(false);
+        let (text, header) = vault.typeset_input("Rain", None, 21_000).unwrap();
+        let before = pictures(&mut t, "now", &header, text);
+        vault.make_milestone("Rain", "Draft 1", 22_000).unwrap();
+        let milestone = vault.milestones("Rain", 22_000).unwrap().remove(0);
+        assert_eq!(milestone.name, "Draft 1");
+
+        // Afterwards: the Style changes in the library (and is recorded by the next edit), and
+        // the text changes too.
+        std::fs::write(dir.path().join("styles/Book text.typ"), "// Style: Book text\n// Bigger.\n#set text(size: 16pt)\n").unwrap();
+        assert!(vault.library_changed());
+        vault.edit("Rain", vec![typing(37, " Then it rained again.")], 30_000).unwrap();
+        vault.tick(50_000);
+        let (text, header) = vault.typeset_input("Rain", None, 51_000).unwrap();
+        assert_ne!(pictures(&mut t, "now", &header, text), before, "the Work itself looks different now");
+
+        // The Milestone: its text and its Styles as they were, page for page.
+        let (text, header) = vault.typeset_input_at("Rain", &milestone.id, None, 52_000).unwrap();
+        assert_eq!(text, "= The Long Night\n\nThe rain had stopped.");
+        assert!(!header.text.contains("16pt"));
+        assert_eq!(pictures(&mut t, "then", &header, text), before);
+
+        // The same with the Work closed, and after the library's file is gone altogether.
+        vault.close_work("Rain", 53_000);
+        std::fs::remove_file(dir.path().join("styles/Book text.typ")).unwrap();
+        let (text, header) = vault.typeset_input_at("Rain", &milestone.id, None, 54_000).unwrap();
+        assert_eq!(pictures(&mut t, "then", &header, text), before);
+        assert!(vault.typeset_input_at("Rain", "00000001:999", None, 54_000).is_err());
+    }
+
     #[test]
     fn a_conflict_copy_in_the_library_is_a_sync_problem() {
         let dir = tempfile::tempdir().unwrap();
@@ -1037,7 +1242,7 @@ mod tests {
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         let mut doc = Doc::new(device);
         storage::save(&db, &[doc.insert_local(0, text, 1000)], &doc).unwrap();
-        storage::write_text_file(&db, &typ, &doc, 1000).unwrap();
+        storage::write_text_file(&db, &typ, &doc, "", 1000).unwrap();
         (db, doc)
     }
 
@@ -1253,7 +1458,7 @@ mod tests {
         assert!(saved.iter().any(|c| matches!(c.kind, ChangeKind::Insert(_)) && c.hlc.0 >= 2000 && c.hlc.0 < 50_000),
                 "recorded at its last keystroke: {saved:?}");
         let typ = std::fs::read_to_string(root.join("Rain.typ")).unwrap();
-        assert_eq!(wrtier::text_file::split_marker(&typ).0, "The rain had stopped.");
+        assert_eq!(wrtier::text_file::split_header(&wrtier::text_file::split_marker(&typ).0).1, "The rain had stopped.");
         let opened = vault.open_work("Rain", 60_000).unwrap();
         assert_eq!(opened.text, "The rain had stopped.");
         assert!(opened.notice.unwrap().contains("Recovered 21 characters"));

@@ -4,7 +4,7 @@ import { type WorkState } from "./sync";
 import { Tabs, type Layout, type OpenedWork } from "./tabs";
 import { buildTree, foldersOf, type Folder } from "./tree";
 import { showMenu, type MenuItem } from "./menu";
-import { PagePreview } from "./preview";
+import { PagePreview, type Milestone } from "./preview";
 import { LibraryPanel } from "./library";
 import { libraryPath } from "./libraryfile";
 import { PreambleDialog, type Preamble } from "./preambledialog";
@@ -138,11 +138,12 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
 
 // ---- The Page preview (Ctrl+Shift+P), open or not remembered on this Device ----
 
-const preview = new PagePreview($("preview"), $("preview-bar"), $("preview-pages"), $<HTMLSelectElement>("preview-look"), {
+const preview = new PagePreview($("preview"), $("preview-bar"), $("preview-pages"), $<HTMLSelectElement>("preview-look"), $<HTMLSelectElement>("preview-version"), {
   settled: (id) => tabs.settled(id),
   reveal: (id, from, to) => void tabs.reveal(id, from, to),
   cursorOf: (id) => tabs.cursorOf(id),
   looksOf: async (id) => (await invoke<{ preamble: Preamble }>("get_preamble", { id })).preamble.looks,
+  milestonesOf: (id) => invoke<Milestone[]>("get_milestones", { id }),
   error: showError,
 });
 
@@ -212,6 +213,17 @@ async function editPreamble(id: string) {
   if (state === undefined) return; // cancelled
   if (state) tabs.status(id, state);
   await preambleChanged(id);
+}
+
+/** Names the current point in a Work's History, to look back at later. (A stopgap until the
+ *  History view in Phase 5, which is where Milestones will be made and compared.) */
+async function nameMilestone(id: string) {
+  const name = await askText(`Name this point in ${id}'s History:`, "", "Name it",
+    "E.g. Draft 2, sent to editor. The Page preview can show the Work as it was then, at any time.");
+  if (name === null) return;
+  const state = await invoke<WorkState | null>("make_milestone", { id, name });
+  if (state) tabs.status(id, state);
+  await preview.milestonesChanged(id);
 }
 
 /** A Work's Preamble changed: its editor's Story elements and its pages follow. */
@@ -567,6 +579,7 @@ $("sidebar").addEventListener("contextmenu", (e) => {
       entry.kind === "work" ? [
         { label: "Open", run: run(() => openWork(entry.id)) },
         { label: "Preamble…", run: run(() => editPreamble(entry.id)) },
+        { label: "Name a Milestone…", run: run(() => nameMilestone(entry.id)) },
         "separator",
         { label: "Rename…", run: run(() => renameWork(entry.id)) },
         { label: "Move to trash", run: run(() => trashWork(entry.id)) },

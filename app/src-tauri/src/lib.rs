@@ -171,17 +171,26 @@ fn work_text(state: State<AppState>, id: String) -> Result<WorkText, String> {
 /// Typesets a Work's text as it is now, the open burst included, for the Page preview. It runs
 /// off the main thread, and takes the app's lock only to read the text.
 /// `look`: the Look to render (picked in the preview, remembered on this Device), else the Work's first.
+/// `milestone`: render the Work as it was at that Milestone instead (its pages are then under
+/// the preview ID `<id>@<milestone>`, apart from the Work's own).
 #[tauri::command]
-async fn compile_preview(handle: AppHandle, id: String, look: Option<String>) -> Result<typeset::Compiled, String> {
+async fn compile_preview(handle: AppHandle, id: String, look: Option<String>, milestone: Option<String>) -> Result<typeset::Compiled, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (text, header, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
             let vault = open_vault_of(app)?;
-            let (text, header) = vault.typeset_input(&id, look.as_deref(), now_ms())?;
+            let (text, header) = match &milestone {
+                Some(m) => vault.typeset_input_at(&id, m, look.as_deref(), now_ms())?,
+                None => vault.typeset_input(&id, look.as_deref(), now_ms())?,
+            };
             Ok((text, header, vault.root.join("fonts")))
         })?;
+        let key = match &milestone {
+            Some(m) => format!("{id}@{m}"),
+            None => id,
+        };
         let state = handle.state::<TypesetState>();
         let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(typesetter.compile_with(&id, &fonts_dir, &header, text))
+        Ok(typesetter.compile_with(&key, &fonts_dir, &header, text))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -197,6 +206,18 @@ async fn preview_page(handle: AppHandle, id: String, page: usize, known: Option<
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// A Work's Milestones, oldest first, for the Page preview's picker.
+#[tauri::command]
+fn get_milestones(state: State<AppState>, id: String) -> Result<Vec<vault::MilestoneInfo>, String> {
+    with_app(&state, |app| open_vault_of(app)?.milestones(&id, now_ms()))
+}
+
+/// Names the current point in a Work's History. Returns the open Work's state.
+#[tauri::command]
+fn make_milestone(state: State<AppState>, id: String, name: String) -> Result<Option<WorkState>, String> {
+    with_app(&state, |app| open_vault_of(app)?.make_milestone(&id, &name, now_ms()))
 }
 
 /// A Work's Preamble, for the dialog. The Work needn't be open.
@@ -497,6 +518,8 @@ pub fn run() {
             complete_at,
             get_preamble,
             set_preamble,
+            get_milestones,
+            make_milestone,
             get_library,
             read_library,
             write_library,

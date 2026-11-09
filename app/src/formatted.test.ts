@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EditorState } from "@codemirror/state";
+import { Compartment, EditorState } from "@codemirror/state";
 import { bracketsForTests, spansForTests } from "./formatted";
 import { parseMarkup } from "./markup";
 import { elementsFacet, type ElementInfo } from "./elements";
@@ -46,6 +46,17 @@ describe("a Story element's brackets in the Formatted view", () => {
     // ". Aft" and the hidden "]" between them, typed over with "!":
     s = s.update({ changes: { from: 14, to: 20, insert: "!" }, userEvent: "input.type" }).state;
     expect(s.doc.toString()).toBe("#epigraph[Long!]er.");
+  });
+
+  it("survive switching to the Raw view and back, again and again", () => {
+    const view = new Compartment();
+    let s = EditorState.create({ doc: "#epigraph[Long.]", extensions: [elementsFacet.of(elements), view.of(bracketsForTests)] });
+    for (let i = 0; i < 3; i++) {
+      s = s.update({ effects: view.reconfigure([]) }).state; // the Raw view
+      s = s.update({ effects: view.reconfigure(bracketsForTests) }).state; // the Formatted view again
+    }
+    s = del(s, 9, 10); // and its brackets are still kept
+    expect(s.doc.toString()).toBe("#epigraph[Long.]");
   });
 
   it("never change what comes from the History", () => {

@@ -34,6 +34,39 @@ pub fn split_marker(file: &str) -> (String, Option<Vec<(DeviceId, u32)>>) {
     (file, None)
 }
 
+/// The first line of the header the app puts at the top of a Text file: the Work's Preamble as
+/// Typst (its Story elements, Styles and Looks), so the file compiles on its own (ADR 0011).
+/// Like the marker line, it's never part of the Work's text: it's added when the file is
+/// written and taken off when it's read. Only its start is checked, so an edit to the rest of
+/// this line still finds it.
+pub const HEADER_START: &str = "// ---- This Work's Preamble, made by Wrtier from its History. Change it in the app's Preamble dialog: edits here are dropped. ----\n";
+const HEADER_START_CHECK: &str = "// ---- This Work's Preamble";
+/// The header's last line.
+pub const HEADER_END: &str = "// ---- End of the Preamble ----\n";
+
+/// A Text file's contents: the header (empty for none), `text`, then the marker line.
+pub fn with_header_and_marker(header: &str, text: &str, version: &[(DeviceId, u32)]) -> String {
+    with_marker(&format!("{header}{text}"), version)
+}
+
+/// Takes the header off the top of a Text file's text (after `split_marker`): the header as it
+/// is in the file, and the Work's text after it. Without a header (an older Text file, or one
+/// from elsewhere), or with its end line gone, all of it is text.
+pub fn split_header(text: &str) -> (Option<String>, String) {
+    if !text.starts_with(HEADER_START_CHECK) {
+        return (None, text.to_string());
+    }
+    let end = HEADER_END.trim_end();
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        at += line.len();
+        if line.trim_end() == end {
+            return (Some(text[..at].to_string()), text[at..].to_string());
+        }
+    }
+    (None, text.to_string())
+}
+
 fn parse_version(s: &str) -> Option<Vec<(DeviceId, u32)>> {
     s.split(',').map(str::trim).filter(|p| !p.is_empty())
         .map(|p| p.parse::<ChangeId>().ok().map(|id| (id.device, id.counter)))
@@ -265,6 +298,26 @@ mod tests {
         // An edited or missing marker: the whole file is text, compared the old way.
         assert_eq!(split_marker("abc\n// Wrtier version: garbled\n").1, None);
         assert_eq!(split_marker("plain text from elsewhere\n"), ("plain text from elsewhere\n".to_string(), None));
+    }
+
+    #[test]
+    fn the_header_comes_off_exactly() {
+        let header = format!("{HEADER_START}#let part(title) = title\n{HEADER_END}");
+        let version = vec![(DeviceId(1), 5)];
+        for text in ["", "= Rain\n\nThe rain had stopped.", "\n"] {
+            let file = with_header_and_marker(&header, text, &version);
+            let (body, marked) = split_marker(&file);
+            assert_eq!(marked, Some(version.clone()));
+            assert_eq!(split_header(&body), (Some(header.clone()), text.to_string()), "{text:?}");
+        }
+        // No header (an older Text file), or its end line deleted: all of it is text.
+        assert_eq!(split_header("= Rain\n"), (None, "= Rain\n".to_string()));
+        let broken = format!("{HEADER_START}#let x = 1\nThe rain.");
+        assert_eq!(split_header(&broken), (None, broken.clone()));
+        // Edited inside, and with Windows line endings (split_marker turns them back).
+        let edited = format!("{HEADER_START}#let part(title) = strong(title)\n{HEADER_END}Text.").replace('\n', "\r\n");
+        let (body, _) = split_marker(&edited);
+        assert_eq!(split_header(&body).1, "Text.");
     }
 
     fn chars(s: &str) -> Vec<char> {

@@ -179,6 +179,9 @@ pub struct OpenWork {
     /// library generation): an edit after the library changed records the new versions first.
     styles_checked: Option<u64>,
     pub style_notice: Option<String>,
+    /// The Vault's folder: the Text file's header falls back to its Style library for anything
+    /// the Work hasn't recorded yet.
+    pub vault_root: PathBuf,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -201,6 +204,7 @@ impl OpenWork {
             whereabouts: None,
             styles_checked: None,
             style_notice: None,
+            vault_root: PathBuf::new(),
             mine,
             db_stamp,
             typ_stamp,
@@ -261,6 +265,19 @@ impl OpenWork {
         let changes = crate::preamble::record_unrecorded(&mut self.doc, shelf, now_ms);
         self.unsaved.extend(changes);
         self.style_notice = None;
+    }
+
+    /// Names the current point in the History. The open burst closes, and changed Styles are
+    /// recorded first, so the Milestone holds what the Page preview shows now.
+    pub fn make_milestone(&mut self, name: &str, shelf: &crate::preamble::Shelf, generation: u64, now_ms: u64) -> WorkState {
+        self.close_burst(now_ms);
+        self.styles_checked = None;
+        self.record_styles(Some((shelf, generation)), now_ms);
+        let change = self.doc.make_milestone_local(name, now_ms);
+        self.unsaved.push(change);
+        self.save();
+        self.keep_recovery(false);
+        self.state(Vec::new())
     }
 
     /// The Author changed the Preamble (in the dialog): it's recorded at once, with the
@@ -660,11 +677,15 @@ impl OpenWork {
         // The Text file and its copies. An edit there is recorded at once, which can't happen
         // while a burst is open: it waits (a few seconds at most).
         let mut edited = false;
+        let mut header_dropped = false;
         if self.doc.burst().is_some() {
             self.typ_waiting = true;
         } else {
             let texts = conflict_copies(&self.typ).into_iter().chain(self.typ.exists().then(|| self.typ.clone()));
             for path in texts.collect::<Vec<_>>() {
+                // The header as it's in the file, to tell whether someone edited it there.
+                let header_in_file = std::fs::read_to_string(&path).ok()
+                    .and_then(|c| wrtier::text_file::split_header(&wrtier::text_file::split_marker(&c).0).0);
                 let read = storage::read_text_file(&self.db, &path, &mut self.doc, now_ms);
                 let is_copy = path != self.typ;
                 if !is_copy {
@@ -672,7 +693,11 @@ impl OpenWork {
                 }
                 match read {
                     Ok(storage::TextFileRead::Imported(changes)) => {
-                        edited = true;
+                        // Edits inside the header aren't the Work's text: dropped, and said so.
+                        if header_in_file.is_some_and(|h| h != self.text_file_header()) {
+                            header_dropped = true;
+                        }
+                        edited |= !changes.is_empty();
                         self.mine.extend(changes);
                         self.text_file_behind = true; // written again, with its marker line
                         if is_copy { let _ = std::fs::remove_file(&path); }
@@ -694,6 +719,10 @@ impl OpenWork {
         }
         if edited {
             lines.push(format!("Took in an edit made to {} in another program.", file_name(&self.typ)));
+        }
+        if header_dropped {
+            lines.push(format!("Edits to the Preamble at the top of {} were dropped: it's made from the Work's History. \
+                Change it with Preamble… on the Work.", file_name(&self.typ)));
         }
         self.took_in = (!lines.is_empty()).then(|| lines.join(" "));
         Ok(())
@@ -719,6 +748,11 @@ impl OpenWork {
         self.write_text_file(now_ms);
     }
 
+    /// What goes at the top of the Text file: the Work's Preamble, from its recorded copies.
+    fn text_file_header(&self) -> String {
+        crate::preamble::text_file_header(&self.doc, &crate::preamble::Shelf::read(&self.vault_root))
+    }
+
     /// Writes the Text file if it lags behind. Never over a file this Work hasn't read yet (an
     /// edit made in another program, taken in at the next `Sync`), or one written from Changes
     /// that haven't arrived yet (it's newer).
@@ -726,7 +760,7 @@ impl OpenWork {
         if !self.text_file_behind || !self.unsaved.is_empty() || self.typ_newer || stamp(&self.typ) != self.typ_stamp || self.is_lost() {
             return;
         }
-        match storage::write_text_file(&self.db, &self.typ, &self.doc, now_ms) {
+        match storage::write_text_file(&self.db, &self.typ, &self.doc, &self.text_file_header(), now_ms) {
             Ok(()) => {
                 self.text_file_behind = false;
                 self.text_file_written_ms = now_ms;
@@ -759,16 +793,17 @@ mod tests {
         } else {
             storage::save(&db, &[], &doc).unwrap();
         }
-        storage::write_text_file(&db, &typ, &doc, 100).unwrap();
+        storage::write_text_file(&db, &typ, &doc, "", 100).unwrap();
         let (_, doc) = storage::load(&db, DeviceId(1)).unwrap();
         let recovery = Recovery::for_work(&dir.path().join("recovery"), dir.path(), "w");
         let mine = storage::read_all(&db).unwrap();
         (dir, OpenWork::new(db, typ, doc, 100, recovery, Vec::new(), mine))
     }
 
-    /// A Text file's text, without its marker line.
+    /// A Text file's text, without its header and marker line.
     fn text_of(path: &Path) -> String {
-        wrtier::text_file::split_marker(&std::fs::read_to_string(path).unwrap()).0
+        let (body, _) = wrtier::text_file::split_marker(&std::fs::read_to_string(path).unwrap());
+        wrtier::text_file::split_header(&body).1
     }
 
     /// Another Device (the phone) adds `text` at `at` straight into the Work's `.db`, as if

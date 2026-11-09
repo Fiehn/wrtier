@@ -163,7 +163,8 @@ pub struct Used {
 pub enum Version {
     /// The Style library's version if it has one (the Page preview), else the Work's own copy.
     Library,
-    /// Only what the Work recorded (a Milestone, a Text file, an Export).
+    /// What the Work recorded (a Milestone, a Text file, an Export); the library's version only
+    /// for something it never recorded (a new Work, before its first edit).
     Recorded,
 }
 
@@ -188,7 +189,7 @@ fn find(doc: &Doc, shelf: &Shelf, version: Version, kind: Kind, name: &str) -> O
         .map(|(_, content)| Used { kind, name: name.to_string(), content: content.to_string(), label: format!("the app's {name}") });
     match version {
         Version::Library => in_library().or_else(recorded).or_else(built_in),
-        Version::Recorded => recorded().or_else(built_in),
+        Version::Recorded => recorded().or_else(in_library).or_else(built_in),
     }
 }
 
@@ -320,8 +321,13 @@ pub struct Header {
     pub missing: Vec<String>,
 }
 
-pub const HEADER_START: &str = "// ---- This Work's Preamble, made by Wrtier from its History. Change it in the app's Preamble dialog: edits here are dropped. ----\n";
-pub const HEADER_END: &str = "// ---- End of the Preamble ----\n";
+pub use wrtier::text_file::{HEADER_END, HEADER_START};
+
+/// The header of a Work's Text file: its recorded copies, rendered in its first Look, so the
+/// file compiles on its own exactly as the Work was recorded (ADR 0011).
+pub fn text_file_header(doc: &Doc, shelf: &Shelf) -> String {
+    header(doc, uses(doc, shelf, Version::Recorded), None).text
+}
 
 /// A Typst string literal.
 fn string(s: &str) -> String {

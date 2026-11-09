@@ -833,10 +833,11 @@ fn version_from_str(s: &str) -> Result<Vec<(DeviceId, u32)>> {
 /// Writes the Work's text to its Text file, and records the file's hash and the version it was
 /// built from, so the app recognises it later (on any Device, also in Conflict copies).
 /// The file is written next to itself first and then renamed over it, so a crash never leaves
-/// half a file.
-pub fn write_text_file(db: &Path, text_file: &Path, doc: &Doc, now_ms: u64) -> Result<()> {
-    // The text, then the line naming the version it was written from (ADR 0010).
-    let text = crate::text_file::with_marker(&doc.committed_text(), &doc.version());
+/// half a file. `header`: the Typst the app puts before the text (the Work's Preamble, ADR
+/// 0011), or "" for none; it's never part of the Work's text.
+pub fn write_text_file(db: &Path, text_file: &Path, doc: &Doc, header: &str, now_ms: u64) -> Result<()> {
+    // The header, the text, then the line naming the version it was written from (ADR 0010).
+    let text = crate::text_file::with_header_and_marker(header, &doc.committed_text(), &doc.version());
     let conn = Connection::open(db)?;
     migrate(&conn)?;
     conn.execute(
@@ -880,6 +881,8 @@ pub fn read_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -
         return Ok(TextFileRead::Known);
     }
     let (text, marked) = crate::text_file::split_marker(&contents);
+    // The header isn't the Work's text: an edit made inside it is dropped (the app says so).
+    let (_, text) = crate::text_file::split_header(&text);
     let base = match marked {
         Some(version) => {
             let seen: HashMap<DeviceId, u32> = doc.version().into_iter().collect();
@@ -957,14 +960,15 @@ pub fn wrote_text(db: &Path, text: &str) -> Result<bool> {
 }
 
 /// Keeps a Work's Text file in step: records an External edit if there is one, then writes the
-/// current text. Returns the Changes the External edit became (empty if there was none). A
-/// file written from Changes this History doesn't have yet is left alone: it's newer.
-pub fn sync_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -> Result<Vec<Change>> {
+/// current text (after `header`, see `write_text_file`). Returns the Changes the External edit
+/// became (empty if there was none). A file written from Changes this History doesn't have yet
+/// is left alone: it's newer.
+pub fn sync_text_file(db: &Path, text_file: &Path, doc: &mut Doc, header: &str, now_ms: u64) -> Result<Vec<Change>> {
     let read = if text_file.exists() { read_text_file(db, text_file, doc, now_ms)? } else { TextFileRead::Known };
     match read {
         TextFileRead::NotYet => Ok(Vec::new()),
-        TextFileRead::Known => write_text_file(db, text_file, doc, now_ms).map(|()| Vec::new()),
-        TextFileRead::Imported(changes) => write_text_file(db, text_file, doc, now_ms).map(|()| changes),
+        TextFileRead::Known => write_text_file(db, text_file, doc, header, now_ms).map(|()| Vec::new()),
+        TextFileRead::Imported(changes) => write_text_file(db, text_file, doc, header, now_ms).map(|()| changes),
     }
 }
 
@@ -1189,9 +1193,9 @@ mod test {
         let mut doc = Doc::new(DeviceId(1));
         let typed = doc.insert_local(0, "The rain had stopped.\n", 1000);
         save(&db, &[typed], &doc).unwrap();
-        write_text_file(&db, &typ, &doc, 1500).unwrap();
+        write_text_file(&db, &typ, &doc, "", 1500).unwrap();
         assert_eq!(text_of(&typ), "The rain had stopped.\n");
-        assert!(sync_text_file(&db, &typ, &mut doc, 2000).unwrap().is_empty());
+        assert!(sync_text_file(&db, &typ, &mut doc, "", 2000).unwrap().is_empty());
     }
 
     /// A Text file's text, without its marker line.
@@ -1211,10 +1215,10 @@ mod test {
         phone.apply(&base);
         let theirs = phone.insert_local(3, "def", 2000);
         save(&phone_db, &[base, theirs.clone()], &phone).unwrap();
-        write_text_file(&phone_db, &typ, &phone, 2500).unwrap();
+        write_text_file(&phone_db, &typ, &phone, "", 2500).unwrap();
 
         assert_eq!(read_text_file(&laptop_db, &typ, &mut laptop, 3000).unwrap(), TextFileRead::NotYet);
-        assert!(sync_text_file(&laptop_db, &typ, &mut laptop, 3000).unwrap().is_empty());
+        assert!(sync_text_file(&laptop_db, &typ, &mut laptop, "", 3000).unwrap().is_empty());
         assert_eq!(text_of(&typ), "abcdef", "the newer file is left alone");
         assert_eq!(laptop.text(), "abc", "and nothing was recorded");
 
@@ -1231,10 +1235,10 @@ mod test {
         let mut doc = Doc::new(DeviceId(1));
         let first = doc.insert_local(0, "One.\n", 1000);
         save(&db, &[first], &doc).unwrap();
-        write_text_file(&db, &typ, &doc, 1500).unwrap(); // written from "One.\n"
+        write_text_file(&db, &typ, &doc, "", 1500).unwrap(); // written from "One.\n"
         let second = doc.insert_local(5, "Two.\n", 2000);
         save(&db, std::slice::from_ref(&second), &doc).unwrap();
-        write_text_file(&db, &typ, &doc, 2500).unwrap(); // and again from "One.\nTwo.\n"
+        write_text_file(&db, &typ, &doc, "", 2500).unwrap(); // and again from "One.\nTwo.\n"
         // vim edits the first of the two files written (say, a Conflict copy of it), marker and all.
         let old = crate::text_file::with_marker("One!\n", &[(DeviceId(1), 1)]);
         let copy = dir.path().join("work.sync-conflict-20261106-120000-ABCDEFG.typ");
@@ -1251,18 +1255,18 @@ mod test {
         let mut doc = Doc::new(DeviceId(1));
         let typed = doc.insert_local(0, "The rain had stopped.\n", 1000);
         save(&db, &[typed.clone()], &doc).unwrap();
-        write_text_file(&db, &typ, &doc, 1500).unwrap();
+        write_text_file(&db, &typ, &doc, "", 1500).unwrap();
         let more = doc.insert_local(22, "Gulls circled.\n", 2000); // the app goes on, unwritten
         save(&db, &[more], &doc).unwrap();
 
         std::fs::write(&typ, "The rain had eased.\n").unwrap(); // edited in vim
-        let recorded = sync_text_file(&db, &typ, &mut doc, 3000).unwrap();
+        let recorded = sync_text_file(&db, &typ, &mut doc, "", 3000).unwrap();
         assert!(!recorded.is_empty());
         assert_eq!(doc.text(), "The rain had eased.\nGulls circled.\n");
         assert_eq!(text_of(&typ), doc.text()); // rewritten with both
         let (_, reopened) = load(&db, DeviceId(1)).unwrap();
         assert_eq!(reopened.text(), doc.text());                         // and saved
-        assert!(sync_text_file(&db, &typ, &mut doc, 4000).unwrap().is_empty()); // recognised now
+        assert!(sync_text_file(&db, &typ, &mut doc, "", 4000).unwrap().is_empty()); // recognised now
     }
 
     #[test]
@@ -1277,7 +1281,7 @@ mod test {
         let theirs = phone.insert_local(3, "def", 2000);
         save(&laptop_db, &[base.clone()], &laptop).unwrap();
         save(&phone_db, &[base, theirs], &phone).unwrap();
-        write_text_file(&phone_db, &copy, &phone, 2500).unwrap(); // the phone's Text file, as a Conflict copy
+        write_text_file(&phone_db, &copy, &phone, "", 2500).unwrap(); // the phone's Text file, as a Conflict copy
         merge(&laptop_db, &phone_db).unwrap();
         let (_, mut laptop) = load(&laptop_db, DeviceId(1)).unwrap();
         assert!(import_text_file(&laptop_db, &copy, &mut laptop, 3000).unwrap().is_empty());
@@ -1455,7 +1459,7 @@ mod test {
         let (db, typ) = (dir.path().join("work.db"), dir.path().join("work.typ"));
         let mut doc = Doc::new(DeviceId(1));
         save(&db, &[doc.insert_local(0, "Once upon a time", 1000)], &doc).unwrap();
-        write_text_file(&db, &typ, &doc, 2000).unwrap();
+        write_text_file(&db, &typ, &doc, "", 2000).unwrap();
         let written = std::fs::read_to_string(&typ).unwrap(); // as a Text file found in the Vault
         assert!(wrote_text(&db, &written).unwrap());
         assert!(!wrote_text(&db, &written.replace("time", "time, edited")).unwrap());
@@ -1467,10 +1471,10 @@ mod test {
         let (db, typ) = (dir.path().join("work.db"), dir.path().join("work.typ"));
         let mut doc = Doc::new(DeviceId(1));
         save(&db, &[doc.insert_local(0, "abc", 1000)], &doc).unwrap();
-        write_text_file(&db, &typ, &doc, 2000).unwrap();
+        write_text_file(&db, &typ, &doc, "", 2000).unwrap();
         let written = std::fs::metadata(&typ).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        write_text_file(&db, &typ, &doc, 3000).unwrap();
+        write_text_file(&db, &typ, &doc, "", 3000).unwrap();
         assert_eq!(std::fs::metadata(&typ).unwrap().modified().unwrap(), written);
     }
 }
