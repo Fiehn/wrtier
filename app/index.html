@@ -11,17 +11,19 @@
   <body>
     <div id="app">
       <aside id="sidebar">
-        <header>
+        <!-- Three parts: opening a Vault and Settings at the top, then the Vault (scrolling by
+             itself), and at the bottom the Chapters of the Work in front. -->
+        <header id="sidebar-top">
           <div class="row">
             <button id="choose-vault" type="button">Open Vault…</button>
-            <button id="open-settings" type="button" title="Settings" hidden>Settings</button>
-            <button id="open-reviewers" type="button" title="The people whose feedback you record as Comments" hidden>Reviewers</button>
+            <button id="open-settings" type="button" title="Settings, Reviewers and keyboard shortcuts" hidden>Settings</button>
           </div>
           <div id="vault-root" class="muted"></div>
-          <div id="vault-actions" class="row" hidden>
-            <button id="open-switcher" type="button" title="Find a Work (Ctrl+O)">Find… <kbd id="open-switcher-key">Ctrl+O</kbd></button>
-          </div>
         </header>
+        <div id="sidebar-vault">
+        <div id="vault-actions" class="row" hidden>
+          <button id="open-switcher" type="button" title="Find a Work (Ctrl+O)">Find… <kbd id="open-switcher-key">Ctrl+O</kbd></button>
+        </div>
         <ul id="works"></ul>
         <details id="library" hidden>
           <summary>Style library</summary>
@@ -37,6 +39,13 @@
           <summary>Trash</summary>
           <ul id="trash-list"></ul>
           <button id="empty-trash" type="button" class="link">Empty the trash…</button>
+        </details>
+        </div>
+        <!-- The Chapter list Mod: the Chapters of the Work in front, if it has the Mod here. -->
+        <details id="chapters" open hidden>
+          <summary>Chapters</summary>
+          <ol id="chapters-list"></ol>
+          <p id="chapters-none" class="muted" hidden>No Chapters yet. A line starting with “= ” starts one.</p>
         </details>
       </aside>
 
@@ -55,6 +64,8 @@
         <div id="moved" hidden></div>
         <div id="status" hidden></div>
         <div id="panes"></div>
+        <!-- The word and character count Mod: the Work in front's counts, if it has the Mod here. -->
+        <div id="counts" hidden></div>
         <p id="empty" class="muted">Open a Vault, then choose a Work on the left, or press Ctrl+O.</p>
       </main>
 
@@ -301,6 +312,18 @@
       </form>
     </dialog>
 
+    <dialog id="mods">
+      <form method="dialog" class="mods-form">
+        <h2 id="mods-heading">Mods</h2>
+        <p class="muted">Optional features for this Work. They change how you see and work on it, never its text or how its pages look. Kept in the Vault, not in the Work's History, so returning to a Milestone leaves them as they are.</p>
+        <p id="mods-error" class="dialog-error" hidden></p>
+        <ul id="mods-list" class="mod-list"></ul>
+        <menu>
+          <button value="done">Done</button>
+        </menu>
+      </form>
+    </dialog>
+
     <dialog id="settings">
       <form method="dialog">
         <h2>Settings</h2>
@@ -324,7 +347,12 @@
         <label class="here"><input type="checkbox" id="preview-follows-here" /> Only on this device</label>
         <label class="check"><input type="checkbox" id="comment-highlights" /> Show Comment highlights in the text</label>
         <label class="here"><input type="checkbox" id="comment-highlights-here" /> Only on this device</label>
-        <p><button type="button" id="open-shortcuts">Keyboard shortcuts…</button></p>
+        <p class="row">
+          <button type="button" id="open-reviewers" title="The people whose feedback you record as Comments">Reviewers…</button>
+          <button type="button" id="open-shortcuts">Keyboard shortcuts…</button>
+        </p>
+        <h3>Mods for new Works</h3>
+        <ul id="new-work-mods" class="mod-list"></ul>
         <p class="muted">Settings are kept in the Vault, so every device that opens it uses them, unless it has its own.</p>
         <menu>
           <button value="done">Done</button>

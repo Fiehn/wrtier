@@ -5,8 +5,10 @@
 // so the editor's own keymap can use them as they are.
 
 export type CommandId =
-  | "toggleWorks" | "quickSwitcher" | "closeTab" | "toggleView" | "togglePanel" | "preamble"
-  | "undo" | "redo" | "redoAlt" | "strong" | "emph" | "addComment" | "textHistory";
+  | "toggleWorks" | "quickSwitcher" | "closeTab" | "toggleView" | "togglePanel" | "preamble" | "mods"
+  | "undo" | "redo" | "redoAlt" | "strong" | "emph" | "addComment" | "textHistory"
+  // The Chapter list Mod's
+  | "nextChapter" | "previousChapter" | "chapterUp" | "chapterDown";
 
 export type Command = {
   id: CommandId;
@@ -14,6 +16,11 @@ export type Command = {
   /** "app": anywhere in the app; "editor": while writing in a Work. */
   where: "app" | "editor";
   key: string;
+  /**
+   * The Mod it belongs to (mods.ts), if any. It's listed under that Mod whether or not any Work
+   * has it, so its key is settled once; in a Work without the Mod, its key offers to add it.
+   */
+  mod?: string;
 };
 
 export const COMMANDS: Command[] = [
@@ -23,6 +30,7 @@ export const COMMANDS: Command[] = [
   { id: "toggleView", label: "Formatted or Raw view", where: "app", key: "Mod-e" },
   { id: "togglePanel", label: "Show or hide the panel", where: "app", key: "Mod-Shift-p" },
   { id: "preamble", label: "The Work's Preamble", where: "app", key: "Mod-Shift-l" },
+  { id: "mods", label: "The Work's Mods", where: "app", key: "Mod-Shift-k" },
   { id: "undo", label: "Undo", where: "editor", key: "Mod-z" },
   { id: "redo", label: "Redo", where: "editor", key: "Mod-Shift-z" },
   { id: "redoAlt", label: "Redo (a second key)", where: "editor", key: "Mod-y" },
@@ -30,6 +38,10 @@ export const COMMANDS: Command[] = [
   { id: "emph", label: "Emphasis (italic)", where: "editor", key: "Mod-i" },
   { id: "addComment", label: "Add a Comment", where: "editor", key: "Mod-Shift-m" },
   { id: "textHistory", label: "History of this text (the selection, or the paragraph)", where: "editor", key: "Mod-Shift-h" },
+  { id: "nextChapter", label: "Go to the next Chapter", where: "editor", key: "Alt-PageDown", mod: "chapters" },
+  { id: "previousChapter", label: "Go to the previous Chapter", where: "editor", key: "Alt-PageUp", mod: "chapters" },
+  { id: "chapterUp", label: "Move this Chapter up (a Move)", where: "editor", key: "Alt-Shift-PageUp", mod: "chapters" },
+  { id: "chapterDown", label: "Move this Chapter down (a Move)", where: "editor", key: "Alt-Shift-PageDown", mod: "chapters" },
 ];
 
 /** Each command's key; null: it has none. */

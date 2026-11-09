@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   bindings, COMMANDS, commandWith, display, keyOfEvent, mayBeAltGr, normalize, problemWith, setRecording, type Command, type CommandId,
 } from "./keys";
+import { MODS } from "./mods";
 
 /** The part of the settings that's about shortcuts (vault/settings.rs). */
 type ShortcutSettings = { shortcuts: Record<string, string>; shortcutsHere: boolean };
@@ -18,9 +19,11 @@ export type ShortcutsHooks<S extends ShortcutSettings> = {
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
-const GROUPS: { where: Command["where"]; title: string }[] = [
-  { where: "app", title: "Anywhere in the app" },
-  { where: "editor", title: "While writing" },
+/** The app's own commands by where they work, then each Mod's under its name. */
+const GROUPS: { title: string; has: (c: Command) => boolean }[] = [
+  { title: "Anywhere in the app", has: (c) => !c.mod && c.where === "app" },
+  { title: "While writing", has: (c) => !c.mod && c.where === "editor" },
+  ...MODS.map((m) => ({ title: `${m.name} (a Mod)`, has: (c: Command) => c.mod === m.id })),
 ];
 
 export async function openShortcuts<S extends ShortcutSettings>(settings: S, hooks: ShortcutsHooks<S>): Promise<void> {
@@ -43,9 +46,11 @@ export async function openShortcuts<S extends ShortcutSettings>(settings: S, hoo
     const keys = bindings();
     here.checked = settings.shortcutsHere;
     list.replaceChildren(...GROUPS.flatMap((group) => {
+      const commands = COMMANDS.filter(group.has);
+      if (commands.length === 0) return [];
       const heading = document.createElement("h3");
       heading.textContent = group.title;
-      const rows = COMMANDS.filter((c) => c.where === group.where).map((command) => {
+      const rows = commands.map((command) => {
         const row = document.createElement("div");
         row.className = "shortcut-row";
         const label = document.createElement("span");

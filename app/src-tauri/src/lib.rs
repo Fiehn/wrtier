@@ -542,6 +542,30 @@ fn save_as_new(state: State<AppState>, id: String, name: String) -> Result<Opene
     with_app(&state, |app| open_vault_of(app)?.save_as_new(&id, &name, now_ms()))
 }
 
+/// The Mods of a Work (if `id` is given), the Mods for new Works, and those hidden on this Device.
+#[tauri::command]
+fn get_mods(state: State<AppState>, id: Option<String>) -> Result<vault::Mods, String> {
+    with_app(&state, |app| open_vault_of(app)?.mods(id.as_deref()))
+}
+
+/// Adds a Mod to a Work, or removes it.
+#[tauri::command]
+fn set_mod(state: State<AppState>, id: String, name: String, on: bool) -> Result<vault::Mods, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_mod(&id, &name, on, now_ms()))
+}
+
+/// Whether new Works start with a Mod.
+#[tauri::command]
+fn set_new_work_mod(state: State<AppState>, name: String, on: bool) -> Result<vault::Mods, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_new_work_mod(&name, on, now_ms()))
+}
+
+/// Hides a Mod on this Device, or shows it again.
+#[tauri::command]
+fn set_mod_hidden(state: State<AppState>, name: String, hidden: bool) -> Result<vault::Mods, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_mod_hidden(&name, hidden, now_ms()))
+}
+
 #[tauri::command]
 fn get_settings(state: State<AppState>) -> Result<vault::Settings, String> {
     with_app(&state, |app| Ok(open_vault_of(app)?.settings()))
@@ -684,6 +708,10 @@ pub fn run() {
             save_as_new,
             get_settings,
             set_setting,
+            get_mods,
+            set_mod,
+            set_new_work_mod,
+            set_mod_hidden,
             set_shortcuts,
             reset_shortcuts,
             set_shortcuts_here,

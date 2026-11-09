@@ -89,10 +89,12 @@ pub struct PreambleView {
 const DEFAULTS_RECORD: &str = "defaults";
 
 mod history;
+mod mods;
 mod moves;
 mod reviewers;
 mod settings;
 pub use history::{ComparisonView, HistoryView, RestorePreview, ReturnPreview, RevertPreview, SnippetsView};
+pub use mods::Mods;
 pub use moves::TrashedWork;
 pub use reviewers::{Reviewer, COLOURS};
 pub use settings::Settings;
@@ -676,6 +678,7 @@ impl Vault {
         storage::save(&db, &changes, &doc).map_err(err)?;
         let header = preamble::text_file_header(&doc, &Shelf::read(&self.root));
         storage::write_text_file(&db, &typ, &doc, &header, now_ms).map_err(err)?;
+        self.give_new_work_mods(&work_id, now_ms)?;
         self.open_work(&id, now_ms)
     }
 

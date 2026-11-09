@@ -12,8 +12,12 @@ import { openReviewers, type Reviewer } from "./reviewers";
 import { SidePanel } from "./sidepanel";
 import { CommentsPanel } from "./commentspanel";
 import { HistoryPanel, type ComparisonView, type HistoryView, type RestorePreview, type ReturnPreview, type RevertPreview, type SnippetsView } from "./historypanel";
-import { bindingsFrom, isCommand, keyLabel, onBindingsChanged, setBindings, withKey, type CommandId } from "./keys";
+import { bindingsFrom, COMMANDS, isCommand, keyLabel, onBindingsChanged, setBindings, withKey, type CommandId } from "./keys";
 import { openShortcuts } from "./shortcutsdialog";
+import { fillNewWorkMods, openMods } from "./modsdialog";
+import { inUse, modNamed, type ModsState } from "./mods";
+import { ChapterList } from "./chapterlist";
+import { CountLine } from "./countline";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -69,6 +73,23 @@ let infoTimer: number | undefined;
 function showInfo(text: string) {
   const el = $("info");
   el.textContent = text;
+  el.hidden = false;
+  clearTimeout(infoTimer);
+  infoTimer = window.setTimeout(() => (el.hidden = true), 10_000);
+}
+
+/** A line offering something, with a button that does it (and closes the line). */
+function offer(text: string, label: string, run: () => Promise<unknown>) {
+  const el = $("info");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "link";
+  button.textContent = label;
+  button.addEventListener("click", () => {
+    el.hidden = true;
+    act(run);
+  });
+  el.replaceChildren(`${text} `, button);
   el.hidden = false;
   clearTimeout(infoTimer);
   infoTimer = window.setTimeout(() => (el.hidden = true), 10_000);
@@ -147,15 +168,27 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     preview.show(tabs.activeIsWork ? tabs.active : null);
     commentsPanel.render();
     historyPanel.workChanged();
+    showModViews();
     rememberSoon();
     highlightOpen();
   },
   error: showError,
   askName: (question, initial) => askText(question, initial),
-  edited: (id) => preview.edited(id),
+  edited: (id) => {
+    preview.edited(id);
+    chapterList.edited(id);
+    countLine.edited(id);
+  },
   committed: (id) => preview.committed(id),
-  cursor: (id) => preview.cursor(id),
-  closed: (id) => preview.forget(id),
+  cursor: (id, at) => {
+    preview.cursor(id);
+    chapterList.cursor(id, at);
+    countLine.selected(id);
+  },
+  closed: (id) => {
+    preview.forget(id);
+    modsOf.delete(id);
+  },
   addElement: (id, name) => act(() => addElement(id, name)),
   openComments: (_id, ids) => {
     panel.setTab("comments");
@@ -171,6 +204,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
   notices: (count) => {
     $("panel-tab-history").textContent = count > 0 ? `History (${count})` : "History";
   },
+  modCommand: (id, command) => modCommand(id, command),
 });
 
 // ---- The side panel (Ctrl+Shift+P): the Page preview and the Comments ----
@@ -384,6 +418,90 @@ void listen("library-changed", () => {
   void preview.preambleChanged(tabs.activeIsWork ? tabs.active : null);
 });
 
+// ---- A Work's Mods ----
+
+/** Each open Work's Mods, as last asked (its own, and which this Device hides). */
+const modsOf = new Map<string, ModsState>();
+
+/** Is this Mod at work in this Work on this Device? */
+const modInUse = (id: string, mod: string) => inUse(modsOf.get(id) ?? { work: [], newWorks: [], hidden: [] }).some((m) => m.id === mod);
+
+function setModsOf(id: string, state: ModsState) {
+  modsOf.set(id, state);
+  tabs.setMods(id, inUse(state));
+  if (id === tabs.active) showModViews();
+}
+
+/** Tells each open Work's editor (or just `only`) which Mods are in use in it on this Device. */
+async function refreshMods(only?: string) {
+  for (const id of tabs.works) {
+    if (only && id !== only) continue;
+    try {
+      setModsOf(id, await invoke<ModsState>("get_mods", { id }));
+    } catch {
+      // renamed or gone meanwhile: its tab says so, and the next refresh finds it
+    }
+  }
+}
+
+async function editMods(id: string) {
+  await openMods(id, id.split("/").pop() ?? id, (state) => setModsOf(id, state));
+  await refreshMods(); // hiding a Mod on this Device changes every Work that has it
+}
+
+/**
+ * A Mod's command's key, pressed while writing in a Work: if the Work has the Mod (and this
+ * Device doesn't hide it), it runs; otherwise a line offers to add it, or to show it here.
+ */
+function modCommand(id: string, command: CommandId): boolean {
+  const mod = modNamed(COMMANDS.find((c) => c.id === command)?.mod ?? "");
+  if (!mod) return false;
+  if (modInUse(id, mod.id)) {
+    switch (command) {
+      case "nextChapter": return chapterList.step(id, 1);
+      case "previousChapter": return chapterList.step(id, -1);
+      case "chapterUp": return chapterList.shift(id, -1);
+      case "chapterDown": return chapterList.shift(id, 1);
+      default: return false;
+    }
+  }
+  const name = id.split("/").pop() ?? id;
+  if (modsOf.get(id)?.work.includes(mod.id)) {
+    offer(`The ${mod.name} is hidden on this device.`, "Show it", async () => {
+      await invoke("set_mod_hidden", { name: mod.id, hidden: false });
+      await refreshMods();
+    });
+  } else {
+    offer(`The ${mod.name} isn't on ${name}.`, "Add it", async () => {
+      setModsOf(id, await invoke<ModsState>("set_mod", { id, name: mod.id, on: true }));
+    });
+  }
+  return true;
+}
+
+// ---- The Chapter list (a Mod) ----
+
+const chapterList = new ChapterList($("chapters"), $("chapters-list"), $("chapters-none"), {
+  textOf: (id) => tabs.textOf(id),
+  cursorOf: (id) => tabs.cursorOf(id),
+  goTo: (id, at) => void tabs.reveal(id, at, at),
+  move: (id, moves, cursor) => tabs.moveText(id, moves, cursor),
+});
+
+// ---- The word and character count (a Mod) ----
+
+const countLine = new CountLine($("counts"), {
+  textOf: (id) => tabs.textOf(id),
+  selectedText: (id) => tabs.selectedText(id),
+});
+
+/** The Mods that show the Work in front (the Chapter list, the counts) follow it. */
+function showModViews() {
+  const id = tabs.activeIsWork ? tabs.active : null;
+  chapterList.show(id && modInUse(id, "chapters") ? id : null);
+  countLine.show(id && modInUse(id, "counts") ? id : null);
+}
+
 // ---- A Work's Preamble ----
 
 const preambleDialog = new PreambleDialog(ask);
@@ -535,6 +653,7 @@ async function openWork(id: string, cursor?: number) {
   const work = await invoke<OpenedWork>("open_work", { id });
   await tabs.add(work, cursor);
   await refreshElements(work.id);
+  await refreshMods(work.id);
   if (work.problems.length > 0) showProblems(work.problems);
   await refreshList(); // a Text file may have become a Work
 }
@@ -579,7 +698,6 @@ async function openVault(path: string) {
   loadOpenFolders();
   $("vault-actions").hidden = false;
   $("open-settings").hidden = false;
-  $("open-reviewers").hidden = false;
   if (opened.deviceName === null) await askDeviceName(opened.suggestedName);
   applySettings(await invoke<Settings>("get_settings"));
   await refreshList();
@@ -669,8 +787,7 @@ function workItem(entry: Entry): HTMLElement {
   if (entry.kind === "work") {
     actions.append(
       actionButton("Preamble…", withKey(`Looks, Styles, Story elements and settings of ${entry.id}`, "preamble"), () => editPreamble(entry.id)),
-      actionButton("Rename", `Rename ${entry.id}`, () => renameWork(entry.id)),
-      actionButton("Trash", `Move ${entry.id} to the trash`, () => trashWork(entry.id)),
+      actionButton("Mods…", withKey(`Optional features of ${entry.id}, such as spellcheck`, "mods"), () => editMods(entry.id)),
     );
   } else if (entry.kind === "leftover") {
     actions.append(actionButton("Delete it", "Delete the leftover Text file", () => deleteLeftover(entry.id)));
@@ -802,7 +919,8 @@ async function deleteLeftover(id: string) {
 }
 
 // Right-click: what can be done with a Work, a folder, or the Vault.
-$("sidebar").addEventListener("contextmenu", (e) => {
+// (Only in the Vault's part of the sidebar: the Chapters below aren't Works.)
+$("sidebar-vault").addEventListener("contextmenu", (e) => {
   if (!vaultOpen) return;
   e.preventDefault();
   const target = e.target as HTMLElement;
@@ -818,6 +936,7 @@ $("sidebar").addEventListener("contextmenu", (e) => {
       entry.kind === "work" ? [
         { label: "Open", run: run(() => openWork(entry.id)) },
         { label: "Preamble…", run: run(() => editPreamble(entry.id)) },
+        { label: "Mods…", run: run(() => editMods(entry.id)) },
         { label: "Name a Milestone…", run: run(() => nameMilestone(entry.id)) },
         { label: "Export PDF…", run: run(() => exportPdf(entry.id)) },
         { label: "Export .docx…", run: run(() => exportDocx(entry.id)) },
@@ -897,6 +1016,7 @@ async function refreshQuietly() {
   if (!vaultOpen || document.querySelector("dialog[open]")) return;
   try {
     await refreshList();
+    await refreshMods(); // another Device may have changed them
     remember();
   } catch (e) {
     showError(e);
@@ -1050,6 +1170,11 @@ const appCommands: Partial<Record<CommandId, () => boolean>> = {
     act(() => editPreamble(tabs.active!));
     return true;
   },
+  mods: () => {
+    if (!tabs.activeIsWork || !tabs.active) return false;
+    act(() => editMods(tabs.active!));
+    return true;
+  },
 };
 
 window.addEventListener("keydown", (e) => {
@@ -1130,6 +1255,7 @@ $("open-reviewers").addEventListener("click", () => act(async () => {
 
 $("open-settings").addEventListener("click", () => act(async () => {
   applySettings(await invoke<Settings>("get_settings")); // another Device may have changed them
+  await fillNewWorkMods($("new-work-mods"));
   await ask($<HTMLDialogElement>("settings"));
 }));
 

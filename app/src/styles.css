@@ -179,18 +179,38 @@ kbd {
   flex: none;
   background: var(--panel);
   border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* The top part: the Vault, its Works, the Style library and the trash. */
+#sidebar-vault {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 12px;
 }
 
-#sidebar header {
-  margin-bottom: 12px;
+/* The top part: Open Vault…, Settings, and the open Vault's path, under them a line. */
+#sidebar-top {
+  flex: none;
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--line);
 }
 
 #vault-root {
-  margin: 6px 0 10px;
+  margin: 6px 0 0;
   font-size: 12px;
   word-break: break-all;
+}
+
+#vault-root:empty {
+  display: none;
+}
+
+#vault-actions {
+  margin-bottom: 10px;
 }
 
 #works,
@@ -1970,4 +1990,161 @@ dialog#shortcuts {
   padding: 4px 8px;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 13px;
+}
+
+/* ---- Mods: the Mods dialog, and the Mods for new Works in Settings ---- */
+
+dialog#mods {
+  max-width: 520px;
+  max-height: calc(100vh - 32px);
+}
+
+.mods-form > p.muted {
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+
+.mod-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.mod-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.mod-row p {
+  margin: 2px 0 0 24px;
+  font-size: 13px;
+}
+
+.mod-row .mod-name {
+  font-weight: 600;
+}
+
+.mod-row label.here {
+  display: block;
+  margin: 4px 0 0 24px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.mod-row.unknown {
+  opacity: 0.6;
+}
+
+.mod-row.unknown p.mod-name {
+  margin-left: 0;
+}
+
+#settings h3 {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 18px 0 0;
+}
+
+#new-work-mods label.check {
+  margin-top: 6px;
+}
+
+/* ---- The Chapter list Mod (in the sidebar) ---- */
+
+/* The bottom part of the sidebar, under a line: as tall as its Chapters, up to half of it,
+   scrolling by itself beyond that. */
+#chapters {
+  flex: none;
+  max-height: 50%;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+  padding: 0 12px 12px;
+  font-size: 13px;
+}
+
+/* Its heading stays in view while the Chapters scroll under it. */
+#chapters summary {
+  position: sticky;
+  top: 0;
+  padding: 8px 0 4px;
+  background: var(--panel);
+  cursor: pointer;
+  color: var(--muted);
+}
+
+#chapters-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+#chapters-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border-top: 2px solid transparent;
+  cursor: pointer;
+}
+
+#chapters-list li.chapter:hover {
+  background: var(--chip);
+}
+
+#chapters-list li.current {
+  background: var(--chip);
+  font-weight: 600;
+}
+
+#chapters-list li.part {
+  margin-top: 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+#chapters-list li.chapter-end {
+  min-height: 10px;
+  cursor: default;
+}
+
+#chapters-list li.dragging {
+  opacity: 0.5;
+}
+
+/* Where a dragged Chapter will go: a line above the row it goes before. */
+#chapters-list li.drop-before {
+  border-top-color: var(--accent);
+}
+
+.chapter-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chapter-words {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: normal;
+}
+
+#chapters-none {
+  margin: 4px 0 0;
+}
+
+/* ---- The word and character count Mod (under the editor) ---- */
+
+#counts {
+  flex: none;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }

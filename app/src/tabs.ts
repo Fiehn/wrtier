@@ -15,8 +15,10 @@ import { dragToMove } from "./dragging";
 import { completions } from "./completion";
 import { commentClasses, commentHighlights, pendingRange, rangesOf, setMarks, setPending, type CommentOptions } from "./comments";
 import type { CommentOp, HistoryOp, Mark } from "./sync";
-import { bindings, withKey, type CommandId } from "./keys";
+import { bindings, COMMANDS, withKey, type CommandId } from "./keys";
+import { type MoveOp } from "./chapters";
 import { sessionTints, setTints } from "./sessiontints";
+import { modExtensions, type Mod } from "./mods";
 
 export type OpenedWork = { id: string; name: string; text: string; problems: { path: string; reason: string }[]; notice: string | null };
 
@@ -56,6 +58,8 @@ export type TabEvents = {
   textHistory(id: string): void;
   /** How many Merge notices the Work in front has (0 if it isn't a Work): "History (n)". */
   notices(count: number): void;
+  /** A Mod's command's key, while writing in a Work: it runs it, or offers to add the Mod. */
+  modCommand(id: string, command: CommandId): boolean;
 };
 
 const historyCompartment = new Compartment();
@@ -69,6 +73,8 @@ const elementsCompartment = new Compartment();
 const commentsCompartment = new Compartment();
 /** The editor's commands on the keys the Author gave them. */
 const keysCompartment = new Compartment();
+/** What the Work's Mods add to its editor (those in use on this Device). */
+const modsCompartment = new Compartment();
 
 export type EditorOptions = { lineNumbers: boolean; highlightLine: boolean };
 
@@ -93,6 +99,8 @@ class Tab {
   notice: string | null;
   /** Its Comments, as Rust last gave them. */
   marks: Mark[] = [];
+  /** The Mods in use in it on this Device (their IDs), as last set. */
+  mods: string[] = [];
 
   /** A Work's sync (only Work tabs have one). */
   get sync(): WorkSync {
@@ -184,6 +192,7 @@ class Tab {
           commentHighlights(() => tabs.commentOptions, (ids) => tabs.events.openComments(this.id, ids)),
           commentsCompartment.of(commentClasses(tabs.commentOptions)),
           sessionTints(),
+          modsCompartment.of([]),
           EditorView.updateListener.of((update) => {
             for (const tr of update.transactions) this.sync.track(tr);
             if (update.docChanged) tabs.events.edited(this.sync.id);
@@ -260,6 +269,10 @@ class Tab {
         return true;
       },
     };
+    // A Mod's commands are on their keys in every Work: one without the Mod offers to add it.
+    for (const command of COMMANDS) {
+      if (command.mod) run[command.id] = () => tabs.events.modCommand(this.id, command.id);
+    }
     const keys = bindings();
     return keymap.of(Object.entries(run).flatMap(([command, action]) => {
       const key = keys[command as CommandId];
@@ -415,6 +428,46 @@ export class Tabs {
       (tab.label.querySelector(".tab-close") as HTMLElement).title = withKey("Close", "closeTab");
       if (tab.isWork) tab.view.dispatch({ effects: keysCompartment.reconfigure(tab.editorKeys(this)) });
     }
+  }
+
+  /** The text selected in a Work ("" if nothing is; null if it isn't open). */
+  selectedText(id: string): string | null {
+    const tab = this.find(id);
+    if (!tab?.isWork) return null;
+    const { from, to } = tab.view.state.selection.main;
+    return tab.view.state.sliceDoc(from, to);
+  }
+
+  /** A Work's text as its editor has it now (null if it isn't open). */
+  textOf(id: string): string | null {
+    const tab = this.find(id);
+    return tab?.isWork ? tab.view.state.doc.toString() : null;
+  }
+
+  /**
+   * Moves text in a Work, as Moves (each in the text the ones before it left), so it keeps its
+   * History and Comments; then puts the cursor at `cursor` (in the text after them) and shows it.
+   */
+  moveText(id: string, moves: MoveOp[], cursor: number) {
+    const tab = this.find(id);
+    if (!tab?.isWork || moves.length === 0) return;
+    const { view } = tab;
+    for (const m of moves) {
+      const changes = view.state.changes([{ from: m.from, to: m.to }, { from: m.at, insert: view.state.sliceDoc(m.from, m.to) }]);
+      view.dispatch({ changes, userEvent: "move.drop" }); // one Move each, as when dragging text
+    }
+    view.dispatch({ selection: { anchor: Math.min(cursor, view.state.doc.length) }, scrollIntoView: true });
+    view.focus();
+  }
+
+  /** The Mods in use in a Work on this Device changed: its editor follows. */
+  setMods(id: string, mods: Mod[]) {
+    const tab = this.find(id);
+    if (!tab?.isWork) return;
+    const ids = mods.map((m) => m.id);
+    if (ids.join() === tab.mods.join()) return;
+    tab.mods = ids;
+    tab.view.dispatch({ effects: modsCompartment.reconfigure(modExtensions(mods)) });
   }
 
   /** Every open Work asks for its highlights again (a Reviewer's name or colour changed). */
