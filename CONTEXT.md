@@ -139,11 +139,19 @@ _Avoid_: conflict, merge error, warning
 A duplicate of a file in the **Vault** (usually a **History**, but also a **Text file** or a file in the **Style library**) made by the sync tool when two **Devices** changed it before syncing; it is expected, not an error.
 _Avoid_: corruption, sync error
 
+**Sync peer**:
+A computer or phone the sync tool shares the **Vault** with; a **Device** is always one, but a Sync peer that never runs the app (such as a home server) is not a **Device**.
+_Avoid_: device (for the sync tool's), node, remote
+
 **Sync problem**:
 A file in the **Vault** the app couldn't take in, such as a **Conflict copy** it couldn't merge or a **History** from a newer version of the app; it is kept untouched and reported until it's resolved.
 _Avoid_: conflict, sync error, merge notice
 
 ### Settings
+
+**Theme**:
+How the app itself looks (its colours), either built in (light, dark, following the system) or a file in the **Vault**; a Theme is always light or dark, and never changes a **Work**'s pages.
+_Avoid_: Look, skin, style
 
 **Vault settings**:
 Preferences kept in the **Vault** and shared by every **Device**, such as the app theme or the editor font size; any **Device** can override one for itself.

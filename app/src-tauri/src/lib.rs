@@ -1,6 +1,7 @@
 //! The Rust side of the app: it holds the History engine, the open Vault and its open Works,
 //! and answers the interface. The interface only displays and captures input (ADR 0005).
 
+pub mod colouring;
 pub mod device;
 pub mod docx;
 pub mod library;
@@ -380,6 +381,13 @@ fn read_library(state: State<AppState>, path: String) -> Result<String, String> 
     with_app(&state, |app| library::read(&open_vault_of(app)?.root, &path))
 }
 
+/// Typst colouring for a piece of text in the Raw view or a library tab (see `colouring`).
+/// It needs no Vault: it only reads the text it's given.
+#[tauri::command]
+fn colour_typst(text: String) -> Vec<colouring::Colour> {
+    colouring::colour(&text)
+}
+
 /// Saves a library file from its tab.
 #[tauri::command]
 fn write_library(state: State<AppState>, path: String, text: String) -> Result<(), String> {
@@ -757,6 +765,7 @@ pub fn run() {
             export_pdf,
             export_docx,
             get_library,
+            colour_typst,
             read_library,
             write_library,
             create_library,

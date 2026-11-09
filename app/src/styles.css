@@ -42,6 +42,16 @@
   --session-tint-2: rgb(226 194 48 / 0.16);
   --session-tint-3: rgb(226 194 48 / 0.1);
   --session-tint-4: rgb(226 194 48 / 0.06);
+  /* Typst colouring in the Raw view and Style library tabs (colouring.ts). */
+  --syntax-comment: #8a857b;
+  --syntax-keyword: #8a3b6e;
+  --syntax-function: #27678a;
+  --syntax-string: #4d7a2a;
+  --syntax-number: #a4561c;
+  --syntax-label: #7a5a12;
+  --syntax-punctuation: #8a857b;
+  --syntax-escape: #a4561c;
+  --syntax-heading: var(--text);
   color-scheme: light;
 }
 
@@ -85,6 +95,15 @@
     --session-tint-2: rgb(240 214 110 / 0.11);
     --session-tint-3: rgb(240 214 110 / 0.07);
     --session-tint-4: rgb(240 214 110 / 0.045);
+    --syntax-comment: #8b867c;
+    --syntax-keyword: #d59ac4;
+    --syntax-function: #8fc0d8;
+    --syntax-string: #a9cf86;
+    --syntax-number: #e7a874;
+    --syntax-label: #e2c27a;
+    --syntax-punctuation: #9a958b;
+    --syntax-escape: #e7a874;
+    --syntax-heading: var(--text);
     color-scheme: dark;
   }
 }
@@ -128,6 +147,15 @@
   --session-tint-2: rgb(240 214 110 / 0.11);
   --session-tint-3: rgb(240 214 110 / 0.07);
   --session-tint-4: rgb(240 214 110 / 0.045);
+  --syntax-comment: #8b867c;
+  --syntax-keyword: #d59ac4;
+  --syntax-function: #8fc0d8;
+  --syntax-string: #a9cf86;
+  --syntax-number: #e7a874;
+  --syntax-label: #e2c27a;
+  --syntax-punctuation: #9a958b;
+  --syntax-escape: #e7a874;
+  --syntax-heading: var(--text);
   color-scheme: dark;
 }
 
@@ -2004,6 +2032,21 @@ dialog#shortcuts {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 13px;
 }
+
+/* ---- Typst colouring (the Raw view and Style library tabs; classes from Typst's highlighter) ---- */
+
+.typ-comment { color: var(--syntax-comment); font-style: italic; }
+.typ-key, .typ-op { color: var(--syntax-keyword); }
+.typ-func, .typ-pol { color: var(--syntax-function); }
+.typ-str, .typ-raw { color: var(--syntax-string); }
+.typ-num { color: var(--syntax-number); }
+.typ-label, .typ-ref, .typ-link { color: var(--syntax-label); }
+.typ-punct, .typ-marker, .typ-math-delim, .typ-math-group { color: var(--syntax-punctuation); }
+.typ-escape, .typ-math-op { color: var(--syntax-escape); }
+.typ-heading { color: var(--syntax-heading); font-weight: 600; }
+.typ-strong { font-weight: 600; }
+.typ-emph { font-style: italic; }
+.typ-term { font-weight: 600; }
 
 /* ---- Mods: the Mods dialog, and the Mods for new Works in Settings ---- */
 

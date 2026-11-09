@@ -10,6 +10,7 @@ import { LibraryFile, fromDisk, libraryId } from "./libraryfile";
 import { storyElements, type ElementInfo } from "./elements";
 import { WorkSync, type WorkState } from "./sync";
 import { formattedView } from "./formatted";
+import { typstColouring } from "./colouring";
 import { toggleMarkup } from "./shortcuts";
 import { dragToMove } from "./dragging";
 import { completions } from "./completion";
@@ -63,7 +64,7 @@ export type TabEvents = {
 };
 
 const historyCompartment = new Compartment();
-/** The Formatted view, or nothing (the Raw view). */
+/** The Formatted view, or the Raw view's Typst colouring. */
 const viewCompartment = new Compartment();
 /** Line numbers and the shaded cursor line (settings). */
 const linesCompartment = new Compartment();
@@ -149,7 +150,7 @@ class Tab {
     tabs.bar.append(this.label);
 
     if ("path" in content) {
-      // A library file: plain Typst in the Raw view, with the editor's own undo.
+      // A library file: Typst in the Raw view, coloured whole, with the editor's own undo.
       this.label.classList.add("library");
       this.file = new LibraryFile(content.path, (message) => tabs.events.error(message));
       this.view = new EditorView({
@@ -161,6 +162,7 @@ class Tab {
             history(),
             keymap.of([...historyKeymap, ...standardKeymap]),
             linesCompartment.of(lineExtensions(tabs.options)),
+            typstColouring(true),
             EditorView.updateListener.of((update) => {
               if (update.transactions.some((tr) => tr.docChanged && !tr.annotation(fromDisk))) this.file!.edited();
             }),
@@ -187,7 +189,7 @@ class Tab {
           dragToMove(),
           completions({ work: () => this.sync.id, settled: () => this.sync.idle() }),
           elementsCompartment.of(storyElements([])),
-          viewCompartment.of(tabs.formatted ? formattedView() : []),
+          viewCompartment.of(tabs.formatted ? formattedView() : typstColouring(false)),
           linesCompartment.of(lineExtensions(tabs.options)),
           commentHighlights(() => tabs.commentOptions, (ids) => tabs.events.openComments(this.id, ids)),
           commentsCompartment.of(commentClasses(tabs.commentOptions)),
@@ -484,7 +486,7 @@ export class Tabs {
   setFormatted(on: boolean) {
     this.formatted = on;
     for (const tab of this.open) {
-      if (tab.isWork) tab.view.dispatch({ effects: viewCompartment.reconfigure(on ? formattedView() : []) });
+      if (tab.isWork) tab.view.dispatch({ effects: viewCompartment.reconfigure(on ? formattedView() : typstColouring(false)) });
     }
   }
 
