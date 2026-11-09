@@ -71,6 +71,11 @@ impl Tree {
         (id.offset < entry.count).then_some(entry.first + id.offset)
     }
 
+    /// The array indexes of a Change's nodes (they sit side by side); empty if the tree has none.
+    pub fn nodes_of(&self, change: ChangeId) -> std::ops::Range<u32> {
+        self.by_change.get(&change).map_or(0..0, |e| e.first..e.first + e.count)
+    }
+
     /// The ID of the node at an array index.
     pub fn id_of(&self, index: u32) -> CharId {
         let node = &self.nodes[index as usize];

@@ -93,6 +93,13 @@ pub fn is_meta_record(record: &str) -> bool {
 /// The record holding a Work's Preamble: its Looks, extra Styles, Story elements and settings.
 pub const PREAMBLE_RECORD: &str = "preamble";
 
+/// A Work's recorded copy of a Style (`style/<name>`), Look (`look/<name>`) or Story element
+/// (`element/<name>`) from the Style library. The app records these on its own, to mirror the
+/// library, so reverting a Session leaves them alone.
+pub fn is_library_copy(record: &str) -> bool {
+    ["style/", "look/", "element/"].iter().any(|prefix| record.starts_with(prefix))
+}
+
 /// Fields holding free text the Author writes (in v1 a single value, not a text sequence): two
 /// Devices editing one without seeing each other's edit get a Merge notice, so the version that
 /// lost can be copied back. Other fields (names, settings) just take the later value quietly.

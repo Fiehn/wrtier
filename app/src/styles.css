@@ -36,6 +36,12 @@
   --comment-author-soft: rgb(59 95 138 / 0.18);
   --comment-unknown: #77726a;
   --comment-unknown-soft: rgb(119 114 106 / 0.2);
+  /* "Colour text by Session": the newest Session's text (0) to the fifth newest (4). */
+  --session-tint-0: rgb(226 194 48 / 0.32);
+  --session-tint-1: rgb(226 194 48 / 0.23);
+  --session-tint-2: rgb(226 194 48 / 0.16);
+  --session-tint-3: rgb(226 194 48 / 0.1);
+  --session-tint-4: rgb(226 194 48 / 0.06);
   color-scheme: light;
 }
 
@@ -74,6 +80,11 @@
     --comment-author-soft: rgb(143 176 216 / 0.24);
     --comment-unknown: #9a958b;
     --comment-unknown-soft: rgb(154 149 139 / 0.24);
+    --session-tint-0: rgb(240 214 110 / 0.22);
+    --session-tint-1: rgb(240 214 110 / 0.16);
+    --session-tint-2: rgb(240 214 110 / 0.11);
+    --session-tint-3: rgb(240 214 110 / 0.07);
+    --session-tint-4: rgb(240 214 110 / 0.045);
     color-scheme: dark;
   }
 }
@@ -112,6 +123,11 @@
   --comment-author-soft: rgb(143 176 216 / 0.24);
   --comment-unknown: #9a958b;
   --comment-unknown-soft: rgb(154 149 139 / 0.24);
+  --session-tint-0: rgb(240 214 110 / 0.22);
+  --session-tint-1: rgb(240 214 110 / 0.16);
+  --session-tint-2: rgb(240 214 110 / 0.11);
+  --session-tint-3: rgb(240 214 110 / 0.07);
+  --session-tint-4: rgb(240 214 110 / 0.045);
   color-scheme: dark;
 }
 
@@ -1607,4 +1623,351 @@ dialog#shortcuts {
 
 #shortcuts menu {
   justify-content: space-between;
+}
+
+/* ---- The History tab ---- */
+
+#history-pane {
+  padding: 8px 16px 12px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+#history-pane p {
+  margin: 0;
+}
+
+.history-header {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.history-day {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 14px 0 6px;
+}
+
+.history-session {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  margin-bottom: 6px;
+}
+
+.history-session.reverted {
+  opacity: 0.6;
+}
+
+.history-session.reverted .history-words {
+  text-decoration: line-through;
+}
+
+.history-session-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history-session-head:hover {
+  background: var(--chip-hover);
+}
+
+.history-time,
+.history-words {
+  color: var(--muted);
+}
+
+.history-tag {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--chip);
+  color: var(--muted);
+}
+
+.history-snippets {
+  border-top: 1px solid var(--line);
+  padding: 6px 10px 8px;
+}
+
+.history-snippet {
+  padding: 4px 6px;
+  margin: 0 -6px 4px;
+  border-radius: 4px;
+}
+
+.history-snippet.findable {
+  cursor: pointer;
+}
+
+.history-snippet.findable:hover {
+  background: var(--chip-hover);
+}
+
+.history-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+.history-added {
+  background: var(--reviewer-green-soft);
+  border-radius: 2px;
+}
+
+.history-removed {
+  color: var(--reviewer-red);
+  text-decoration: line-through;
+}
+
+.history-moved {
+  background: var(--comment-author-soft);
+  border-radius: 2px;
+}
+
+.history-added.faded,
+.history-removed.faded {
+  opacity: 0.5;
+}
+
+.history-cut {
+  color: var(--muted);
+}
+
+.history-move {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.history-field {
+  margin-top: 4px;
+}
+
+.history-field.quiet {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.history-milestone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin: 10px 0;
+  padding: 4px 0;
+  border-top: 2px solid var(--accent);
+}
+
+.history-milestone-name {
+  color: var(--accent);
+}
+
+.history-milestone-when {
+  color: var(--muted);
+}
+
+.history-milestone-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.history-milestone.deleted {
+  border-top-width: 1px;
+  border-top-style: dashed;
+  opacity: 0.6;
+}
+
+.history-milestone.deleted .history-milestone-name {
+  text-decoration: line-through;
+}
+
+.history-milestone-input {
+  font: inherit;
+  min-width: 0;
+  flex: 1 1 140px;
+}
+
+.history-older {
+  display: block;
+  margin: 10px auto 0;
+}
+.history-actions {
+  display: flex;
+  gap: 12px;
+  padding: 2px 10px 6px;
+}
+
+.history-snippet.reverted .history-text {
+  opacity: 0.55;
+}
+
+.history-snippet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-top: 2px;
+  font-size: 12px;
+}
+
+.history-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.history-preview {
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 8px 10px;
+  margin: 4px 0 8px;
+  cursor: default;
+}
+
+.history-preview-heading {
+  font-weight: 600;
+  margin-bottom: 6px !important;
+}
+
+.history-preview .history-snippet {
+  margin: 0 0 4px;
+  padding: 2px 0;
+}
+
+.history-also {
+  display: block;
+  margin: 8px 0 4px;
+}
+
+.history-dependents {
+  border-left: 2px solid var(--line);
+  padding-left: 8px;
+}
+
+.history-dependents.off {
+  opacity: 0.45;
+}
+
+.history-group {
+  margin: 6px 0;
+}
+
+.history-group-head {
+  display: block;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.history-group-head strong {
+  color: var(--text);
+}
+
+.history-note {
+  color: var(--muted);
+  margin-top: 6px !important;
+}
+
+.history-preview-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.history-preview-buttons .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+/* "History of “…”" and a comparison's title, with × to go back to the whole History. */
+.history-filter {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  margin: 4px 0 8px;
+  border-radius: 6px;
+  background: var(--chip-open);
+  font-weight: 600;
+}
+
+.history-filter button {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.history-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0 10px;
+}
+
+.history-picker .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+
+/* A Merge notice, pinned at the top of the History: a plain sentence, then its actions. */
+.history-notice {
+  font-size: 13px;
+  background: var(--chip);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 4px 0 8px;
+}
+
+.history-notice p {
+  margin: 0 0 6px;
+}
+
+.history-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.history-notice-actions .history-time {
+  color: var(--muted);
+  margin-right: auto;
+}
+
+/* "Colour text by Session": a faint tint on the text the newest Sessions wrote. */
+.history-header .check {
+  margin-right: auto;
+  font-size: 13px;
+}
+
+.cm-tint-0 { background-color: var(--session-tint-0); }
+.cm-tint-1 { background-color: var(--session-tint-1); }
+.cm-tint-2 { background-color: var(--session-tint-2); }
+.cm-tint-3 { background-color: var(--session-tint-3); }
+.cm-tint-4 { background-color: var(--session-tint-4); }
+
+.cm-tint-tooltip {
+  padding: 4px 8px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
 }

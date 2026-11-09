@@ -48,7 +48,7 @@
           <button id="sidebar-toggle" type="button" title="Hide the Works (Ctrl+\)" aria-label="Show or hide the Works">☰</button>
           <nav id="tabbar"></nav>
           <button id="view-mode" type="button" class="link" title="Ctrl+E" hidden>Raw view</button>
-          <button id="panel-toggle" type="button" class="link" title="The Page preview and the Comments (Ctrl+Shift+P)" hidden>Show panel</button>
+          <button id="panel-toggle" type="button" class="link" title="The Page preview, the Comments and the History (Ctrl+Shift+P)" hidden>Show panel</button>
         </div>
         <div id="notice" hidden></div>
         <div id="style-notice" hidden></div>
@@ -58,13 +58,14 @@
         <p id="empty" class="muted">Open a Vault, then choose a Work on the left, or press Ctrl+O.</p>
       </main>
 
-      <!-- The panel beside the editor: the Page preview and the Comments (and the History, in
-           Phase 5), one tab at a time. Shown and hidden as a whole. -->
+      <!-- The panel beside the editor: the Page preview, the Comments and the History, one tab
+           at a time. Shown and hidden as a whole. -->
       <aside id="side-panel" hidden>
         <header class="panel-tabs">
           <div role="tablist" aria-label="Panel">
             <button id="panel-tab-pages" type="button" role="tab" aria-controls="preview" data-tab="pages">Pages</button>
             <button id="panel-tab-comments" type="button" role="tab" aria-controls="comments-pane" data-tab="comments">Comments</button>
+            <button id="panel-tab-history" type="button" role="tab" aria-controls="history-pane" data-tab="history">History</button>
           </div>
           <button id="panel-close" type="button" class="link" title="Hide the panel (Ctrl+Shift+P)">Hide</button>
         </header>
@@ -83,6 +84,14 @@
           <label class="check"><input type="checkbox" id="comments-show-resolved" /> Show resolved</label>
           <div id="comments-new" hidden></div>
           <div id="comments-list"></div>
+        </section>
+        <section id="history-pane" role="tabpanel" aria-labelledby="panel-tab-history" hidden>
+          <header class="history-header">
+            <label class="check" title="Tint the text the last 5 Sessions wrote, the newest strongest (only on this Device)"><input type="checkbox" id="history-tint" /> Colour text by Session</label>
+            <button id="history-compare" type="button" class="link" title="What changed between two Milestones, or since one">Compare…</button>
+            <button id="history-name-milestone" type="button" class="link" title="Name this point in the History, to come back to or compare with">Name a Milestone…</button>
+          </header>
+          <div id="history-list"></div>
         </section>
       </aside>
     </div>

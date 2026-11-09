@@ -14,8 +14,9 @@ import { toggleMarkup } from "./shortcuts";
 import { dragToMove } from "./dragging";
 import { completions } from "./completion";
 import { commentClasses, commentHighlights, pendingRange, rangesOf, setMarks, setPending, type CommentOptions } from "./comments";
-import type { CommentOp, Mark } from "./sync";
+import type { CommentOp, HistoryOp, Mark } from "./sync";
 import { bindings, withKey, type CommandId } from "./keys";
+import { sessionTints, setTints } from "./sessiontints";
 
 export type OpenedWork = { id: string; name: string; text: string; problems: { path: string; reason: string }[]; notice: string | null };
 
@@ -49,6 +50,12 @@ export type TabEvents = {
   addComment(id: string): void;
   /** Right-click inside a selection: the app's own menu, at (x, y). */
   selectionMenu(id: string, x: number, y: number): void;
+  /** A Work's History grew (typing recorded, something taken in, a Revert...). */
+  historyGrew(id: string): void;
+  /** Its key (Ctrl+Shift+H at first): the History of the selection, or the paragraph. */
+  textHistory(id: string): void;
+  /** How many Merge notices the Work in front has (0 if it isn't a Work): "History (n)". */
+  notices(count: number): void;
 };
 
 const historyCompartment = new Compartment();
@@ -176,6 +183,7 @@ class Tab {
           linesCompartment.of(lineExtensions(tabs.options)),
           commentHighlights(() => tabs.commentOptions, (ids) => tabs.events.openComments(this.id, ids)),
           commentsCompartment.of(commentClasses(tabs.commentOptions)),
+          sessionTints(),
           EditorView.updateListener.of((update) => {
             for (const tr of update.transactions) this.sync.track(tr);
             if (update.docChanged) tabs.events.edited(this.sync.id);
@@ -200,10 +208,13 @@ class Tab {
         this.view.dispatch({ effects: setMarks.of(marks) });
         tabs.events.marks(this.id, marks);
       },
+      tints: (tints) => this.view.dispatch({ effects: setTints.of(tints) }),
+      grew: () => tabs.events.historyGrew(this.id),
       error: (message) => tabs.events.error(message),
     });
     this.rename(work.id, work.name);
     this.sync.requestMarks();
+    this.sync.setTinting(tabs.tinting);
 
     // Right-click inside a selection: the app's menu (Add Comment, Cut, Copy, Paste). Anywhere
     // else the system's own, which has the spelling suggestions.
@@ -242,6 +253,10 @@ class Tab {
       emph: () => toggleMarkup("emph")(this.view),
       addComment: () => {
         tabs.events.addComment(this.id);
+        return true;
+      },
+      textHistory: () => {
+        tabs.events.textHistory(this.id);
         return true;
       },
     };
@@ -293,6 +308,14 @@ export class Tabs {
   /** Which Comment highlights are painted, in every Work. */
   commentOptions: CommentOptions = { highlights: true, resolved: false };
 
+  /** "Colour text by Session" (Device state, off by default): every open Work follows it. */
+  tinting = false;
+
+  setTinting(on: boolean) {
+    this.tinting = on;
+    for (const tab of this.open) if (tab.isWork) tab.sync.setTinting(on);
+  }
+
   setCommentOptions(options: CommentOptions) {
     this.commentOptions = options;
     for (const tab of this.open) {
@@ -305,6 +328,23 @@ export class Tabs {
   /** A Work's Comments, as Rust last gave them. */
   marksOf(id: string): Mark[] {
     return this.find(id)?.marks ?? [];
+  }
+
+  /**
+   * "History of this text": the selection in a Work (or the paragraph the cursor is in) is
+   * what its History tab narrows to. A short quote of it, or null if there's no text there.
+   */
+  async stretch(id: string): Promise<string | null> {
+    const tab = this.find(id);
+    if (!tab?.isWork) return null;
+    const { from, to } = tab.view.state.selection.main;
+    return tab.sync.stretch(from, to);
+  }
+
+  /** Reverts, restores or returns to a Milestone in a Work, in order with its typing. */
+  history(id: string, op: HistoryOp) {
+    const tab = this.find(id);
+    if (tab?.isWork) tab.sync.history(op);
   }
 
   /** Does something to a Work's Comments, in order with its typing. */
@@ -346,6 +386,21 @@ export class Tabs {
     tab.view.dispatch({ selection: { anchor: from, head: to }, scrollIntoView: true });
     tab.view.focus(); // the selection only shows in a focused editor
     return ranges.length;
+  }
+
+  /**
+   * Selects some characters of a Work by their identity (a History snippet was clicked):
+   * where they are now, asked through its queue. False if they aren't shown any more.
+   */
+  async findText(id: string, first: string, last: string | null): Promise<boolean> {
+    const tab = this.find(id);
+    if (!tab?.isWork) return false;
+    const range = await tab.sync.find(first, last);
+    if (!range) return false;
+    const length = tab.view.state.doc.length;
+    tab.view.dispatch({ selection: { anchor: Math.min(range[0], length), head: Math.min(range[1], length) }, scrollIntoView: true });
+    tab.view.focus(); // the selection only shows in a focused editor
+    return true;
   }
 
   /** The editor of a Work (for the selection menu's Cut, Copy and Paste). */
@@ -573,6 +628,7 @@ export class Tabs {
     this.lines.style.textContent = state?.styleNotice ?? "";
     this.lines.style.hidden = !state?.styleNotice;
     this.showMoved(tab);
+    this.events.notices(state?.notices ?? 0);
   }
 
   /** A banner for a tab whose Work went to the trash, or vanished, on another Device. */

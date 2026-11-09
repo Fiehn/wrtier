@@ -6,7 +6,7 @@
 
 export type CommandId =
   | "toggleWorks" | "quickSwitcher" | "closeTab" | "toggleView" | "togglePanel" | "preamble"
-  | "undo" | "redo" | "redoAlt" | "strong" | "emph" | "addComment";
+  | "undo" | "redo" | "redoAlt" | "strong" | "emph" | "addComment" | "textHistory";
 
 export type Command = {
   id: CommandId;
@@ -29,6 +29,7 @@ export const COMMANDS: Command[] = [
   { id: "strong", label: "Strong (bold)", where: "editor", key: "Mod-b" },
   { id: "emph", label: "Emphasis (italic)", where: "editor", key: "Mod-i" },
   { id: "addComment", label: "Add a Comment", where: "editor", key: "Mod-Shift-m" },
+  { id: "textHistory", label: "History of this text (the selection, or the paragraph)", where: "editor", key: "Mod-Shift-h" },
 ];
 
 /** Each command's key; null: it has none. */

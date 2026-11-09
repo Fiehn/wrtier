@@ -23,7 +23,18 @@ type Op =
   | { op: "redo" }
   | { op: "sync" }
   | { op: "marks" }
-  | CommentOp;
+  | { op: "tints" }
+  | { op: "find"; first: string; last: string | null }
+  | { op: "stretch"; from: number; to: number }
+  | CommentOp
+  | HistoryOp;
+
+/** Something done from the History tab: one Revert each, which Ctrl+Z can take back. Sent in
+ *  order with the typing; Rust closes the open burst first, and answers with patches. */
+export type HistoryOp =
+  | { op: "revert"; changes: string[]; dependents: boolean }
+  | { op: "restore"; changes: string[] }
+  | { op: "returnTo"; milestone: string; keep: string[] };
 
 /** Something done to Comments. Sent in order with the typing; Rust closes the open burst first. */
 export type CommentOp =
@@ -66,6 +77,16 @@ export type Mark = {
   otherBody: string | null;
 };
 
+/** The text one of the newest Sessions wrote (work.rs `Tint`): "Colour text by Session". */
+export type Tint = {
+  /** UTF-16, in the editor's text. */
+  ranges: [number, number][];
+  /** 0 for the newest Session (the strongest tint), then 1, 2... */
+  rank: number;
+  device: string;
+  timeMs: number;
+};
+
 export type WorkState = {
   len: number;
   patches: Patch[];
@@ -84,8 +105,16 @@ export type WorkState = {
   styleNotice: string | null;
   /** How many Changes the History holds: when it goes up, the highlights are asked for again. */
   changes: number;
+  /** How many Merge notices the History tab shows: "History (n)". */
+  notices: number;
   /** The Comments' highlights (in the answer to a batch that asked for them). */
   marks: Mark[] | null;
+  /** The newest Sessions' text (in the answer to a batch that asked for it). */
+  tints: Tint[] | null;
+  /** Where a Find's characters are (only in the answer to a batch with one); null: not shown any more. */
+  found?: [number, number] | null;
+  /** The text a "History of this text" picked, quoted (only in the answer to that); null: nothing there. */
+  stretch?: string | null;
 };
 
 export type Whereabouts = { kind: "renamed"; to: string } | { kind: "trashed" } | { kind: "gone" } | { kind: "diverged" };
@@ -101,13 +130,17 @@ type Item =
   | { kind: "redo" }
   | { kind: "sync" }
   | { kind: "marks" }
-  | { kind: "comment"; op: CommentOp };
+  | { kind: "tints" }
+  | { kind: "comment"; op: CommentOp }
+  | { kind: "history"; op: HistoryOp }
+  | { kind: "find"; first: string; last: string | null; answer: (range: [number, number] | null) => void }
+  | { kind: "stretch"; from: number; to: number; answer: (quote: string | null) => void };
 
 const EVENTS = ["move.drop", "input.paste", "input.drop", "delete.cut"];
 
 /** Can Rust's text end up different from the editor's after this? Then nothing is sent after it in the same batch. */
 const mayDiffer = (item: Item) =>
-  item.kind === "undo" || item.kind === "redo" || item.kind === "sync" || (item.kind === "edit" && item.origin !== "input");
+  item.kind === "undo" || item.kind === "redo" || item.kind === "sync" || item.kind === "history" || (item.kind === "edit" && item.origin !== "input");
 
 /** An edit as ops for Rust. Several changes are sent last-first, so each one's positions stay right. */
 function toOps(item: Item): Op[] {
@@ -118,9 +151,15 @@ function toOps(item: Item): Op[] {
     case "redo":
     case "sync":
     case "marks":
+    case "tints":
       return [{ op: item.kind }];
     case "comment":
+    case "history":
       return [item.op];
+    case "find":
+      return [{ op: "find", first: item.first, last: item.last }];
+    case "stretch":
+      return [{ op: "stretch", from: item.from, to: item.to }];
   }
   const parts: { from: number; to: number; text: string }[] = [];
   item.changes.iterChanges((from, to, _fromB, _toB, inserted) => parts.push({ from, to, text: inserted.toString() }));
@@ -144,6 +183,10 @@ export type SyncEvents = {
   burstClosed(): void;
   /** The Comments' highlights, fitted to the editor's text as it is now. */
   marks(marks: Mark[]): void;
+  /** The newest Sessions' text, fitted the same way (an empty list when the switch goes off). */
+  tints(tints: Tint[]): void;
+  /** The History grew (a burst recorded, something taken in, a Revert...): the History tab follows. */
+  grew(): void;
   error(message: string): void;
 };
 
@@ -152,15 +195,21 @@ export type SyncEvents = {
  * its edges (text typed there is outside it), only when text is typed strictly inside.
  */
 export function fitMarks(marks: Mark[], edits: ChangeSet[]): Mark[] {
-  return marks.map((mark) => {
-    let ranges = mark.ranges;
-    for (const edit of edits) {
-      ranges = ranges
-        .map(([from, to]): [number, number] => [edit.mapPos(from, 1), edit.mapPos(to, -1)])
-        .filter(([from, to]) => from < to);
-    }
-    return { ...mark, ranges };
-  });
+  return marks.map((mark) => ({ ...mark, ranges: fitRanges(mark.ranges, edits) }));
+}
+
+/** The same for the newest Sessions' text. */
+export function fitTints(tints: Tint[], edits: ChangeSet[]): Tint[] {
+  return tints.map((tint) => ({ ...tint, ranges: fitRanges(tint.ranges, edits) }));
+}
+
+function fitRanges(ranges: [number, number][], edits: ChangeSet[]): [number, number][] {
+  for (const edit of edits) {
+    ranges = ranges
+      .map(([from, to]): [number, number] => [edit.mapPos(from, 1), edit.mapPos(to, -1)])
+      .filter(([from, to]) => from < to);
+  }
+  return ranges;
 }
 
 export class WorkSync {
@@ -173,6 +222,8 @@ export class WorkSync {
   private outside = 0;
   /** The History's size when the highlights were last asked for (see `WorkState.changes`). */
   private changes = -1;
+  /** "Colour text by Session" is on: the tints are asked for whenever the History grows. */
+  private tinting = false;
 
   constructor(
     /** The Work's ID; it changes when the Work is renamed. */
@@ -252,10 +303,61 @@ export class WorkSync {
     void this.flush();
   }
 
+  /**
+   * Where some characters are in the editor's text now (a History snippet was clicked), asked
+   * through the queue so the answer fits around everything typed meanwhile. Null if they
+   * aren't shown any more.
+   */
+  find(first: string, last: string | null): Promise<[number, number] | null> {
+    return new Promise((answer) => {
+      this.queue.push({ kind: "find", first, last, answer });
+      void this.flush();
+    });
+  }
+
+  /**
+   * "History of this text": the History tab narrows to `from..to` (or, empty, the paragraph
+   * the cursor is in). Answers with a short quote of it, or null if there's no text there.
+   */
+  stretch(from: number, to: number): Promise<string | null> {
+    return new Promise((answer) => {
+      this.queue.push({ kind: "stretch", from, to, answer });
+      void this.flush();
+    });
+  }
+
+  /** Reverts, restores or returns to a Milestone, in order with the typing. */
+  history(op: HistoryOp) {
+    this.queue.push({ kind: "history", op });
+    void this.flush();
+  }
+
   /** Asks for the Comments' highlights (when the tab opens, or a Reviewer's colour changed). */
   requestMarks() {
     if (!this.queue.some((item) => item.kind === "marks")) {
       this.queue.push({ kind: "marks" });
+      void this.flush();
+    }
+  }
+
+  /**
+   * "Colour text by Session" on or off. On: the tints are asked for now and whenever the History
+   * grows. Off: nothing is asked for (Rust works nothing out), and they're cleared.
+   */
+  setTinting(on: boolean) {
+    if (on === this.tinting) return;
+    this.tinting = on;
+    if (on) {
+      this.requestTints();
+    } else {
+      this.queue = this.queue.filter((item) => item.kind !== "tints");
+      this.events.tints([]);
+    }
+  }
+
+  private requestTints() {
+    if (this.tinting && !this.queue.some((item) => item.kind === "tints")) {
+      this.queue.push({ kind: "tints" });
       void this.flush();
     }
   }
@@ -268,6 +370,8 @@ export class WorkSync {
     if (changes <= this.changes) return;
     this.changes = changes;
     this.requestMarks();
+    this.requestTints();
+    this.events.grew();
   }
 
   /**
@@ -303,8 +407,9 @@ export class WorkSync {
     this.inFlight = true;
     try {
       const state = await invoke<WorkState>("edit", { id: this.id, ops: items.flatMap(toOps) });
-      this.receive(state, len, undone);
+      this.receive(state, len, undone, items);
     } catch (e) {
+      for (const item of items) if (item.kind === "find" || item.kind === "stretch") item.answer(null);
       this.events.error(String(e));
       await this.resync();
     } finally {
@@ -314,7 +419,7 @@ export class WorkSync {
   }
 
   /** Rust's answer to a batch. Its patches are for the text right after that batch. */
-  private receive(state: WorkState, len: number, undone: boolean) {
+  private receive(state: WorkState, len: number, undone: boolean, items: Item[]) {
     let expected = len;
     if (state.patches.length > 0) {
       let patch = ChangeSet.of(state.patches, len);
@@ -327,6 +432,10 @@ export class WorkSync {
           patch = patch.map(mine, true);
         } else if (item.kind === "cursor") {
           item.pos = patch.mapPos(item.pos);
+        } else if (item.kind === "stretch") {
+          item.from = patch.mapPos(item.from, 1);
+          item.to = patch.mapPos(item.to, -1);
+          if (item.to < item.from) item.to = item.from;
         } else if (item.kind === "comment" && item.op.op === "comment") {
           item.op = { ...item.op, from: patch.mapPos(item.op.from, 1), to: patch.mapPos(item.op.to, -1) };
         }
@@ -339,6 +448,21 @@ export class WorkSync {
       const since = this.queue.flatMap((item) => (item.kind === "edit" ? [item.changes] : []));
       this.events.marks(fitMarks(state.marks, since));
     }
+    // An answer that arrives after the switch went off is dropped.
+    if (state.tints && this.tinting) {
+      const since = this.queue.flatMap((item) => (item.kind === "edit" ? [item.changes] : []));
+      this.events.tints(fitTints(state.tints, since));
+    }
+    if (items.some((item) => item.kind === "find")) {
+      // Like the highlights: for the text right after the batch, fitted around what was typed since.
+      let range = state.found ?? null;
+      for (const item of this.queue) {
+        if (range && item.kind === "edit") range = [item.changes.mapPos(range[0], 1), item.changes.mapPos(range[1], -1)];
+      }
+      if (range && range[1] < range[0]) range = [range[0], range[0]];
+      for (const item of items) if (item.kind === "find") item.answer(range);
+    }
+    for (const item of items) if (item.kind === "stretch") item.answer(state.stretch ?? null);
     this.noteBurst(state.burst, undone);
     this.noteOutside(state.outside);
     this.noteChanges(state.changes);
@@ -360,6 +484,7 @@ export class WorkSync {
       this.events.burstClosed();
       this.events.state(state);
       this.requestMarks();
+      this.requestTints();
     } catch (e) {
       this.events.error(String(e));
     }

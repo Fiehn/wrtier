@@ -65,6 +65,16 @@ fn write_history(n: usize, rng: &mut Rng) -> (Doc, Vec<Change>) {
     let mut now = 1_000_000u64;
     while changes.len() < n {
         now += 1_000;
+        // A new sitting every 150 Changes or so, and now and then a Milestone, so the History
+        // view has Sessions to list and cut. (Counted from the Changes, so the random stream,
+        // and with it the rest of the workload, stays the same.)
+        if changes.len() % 150 == 149 {
+            now += wrtier::doc::SESSION_GAP_MS + 1;
+        }
+        if changes.len() % 2_000 == 1_999 {
+            changes.push(doc.make_milestone_local("Draft", now));
+            continue;
+        }
         let len = doc.len();
         cursor = cursor.min(len);
         let change = match rng.below(100) {
@@ -203,6 +213,57 @@ fn run(n: usize) {
     let import_time = start.elapsed();
     assert!(!imported.is_empty());
 
+    // The History view: every Session listed and counted (the tab shows the newest 50).
+    let start = Instant::now();
+    let sessions = doc.sessions();
+    let sessions_time = start.elapsed();
+    let session_count = sessions.len();
+    // Opening a Session: its snippets. The newest 20, as the Author would open them.
+    let snippet_times: Vec<Duration> = sessions.iter().take(20)
+        .map(|part| {
+            let start = Instant::now();
+            doc.snippets(&part.changes);
+            start.elapsed()
+        })
+        .collect();
+
+    // Comparing the oldest Milestone with now, and the History of the paragraph in the middle.
+    // (A History under 2,000 Changes has no Milestone: then the oldest Session's start stands in, as now vs now.)
+    let oldest = doc.milestones().first().map(|m| m.id);
+    let start = Instant::now();
+    let then = oldest.map_or(wrtier::doc::Version::Now, wrtier::doc::Version::Milestone);
+    let compared = doc.compare(then, wrtier::doc::Version::Now);
+    let compare_time = start.elapsed();
+    let start = Instant::now();
+    let stretch = doc.stretch_at(doc.committed_text().chars().count() / 2, 0).expect("a paragraph");
+    let touched = doc.changes_in(&stretch);
+    doc.snippets_in(&touched, &stretch);
+    let history_time = start.elapsed();
+
+    // Previews: reverting the newest Session (with what it leaves out and its dependents), and
+    // returning to the oldest Milestone (the comparison, what it reverts, Comments it detaches).
+    let start = Instant::now();
+    let newest = &sessions[0].changes;
+    let targets = doc.revertable(newest);
+    doc.revert_preview(&targets);
+    for (_, group) in doc.by_session(&doc.dependents(&targets)) {
+        doc.revert_preview(&group);
+    }
+    doc.left_out(newest);
+    let revert_preview_time = start.elapsed();
+    let start = Instant::now();
+    if let Some(m) = oldest {
+        doc.compare(wrtier::doc::Version::Now, wrtier::doc::Version::Milestone(m));
+        doc.return_preview(m);
+        doc.detached_by_return(m);
+    }
+    let return_preview_time = start.elapsed();
+
+    // "Colour text by Session": the newest 5 Sessions' text, asked for each time the History grows.
+    let start = Instant::now();
+    let tinted = doc.newest_sessions_text(5);
+    let tint_time = start.elapsed();
+
     // Opening from a real file: SQLite reading included.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("work.db");
@@ -213,9 +274,13 @@ fn run(n: usize) {
     assert_eq!(loaded.len(), len, "the file opens to the same text");
 
     println!(
-        "{:>7} Changes {:>8} chars | write {:>7.0} ms | open {:>6.1} ms (from file {:>6.1} ms) | keystroke {} | delete {} | move {} | revert {} | from another Device {} | External edit {:.1} ms",
+        "{:>7} Changes {:>8} chars | write {:>7.0} ms | open {:>6.1} ms (from file {:>6.1} ms) | keystroke {} | delete {} | move {} | revert {} | from another Device {} | External edit {:.1} ms | {} Sessions listed in {:.1} ms | opening one {} | Milestone vs now {:.1} ms ({} snippets) | History of a paragraph {:.1} ms ({} Changes) | Revert preview {:.1} ms | return preview {:.1} ms | colour by Session {:.1} ms ({} ranges)",
         n, len, ms(write_time), ms(open_time), ms(file_time),
         summary(keystrokes), summary(deletes), summary(moves), summary(reverts), summary(remote), ms(import_time),
+        session_count, ms(sessions_time), summary(snippet_times),
+        ms(compare_time), compared.snippets.len(), ms(history_time), touched.len(),
+        ms(revert_preview_time), ms(return_preview_time),
+        ms(tint_time), tinted.iter().map(|s| s.ranges.len()).sum::<usize>(),
     );
 }
 

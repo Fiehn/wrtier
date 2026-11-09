@@ -1,6 +1,6 @@
 use proptest::prelude::*;
 use wrtier::change::Change;
-use wrtier::doc::Doc;
+use wrtier::doc::{Doc, Version};
 use wrtier::ids::DeviceId;
 
 // Random thing that can happen.
@@ -269,6 +269,16 @@ fn run(actions: &[Action]) {
     // ...and the same Comments, covering the same text, with the same Replies and state.
     assert_eq!(docs[0].comments(), docs[1].comments());
     assert_eq!(docs[1].comments(), docs[2].comments());
+    // ...and the same Sessions in the History view, cut at the same Milestones, with the same
+    // word counts, whatever order their Changes arrived in.
+    assert_eq!(docs[0].sessions(), docs[1].sessions());
+    assert_eq!(docs[1].sessions(), docs[2].sessions());
+    // ...and every Session's snippets read the same everywhere.
+    for part in docs[0].sessions() {
+        let shown = docs[0].snippets(&part.changes);
+        assert_eq!(shown, docs[1].snippets(&part.changes));
+        assert_eq!(shown, docs[2].snippets(&part.changes));
+    }
     // Every Comment's ranges are in order, apart, and inside the text.
     let len = docs[0].text().chars().count();
     for comment in docs[0].comments() {
@@ -292,6 +302,18 @@ fn run(actions: &[Action]) {
     }
     // Every Milestone's text, on every Device, is the text of a Work rebuilt from only the
     // Changes its Device had when it was made.
+    // Comparing a Milestone with now reads the same on every Device, and a Milestone compared
+    // with itself shows nothing.
+    for (milestone, _) in &marked {
+        if !docs[0].milestones().iter().any(|m| m.id == *milestone) {
+            continue; // deleted
+        }
+        let (then, now) = (Version::Milestone(*milestone), Version::Now);
+        let shown = docs[0].compare(then, now);
+        assert_eq!(shown, docs[1].compare(then, now));
+        assert_eq!(shown, docs[2].compare(then, now));
+        assert!(docs[0].compare(then, then).snippets.is_empty());
+    }
     for (milestone, snapshot) in &marked {
         let mut snapshot = snapshot.clone();
         snapshot.sort_by_key(|c| c.order_key());

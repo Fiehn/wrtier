@@ -1,9 +1,9 @@
-// The panel beside the editor: the Page preview and the Comments (the History joins in Phase 5),
-// one tab at a time. It's shown and hidden as a whole (Ctrl+Shift+P). Which tab is open and
+// The panel beside the editor: the Page preview, the Comments and the History, one tab at a
+// time. It's shown and hidden as a whole (Ctrl+Shift+P). Which tab is open and
 // whether the panel shows are Device state, kept in this Device's local storage.
 
-export type PanelTab = "pages" | "comments";
-const TABS: PanelTab[] = ["pages", "comments"];
+export type PanelTab = "pages" | "comments" | "history";
+const TABS: PanelTab[] = ["pages", "comments", "history"];
 
 export type PanelState = { shown: boolean; tab: PanelTab };
 
@@ -22,15 +22,15 @@ export class SidePanel {
   tab: PanelTab = "pages";
 
   /**
-   * `changed` runs after every change, with whether the Page preview is in view: it only
-   * compiles then.
+   * `changed` runs after every change, with whether the Page preview is in view (it only
+   * compiles then) and the tab in view (null while the panel is hidden).
    */
   constructor(
     private readonly root: HTMLElement,
     private readonly tabs: HTMLElement[],
     private readonly panes: Record<PanelTab, HTMLElement>,
     private readonly toggleButton: HTMLElement,
-    private readonly changed: (pagesInView: boolean) => void,
+    private readonly changed: (pagesInView: boolean, inView: PanelTab | null) => void,
   ) {
     for (const button of tabs) {
       button.addEventListener("click", () => this.setTab(button.dataset.tab as PanelTab));
@@ -91,6 +91,6 @@ export class SidePanel {
     } catch {
       // not remembered, then: no harm done
     }
-    this.changed(this.pagesInView);
+    this.changed(this.pagesInView, this.shown ? this.tab : null);
   }
 }

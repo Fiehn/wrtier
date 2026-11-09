@@ -9,12 +9,13 @@ use crate::patch::{self, Patch};
 use crate::positions::{byte_at_utf16, replace_utf16, Positions};
 use crate::recovery::Recovery;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use wrtier::change::{Change, ChangeKind};
+use wrtier::change::{Change, ChangeKind, NoticeKey};
 use wrtier::conflicts::conflict_copies;
-use wrtier::doc::{BurstKind, CutPasted, Doc};
-use wrtier::ids::ChangeId;
+use wrtier::doc::{BurstKind, CutPasted, Doc, MergeNotice, Stretch};
+use wrtier::ids::{ChangeId, CharId, DeviceId};
 use wrtier::storage;
 
 /// The Text file is written at most this often while writing (and whenever the Author leaves).
@@ -54,6 +55,9 @@ pub enum Op {
     /// Send the Comments' highlights with the answer (`WorkState::marks`). Asked through the
     /// queue, so their positions fit the editor's text the way patches do.
     Marks,
+    /// "Colour text by Session" is on: send the newest Sessions' text with the answer
+    /// (`WorkState::tints`), through the queue like `Marks`. Never sent while it's off.
+    Tints,
     // Comments. Each closes the open burst first (nothing else is recorded while one is open).
     // `sender` is `author` or `reviewer/<id>`; the Vault fills in `sender_name`, the Reviewer's
     // current name, which the Work records just before (so its `.db` reads on its own).
@@ -66,6 +70,21 @@ pub enum Op {
     Resolve { id: String, resolved: bool },
     /// Deletes a Comment (with its Replies) or a Reply: a Revert, so it can be restored.
     DeleteComment { id: String },
+    // The History view's actions. Each closes the open burst first, and each is one Revert that
+    // Ctrl+Z can take back, like typing.
+    /// Reverts these Changes (a Session, a snippet, a Preamble line), with their dependents if
+    /// asked; only those still in effect that change the content are taken.
+    Revert { changes: Vec<String>, dependents: bool },
+    /// Brings these Changes back: reverts every Revert of them still in effect, whole.
+    Restore { changes: Vec<String> },
+    /// Returns the content to a Milestone, except the Changes in `keep`.
+    ReturnTo { milestone: String, keep: Vec<String> },
+    /// Where some characters are now (a History snippet was clicked): answered in
+    /// `WorkState::found`, in the editor's text, through the queue so it fits like patches.
+    Find { first: String, last: Option<String> },
+    /// "History of this text": the History tab narrows to `from..to` (or, empty, the paragraph
+    /// the cursor is in). The open burst closes first. Answered in `WorkState::stretch`.
+    Stretch { from: usize, to: usize },
 }
 
 impl Op {
@@ -92,6 +111,25 @@ pub struct ReplyMark {
     pub time_ms: u64,
     /// The other version of its body, if two Devices edited it without seeing each other.
     pub other_body: Option<String>,
+}
+
+/// How many of the newest Sessions "Colour text by Session" tints.
+pub const TINTED_SESSIONS: usize = 5;
+
+/// The text one of the newest Sessions wrote, tinted in the editor.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Tint {
+    /// Where its text is: from..to in UTF-16, in order.
+    pub ranges: Vec<(usize, usize)>,
+    /// 0 for the newest Session (the strongest tint), then 1, 2...
+    pub rank: usize,
+    /// The Device's name as the app shows it, filled in by the Vault.
+    pub device: String,
+    #[serde(skip)]
+    pub device_id: DeviceId,
+    /// When the Session's last Change was made (ms since 1970).
+    pub time_ms: u64,
 }
 
 /// A Comment's highlight in the editor.
@@ -130,7 +168,8 @@ impl Op {
                 let at = if at > from { at - (to - from) } else { *at };
                 replace_utf16(&without, at, at, moved)
             }
-            // Undo, redo and a sync may change the text (`may_differ`); the rest never do.
+            // Undo, redo, a sync and the History view's actions may change the text (`may_differ`);
+            // the rest never do.
             _ => text.to_string(),
         }
     }
@@ -139,7 +178,7 @@ impl Op {
     /// patches, and the editor never sends anything after such an op in the same batch.
     fn may_differ(&self, cut_waiting: bool) -> bool {
         match self {
-            Op::Undo | Op::Redo | Op::Sync => true,
+            Op::Undo | Op::Redo | Op::Sync | Op::Revert { .. } | Op::Restore { .. } | Op::ReturnTo { .. } => true,
             Op::Type { origin, .. } | Op::Delete { origin, .. } => *origin != Origin::Input,
             Op::Paste { .. } => cut_waiting,
             _ => false,
@@ -176,8 +215,21 @@ pub struct WorkState {
     /// How many Changes the History holds. When it goes up (a burst was recorded, something
     /// was taken in, a Move or Revert), the editor asks for the highlights again (`Op::Marks`).
     pub changes: usize,
+    /// How many Merge notices the History tab shows (not dismissed): "History (n)".
+    pub notices: usize,
     /// The Comments' highlights, in the answer to a batch with `Op::Marks`.
     pub marks: Option<Vec<Mark>>,
+    /// The newest Sessions' text, in the answer to a batch with `Op::Tints`.
+    pub tints: Option<Vec<Tint>>,
+    /// Where an `Op::Find`'s characters are (UTF-16, in the editor's text), in the answer to a
+    /// batch with one; None in it if they aren't shown any more. Left out of other answers
+    /// (so the interface can tell "not asked" from "not shown").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub found: Option<Option<(usize, usize)>>,
+    /// The text an `Op::Stretch` picked, quoted for the History tab's bar, in the answer to a
+    /// batch with one; None in it if there was no text there (an empty line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stretch: Option<Option<String>>,
 }
 
 /// Where a Work's History went when it disappeared from under an open tab.
@@ -253,6 +305,31 @@ pub struct OpenWork {
     /// The Vault's folder: the Text file's header falls back to its Style library for anything
     /// the Work hasn't recorded yet.
     pub vault_root: PathBuf,
+    /// The text "History of this text" is about, held by identity (see `Op::Stretch`).
+    pub stretch: Option<Stretch>,
+    /// The answer to an `Op::Stretch` in the batch being applied.
+    stretch_answer: Option<Option<String>>,
+    /// How many Merge notices the History tab shows, as of how many Changes the History held:
+    /// they only change when a Change is made or taken in.
+    notice_count: Cell<Option<(usize, usize)>>,
+}
+
+/// The Merge notices the History tab shows: all but a Comment body edited on two Devices,
+/// which stays on its Comment's card.
+pub fn history_notices(doc: &Doc) -> Vec<MergeNotice> {
+    doc.merge_notices().into_iter()
+        .filter(|n| !doc.concurrent_field(n.key).is_some_and(|(record, _, _)| record.starts_with("comment/")))
+        .collect()
+}
+
+/// Names a Merge notice for the interface, the same way on every Device.
+pub fn notice_key(key: NoticeKey) -> String {
+    match key {
+        NoticeKey::Overlap { later, earlier } => format!("overlap:{later}:{earlier}"),
+        NoticeKey::Loop { skipped } => format!("loop:{skipped}"),
+        NoticeKey::UnknownTextFile { session } => format!("unknown:{session}"),
+        NoticeKey::ConcurrentField { later, earlier } => format!("field:{later}:{earlier}"),
+    }
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -276,6 +353,9 @@ impl OpenWork {
             styles_checked: None,
             style_notice: None,
             vault_root: PathBuf::new(),
+            stretch: None,
+            stretch_answer: None,
+            notice_count: Cell::new(None),
             mine,
             db_stamp,
             typ_stamp,
@@ -318,8 +398,38 @@ impl OpenWork {
             moved: self.whereabouts.clone(),
             style_notice: self.style_notice.clone(),
             changes: self.doc.change_count(),
+            notices: self.notice_count(),
             marks: None,
+            tints: None,
+            found: None,
+            stretch: None,
         }
+    }
+
+    /// How many Merge notices the History tab shows, worked out again only after a Change.
+    fn notice_count(&self) -> usize {
+        let changes = self.doc.change_count();
+        match self.notice_count.get() {
+            Some((at, count)) if at == changes => count,
+            _ => {
+                let count = history_notices(&self.doc).len();
+                self.notice_count.set(Some((changes, count)));
+                count
+            }
+        }
+    }
+
+    /// Dismisses a Merge notice (named by `notice_key`): recorded as a Change, so it's gone on
+    /// every Device. The open burst closes first. Not on the undo list: Ctrl+Z is for the text.
+    pub fn dismiss_notice(&mut self, key: &str, now_ms: u64) -> Result<WorkState, String> {
+        let notice = history_notices(&self.doc).into_iter().find(|n| notice_key(n.key) == key)
+            .ok_or("That notice was already dismissed (perhaps on another Device).")?;
+        self.close_burst(now_ms);
+        let change = self.doc.dismiss_local(notice.key, now_ms);
+        self.unsaved.push(change);
+        self.save();
+        self.keep_recovery(false);
+        Ok(self.state(Vec::new()))
     }
 
     /// The Comments' highlights, in the text the editor shows (open burst included). Names and
@@ -356,6 +466,18 @@ impl OpenWork {
                 other_body: other.get(&id).cloned(),
                 id,
             }
+        }).collect()
+    }
+
+    /// The newest Sessions' text, in the text the editor shows (open burst included). Device
+    /// names are left for the Vault to fill in.
+    pub fn tints(&self) -> Vec<Tint> {
+        self.doc.newest_sessions_text(TINTED_SESSIONS).into_iter().enumerate().map(|(rank, s)| Tint {
+            ranges: s.ranges.iter().map(|&(from, to)| (self.positions.to_utf16(from), self.positions.to_utf16(to))).collect(),
+            rank,
+            device: String::new(),
+            device_id: s.device,
+            time_ms: s.end.0,
         }).collect()
     }
 
@@ -414,6 +536,97 @@ impl OpenWork {
         };
         self.unsaved.push(change);
         Ok(())
+    }
+
+    /// The History view's actions: each closes the open burst (and a waiting cut) first, and
+    /// its Revert joins this sitting's undo list, so Ctrl+Z takes it back. (Deleting a Comment
+    /// is a Revert too, but never on that list: undo leaves Comments alone.)
+    fn apply_history_op(&mut self, op: Op, now_ms: u64) -> Result<(), String> {
+        self.close_burst(now_ms);
+        let ids = |list: &[String]| -> Result<Vec<ChangeId>, String> {
+            list.iter().map(|id| id.parse().map_err(|_| format!("Not a Change: {id}"))).collect()
+        };
+        let change = match op {
+            Op::Revert { changes, dependents } => self.doc.revert_changes_local(&ids(&changes)?, dependents, now_ms),
+            Op::Restore { changes } => self.doc.restore_changes_local(&ids(&changes)?, now_ms),
+            Op::ReturnTo { milestone, keep } => {
+                let milestone: ChangeId = milestone.parse().map_err(|_| format!("Not a Milestone: {milestone}"))?;
+                if !self.doc.milestones().iter().any(|m| m.id == milestone) {
+                    return Err("That Milestone was deleted (perhaps on another Device).".into());
+                }
+                self.doc.return_to_milestone_local(milestone, &ids(&keep)?, now_ms)
+            }
+            _ => unreachable!("only the History view's ops come here"),
+        };
+        if let Some(change) = change {
+            self.authored();
+            self.sitting.push(change.id);
+            self.unsaved.push(change);
+        }
+        Ok(())
+    }
+
+    /// A short quote of the text at `from..to` (characters), or of the paragraph at `from` if
+    /// that's empty: for "History of “The rain had…”".
+    fn quote_of(&self, from: usize, to: usize) -> String {
+        let text: Vec<char> = self.doc.text().chars().collect();
+        let (from, to) = if from < to {
+            (from, to.min(text.len()))
+        } else {
+            let from = from.min(text.len());
+            let start = text[..from].iter().rposition(|&c| c == '\n').map_or(0, |i| i + 1);
+            let end = text[from..].iter().position(|&c| c == '\n').map_or(text.len(), |i| from + i);
+            (start, end)
+        };
+        let quote: String = text[from..to].iter().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ");
+        if quote.chars().count() > 40 {
+            format!("{}…", quote.chars().take(39).collect::<String>().trim_end())
+        } else {
+            quote
+        }
+    }
+
+    /// Where some characters are in the editor's text (UTF-16), if they're shown.
+    fn find(&self, first: &str, last: Option<&str>) -> Option<(usize, usize)> {
+        let first: CharId = first.parse().ok()?;
+        let last: Option<CharId> = match last {
+            Some(l) => Some(l.parse().ok()?),
+            None => None,
+        };
+        let (from, to) = self.doc.shown_range(first, last)?;
+        Some((self.positions.to_utf16(from), self.positions.to_utf16(to)))
+    }
+
+    /// Gives a Milestone a new name. The open burst closes first (nothing else may be recorded
+    /// while one is open).
+    pub fn rename_milestone(&mut self, milestone: ChangeId, name: &str, now_ms: u64) -> Result<WorkState, String> {
+        if !self.doc.milestones().iter().any(|m| m.id == milestone) {
+            return Err("That Milestone was deleted (perhaps on another Device).".into());
+        }
+        self.close_burst(now_ms);
+        let change = self.doc.rename_milestone_local(milestone, name, now_ms);
+        self.unsaved.push(change);
+        self.save();
+        self.keep_recovery(false);
+        Ok(self.state(Vec::new()))
+    }
+
+    /// Deletes a Milestone (reverts it), or brings a deleted one back (restores it). Neither is
+    /// on the undo list: Ctrl+Z is for the text.
+    pub fn set_milestone_deleted(&mut self, milestone: ChangeId, deleted: bool, now_ms: u64) -> Result<WorkState, String> {
+        if !self.doc.milestones_and_deleted().iter().any(|(m, _)| m.id == milestone) {
+            return Err(format!("Not a Milestone of this Work: {milestone}"));
+        }
+        self.close_burst(now_ms);
+        let change = if deleted {
+            self.doc.is_in_effect(milestone).then(|| self.doc.revert_local(milestone, false, now_ms))
+        } else {
+            self.doc.restore_local(milestone, now_ms)
+        };
+        self.unsaved.extend(change);
+        self.save();
+        self.keep_recovery(false);
+        Ok(self.state(Vec::new()))
     }
 
     /// Does this Work need to record the Style library as of `generation` before an edit?
@@ -536,7 +749,12 @@ impl OpenWork {
     /// recorded what it uses (see `styles_due`).
     pub fn edit(&mut self, ops: Vec<Op>, device_name: Option<&str>, library: Option<(&crate::preamble::Shelf, u64)>, now_ms: u64) -> Result<WorkState, String> {
         let want_marks = ops.contains(&Op::Marks);
-        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks)) {
+        let want_tints = ops.contains(&Op::Tints);
+        let find = ops.iter().rev().find_map(|op| match op {
+            Op::Find { first, last } => Some((first.clone(), last.clone())),
+            _ => None,
+        });
+        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks | Op::Tints | Op::Find { .. } | Op::Stretch { .. })) {
             self.name_this_device(device_name, now_ms)?;
             self.record_styles(library, now_ms);
         }
@@ -567,7 +785,10 @@ impl OpenWork {
         assert_eq!(self.positions, Positions::new(&self.doc.text()), "the position map drifted from the text");
         let took_in = self.took_in.take();
         let marks = want_marks.then(|| self.marks());
-        result.map(|()| WorkState { took_in, marks, ..self.state(patches) })
+        let tints = want_tints.then(|| self.tints());
+        let found = find.map(|(first, last)| self.find(&first, last.as_deref()));
+        let stretch = self.stretch_answer.take();
+        result.map(|()| WorkState { took_in, marks, tints, found, stretch, ..self.state(patches) })
     }
 
     /// Records this Device's name in the Work before its first edit in a sitting, while no burst
@@ -704,9 +925,20 @@ impl OpenWork {
             Op::Undo => self.undo(now_ms),
             Op::Redo => self.redo(now_ms),
             Op::Sync => self.take_in(now_ms)?,
-            Op::Marks => {} // answered at the end of the batch
+            Op::Marks | Op::Tints | Op::Find { .. } => {} // answered at the end of the batch
+            Op::Stretch { from, to } => {
+                let (f, t) = self.chars(from, to)?;
+                self.close_burst(now_ms);
+                let picked = self.doc.stretch_at(f, t - f);
+                let answer = picked.as_ref().map(|_| self.quote_of(f, t));
+                if picked.is_some() {
+                    self.stretch = picked;
+                }
+                self.stretch_answer = Some(answer);
+            }
             op @ (Op::Comment { .. } | Op::Reply { .. } | Op::EditComment { .. } | Op::SetCommentSender { .. }
                 | Op::Resolve { .. } | Op::DeleteComment { .. }) => self.apply_comment_op(op, now_ms)?,
+            op @ (Op::Revert { .. } | Op::Restore { .. } | Op::ReturnTo { .. }) => self.apply_history_op(op, now_ms)?,
         }
         Ok(())
     }
@@ -1261,6 +1493,69 @@ mod tests {
         w.edit(vec![Op::Undo], None, None, 13_000).unwrap();
         w.edit(vec![Op::Undo], None, None, 14_000).unwrap();
         assert_eq!(w.text(), "The rain.");
+    }
+
+    /// "The rain had stopped." with "stopped" changed to "eased" in the app: returns the ID of
+    /// the Change that wrote the sentence.
+    fn rain_eased(w: &mut OpenWork) -> String {
+        let first = storage::read_all(&w.db).unwrap()[0].id;
+        w.edit(vec![Op::Delete { from: 13, to: 20, origin: Origin::Input }, typing(13, "eased")], None, None, 1000).unwrap();
+        w.tick(10_000); // closed and saved
+        assert_eq!(w.text(), "The rain had eased.");
+        first.to_string()
+    }
+
+    #[test]
+    fn a_revert_from_the_history_view_takes_its_dependents_and_ctrl_z_brings_it_back() {
+        let (_dir, mut w) = work("The rain had stopped.");
+        let first = rain_eased(&mut w);
+        let state = w.edit(vec![Op::Revert { changes: vec![first], dependents: true }], None, None, 11_000).unwrap();
+        assert_eq!(w.text(), "", "\"eased\" was typed inside the sentence, so it goes too");
+        assert_eq!(editor_after("The rain had eased.", &state), "");
+        let state = w.edit(vec![Op::Undo], None, None, 12_000).unwrap();
+        assert_eq!(w.text(), "The rain had eased.");
+        assert_eq!(editor_after("", &state), "The rain had eased.");
+        let state = w.edit(vec![Op::Redo], None, None, 13_000).unwrap();
+        assert_eq!(w.text(), "");
+        assert_eq!(editor_after("The rain had eased.", &state), "");
+    }
+
+    #[test]
+    fn a_revert_without_its_dependents_leaves_them() {
+        let (_dir, mut w) = work("The rain had stopped.");
+        let first = rain_eased(&mut w);
+        w.edit(vec![Op::Revert { changes: vec![first.clone()], dependents: false }], None, None, 11_000).unwrap();
+        assert_eq!(w.text(), "eased");
+        // Restore brings the sentence back; Ctrl+Z takes the Restore back again.
+        w.edit(vec![Op::Restore { changes: vec![first] }], None, None, 12_000).unwrap();
+        assert_eq!(w.text(), "The rain had eased.");
+        w.edit(vec![Op::Undo], None, None, 13_000).unwrap();
+        assert_eq!(w.text(), "eased");
+    }
+
+    #[test]
+    fn returning_to_a_milestone_and_undoing_it_leaves_the_text_exactly_as_before() {
+        let (_dir, mut w) = work("The rain had stopped.");
+        let draft = w.doc.make_milestone_local("Draft 1", 500).id;
+        rain_eased(&mut w);
+        w.edit(vec![typing(19, " Gulls circled.")], None, None, 20_000).unwrap(); // a burst still open
+        let state = w.edit(vec![Op::ReturnTo { milestone: draft.to_string(), keep: Vec::new() }], None, None, 21_000).unwrap();
+        assert_eq!(w.text(), "The rain had stopped.", "the open burst was recorded first, then taken back too");
+        assert_eq!(editor_after("The rain had eased. Gulls circled.", &state), "The rain had stopped.");
+        w.edit(vec![Op::Undo], None, None, 22_000).unwrap();
+        assert_eq!(w.text(), "The rain had eased. Gulls circled.");
+    }
+
+    #[test]
+    fn ctrl_z_never_brings_back_a_deleted_comment() {
+        let (_dir, mut w) = work("The rain had stopped.");
+        rain_eased(&mut w);
+        w.edit(vec![comment_op(0, 8, "author", "too abrupt?")], None, None, 20_000).unwrap();
+        let id = w.doc.comments()[0].id.to_string();
+        w.edit(vec![Op::DeleteComment { id }], None, None, 21_000).unwrap();
+        w.edit(vec![Op::Undo], None, None, 22_000).unwrap();
+        assert!(w.doc.comments().is_empty(), "still deleted");
+        assert_ne!(w.text(), "The rain had eased.", "undo took back the latest text Change instead");
     }
 
     #[test]

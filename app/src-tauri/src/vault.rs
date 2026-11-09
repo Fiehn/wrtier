@@ -88,9 +88,11 @@ pub struct PreambleView {
 /// one field per file, holding the version written.
 const DEFAULTS_RECORD: &str = "defaults";
 
+mod history;
 mod moves;
 mod reviewers;
 mod settings;
+pub use history::{ComparisonView, HistoryView, RestorePreview, ReturnPreview, RevertPreview, SnippetsView};
 pub use moves::TrashedWork;
 pub use reviewers::{Reviewer, COLOURS};
 pub use settings::Settings;
@@ -723,7 +725,7 @@ impl Vault {
                 *name = sender.strip_prefix("reviewer/").and_then(|r| self.reviewer(r)).map(|r| r.name);
             }
         }
-        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Marks)) {
+        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Marks | Op::Tints)) {
             let others: Vec<String> = self.works.iter().filter(|(other, w)| *other != id && w.has_cut()).map(|(o, _)| o.clone()).collect();
             for other in others {
                 let _ = self.with_work(&other, now_ms, |w, _| {
@@ -746,6 +748,12 @@ impl Vault {
                 for reply in &mut mark.replies {
                     (reply.name, reply.colour) = self.sender_label(&work.doc, &reply.sender);
                 }
+            }
+        }
+        if let (Some(tints), Some(work)) = (state.tints.as_mut(), self.works.get(&self.current_id(id))) {
+            let name = self.device_namer();
+            for tint in tints {
+                tint.device = name(&work.doc, tint.device_id);
             }
         }
         Ok(state)

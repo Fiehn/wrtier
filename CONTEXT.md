@@ -107,8 +107,12 @@ A **Change** that cancels out an earlier **Change**, which stays in the **Histor
 _Avoid_: rollback, delete change, undo (that's the Ctrl+Z key, which may make a Revert)
 
 **Session**:
-The **Changes** one **Device** made in one sitting, shown together in the history view.
+The **Changes** one **Device** made in one sitting, shown together in the **History view**.
 _Avoid_: batch, save
+
+**History view**:
+The list of a **Work**'s **Sessions**, **Milestones** and **Merge notices**, newest first, where the **Author** looks back over the **History**, compares **Milestones** and **Reverts** or restores; "History of this text" is the same list narrowed to a stretch of text.
+_Avoid_: timeline, log, changes list, version history
 
 **Milestone**:
 A named point in a **History** that the **Author** can return to or compare against, e.g. "Draft 2, sent to editor".
@@ -148,6 +152,12 @@ _Avoid_: preferences, shared settings, config
 **Device state**:
 What one **Device** remembers only for itself and never syncs, such as its **Device** ID, open tabs and cursor positions.
 _Avoid_: device settings, local settings
+
+### Mods
+
+**Mod**:
+An optional feature that ships with the app, such as spellcheck, a dialogue checker or the **Chapter** list, which the **Author** adds to a **Work** to get more ways to see and work on it.
+_Avoid_: plugin, extension, add-on, module
 
 ## Relationships
 
@@ -193,9 +203,15 @@ _Avoid_: device settings, local settings
 - Every character in a **Work** knows which **Change** wrote it.
 - A **Session** groups many **Changes**; each **Change** belongs to exactly one **Session**.
 - A **Session** belongs to one **Device** and one **Work**. A new one starts when the **Work** is opened, or after a long pause in writing.
+- A **Session**'s word counts say what it did when it was made; later **Changes** never alter them.
+- A **Milestone** named in the middle of a **Session** cuts it in two: the part before is in the **Milestone**, the part after isn't. A **Session** made earlier on a **Device** that hadn't synced isn't in it either, however old it is.
+- **Reverting** a **Session** reverts its **Changes** to the text and the **Preamble**; its **Comments**, **Milestones** and the **Styles** it recorded on its own stay.
+- Restoring brings back everything one **Revert** took; to keep only part of it, restore it all and **Revert** the rest.
+- Comparing two **Milestones**, or one with the **Work** as it is now, compares characters, so **Moved** text shows as a **Move**.
+- "History of this text" covers the characters selected and every character that ever lay between them, including text since deleted or **Moved** away; unlike a **Comment**, it keeps text **Moved** out of it.
 - Reverting a **Change** also reverts, by default, every later **Change** that added text inside the text it wrote (and anything added inside that, in turn). Later deletions and **Moves** of that text are not reverted with it.
 - A **Revert** can itself be reverted.
-- Undo (Ctrl+Z) only edits text typed in the last few seconds that isn't a **Change** yet; beyond that it's a **Revert** of the latest **Change** to the text this **Device** made that's still in effect, and redo restores it. Undo never touches **Comments**.
+- Undo (Ctrl+Z) only edits text typed in the last few seconds that isn't a **Change** yet; beyond that it's a **Revert** of the latest **Change** to the text this **Device** made that's still in effect (a **Revert** or a return to a **Milestone** made in the **History view** included), and redo restores it. Undo never touches **Comments**.
 - A **Change** stays undone while any **Revert** of it is in effect; restoring a **Change** cancels every **Revert** of it.
 - Returning to a **Milestone** reverts every **Change** to the **Work**'s content that isn't part of it, including later **Reverts**; nothing is removed. **Device** names, other **Milestones**, dismissed **Merge notices**, and **Comments** and their **Replies** stay as they are; a **Comment** whose text the return removes becomes a **Detached comment**.
 - A **Milestone** holds exactly the **Changes** the **Device** that named it had seen. A **Change** made earlier on another **Device** that hadn't synced yet is not part of it.
@@ -212,6 +228,14 @@ _Avoid_: device settings, local settings
 - **Device state** is never stored in the **Vault**. **Vault settings** are, including each **Device**'s overrides of them.
 - A **Device** knows only its own ID; it finds its name and overrides in the **Vault** by that ID.
 - Merging two copies of a **History** keeps every **Change** from both; nothing is ever lost or chosen between.
+- **Mods** are added to and removed from each **Work** separately.
+- Which **Mods** a **Work** has is kept in the **Vault**, not in its **History**, so returning to a **Milestone** or a **Revert** never adds or removes a **Mod**.
+- A new **Work** starts with the **Vault**'s **Mods** for new **Works**.
+- A **Device** can hide a **Mod** for itself without removing it from the **Work**.
+- A **Device** whose app doesn't have a **Mod** leaves it on the **Work** as it is; a newer app's **Mods** are never lost because an older one changed the list.
+- A **Mod** never changes a **Work**'s text or how it renders or exports, so a **Work** gives the same **Text file**, PDF and `.docx` whichever **Mods** it has.
+- A **Mod** may keep its own data in the **Vault**; removing it from a **Work** hides that data but never deletes it.
+- **Chapters**, **Story elements**, **Styles**, **Looks**, **Comments** and the **History view** are part of the app, not **Mods**.
 
 ## Example dialogue
 

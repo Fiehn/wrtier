@@ -19,6 +19,10 @@ describe("what the panel remembers", () => {
   });
 
   it("ignores a tab it doesn't know", () => {
-    expect(readPanelState(stored({ panel: "open", "panel-tab": "history" }))).toEqual({ shown: true, tab: "pages" });
+    expect(readPanelState(stored({ panel: "open", "panel-tab": "outline" }))).toEqual({ shown: true, tab: "pages" });
+  });
+
+  it("remembers the History tab", () => {
+    expect(readPanelState(stored({ panel: "open", "panel-tab": "history" }))).toEqual({ shown: true, tab: "history" });
   });
 });

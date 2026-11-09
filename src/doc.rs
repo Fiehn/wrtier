@@ -14,6 +14,15 @@ use crate::layout::{Layout, MoveInfo, Piece};
 use rustc_hash::FxHashSet;
 use std::collections::{HashMap, HashSet};
 
+mod colours;
+mod compare;
+mod history;
+mod snippets;
+pub use colours::SessionText;
+pub use compare::{Comparison, Stretch, Version};
+pub use history::{LeftOut, Reverted, SessionPart, Summary};
+pub use snippets::{FieldLine, MovedFrom, Segment, SegmentKind, Snippet, Snippets};
+
 pub struct Doc {
     tree: Tree,
     device: DeviceId,
@@ -33,6 +42,7 @@ pub struct Doc {
     replies: Vec<ReplyMade>,                       // every Reply, as made
     session: Option<(ChangeId, u64)>,              // this Device's current Session: (its first Change, time of the last)
     sessions: HashMap<ChangeId, Vec<ChangeId>>,    // every Session → its Changes
+    made: HashMap<ChangeId, history::Made>,        // every Change → when, and what it did (for the History view)
     layout: Layout,
     // Worked out by `refresh` (or a fast path) after every Change, so reading the text doesn't redo it.
     visible: Vec<u32>, // the visible characters' tree nodes, in reading order
@@ -108,6 +118,9 @@ pub struct MergeNotice {
     pub chars: Vec<CharId>,
     /// The same characters as text, to quote in the History view.
     pub text: String,
+    /// The same characters as places in the text: the first and last of each run that sits
+    /// together, in reading order ("Show me" steps through them).
+    pub places: Vec<(CharId, CharId)>,
 }
 
 /// A named point in the History the Author can return to or compare against.
@@ -220,6 +233,7 @@ impl Doc {
             replies: Vec::new(),
             session: None, // a Work just opened: the first Change starts a new Session
             sessions: HashMap::new(),
+            made: HashMap::new(),
             layout: Layout::default(),
             visible: Vec::new(),
             burst: None,
@@ -307,12 +321,22 @@ impl Doc {
         found.into_iter()
             .filter(|(key, _)| !self.is_dismissed(*key))
             .map(|(key, involved)| {
-                // Walk the visible text so the characters come out in reading order.
-                let nodes: Vec<u32> = self.visible.iter().copied().filter(|n| involved.contains(n)).collect();
+                // Walk the visible text so the characters come out in reading order; a gap in
+                // where they sit starts a new place.
+                let found: Vec<(usize, u32)> = self.visible.iter().copied().enumerate().filter(|(_, n)| involved.contains(n)).collect();
+                let mut places: Vec<(CharId, CharId)> = Vec::new();
+                for (i, &(at, node)) in found.iter().enumerate() {
+                    let id = self.tree.id_of(node);
+                    match places.last_mut() {
+                        Some(place) if found[i - 1].0 + 1 == at => place.1 = id,
+                        _ => places.push((id, id)),
+                    }
+                }
                 MergeNotice {
                     key,
-                    chars: nodes.iter().map(|&n| self.tree.id_of(n)).collect(),
-                    text: nodes.iter().filter_map(|&n| self.tree.char_at(n)).collect(),
+                    chars: found.iter().map(|&(_, n)| self.tree.id_of(n)).collect(),
+                    text: found.iter().filter_map(|&(_, n)| self.tree.char_at(n)).collect(),
+                    places,
                 }
             })
             .collect()
@@ -519,6 +543,7 @@ impl Doc {
         let seen = self.seen.entry(change.id.device).or_insert(0);
         *seen = (*seen).max(change.id.counter);
         self.sessions.entry(change.session).or_default().push(change.id);
+        self.made.insert(change.id, history::Made::of(change));
         self.clock.observe(change.hlc);
         if change.id.device == self.device {
             // A Change of ours, e.g. loaded from the file: never reuse its counter.
@@ -1763,6 +1788,7 @@ mod test {
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].key, NoticeKey::Overlap { later: b.id, earlier: a.id });
         assert_eq!(notices[0].text, "cd");             // the text both Moves took
+        assert_eq!(notices[0].places, [(notices[0].chars[0], notices[0].chars[1])], "one place, from c to d");
         assert_eq!(phone.merge_notices(), notices);    // worked out the same way everywhere
     }
 
@@ -1778,7 +1804,11 @@ mod test {
         assert_eq!(laptop.text(), "cdeafb");
         laptop.insert_local(1, "XYZ", 3000);          // inside "cd", which both Moves took
         assert_eq!(laptop.text(), "cXYZdeafb");
-        assert_eq!(laptop.merge_notices()[0].text, "cd");
+        let notice = laptop.merge_notices().remove(0);
+        assert_eq!(notice.text, "cd");
+        // "XYZ" now sits between them: two places to show.
+        let (c, d) = (notice.chars[0], notice.chars[1]);
+        assert_eq!(notice.places, [(c, c), (d, d)]);
     }
 
     #[test]

@@ -302,6 +302,60 @@ fn make_milestone(state: State<AppState>, id: String, name: String) -> Result<Op
     with_app(&state, |app| open_vault_of(app)?.make_milestone(&id, &name, now_ms()))
 }
 
+/// The History tab: an open Work's newest `limit` Sessions and all its Milestones.
+#[tauri::command]
+fn get_history(state: State<AppState>, id: String, limit: usize, filtered: bool) -> Result<vault::HistoryView, String> {
+    with_app(&state, |app| open_vault_of(app)?.history(&id, limit, filtered, now_ms()))
+}
+
+/// What some of an open Work's Changes did (a Session's), as snippets.
+#[tauri::command]
+fn get_snippets(state: State<AppState>, id: String, changes: Vec<String>, filtered: bool) -> Result<vault::SnippetsView, String> {
+    with_app(&state, |app| open_vault_of(app)?.snippets(&id, &changes, filtered, now_ms()))
+}
+
+/// What changed in an open Work from one version to another: a Milestone's ID, or none for now.
+#[tauri::command]
+fn compare_versions(state: State<AppState>, id: String, from: Option<String>, to: Option<String>) -> Result<vault::ComparisonView, String> {
+    with_app(&state, |app| open_vault_of(app)?.compare_versions(&id, from.as_deref(), to.as_deref(), now_ms()))
+}
+
+/// What reverting some of an open Work's Changes would do (the Revert itself is an op in its queue).
+#[tauri::command]
+fn preview_revert(state: State<AppState>, id: String, changes: Vec<String>) -> Result<vault::RevertPreview, String> {
+    with_app(&state, |app| open_vault_of(app)?.preview_revert(&id, &changes, now_ms()))
+}
+
+/// What restoring some of an open Work's Changes would bring back.
+#[tauri::command]
+fn preview_restore(state: State<AppState>, id: String, changes: Vec<String>) -> Result<vault::RestorePreview, String> {
+    with_app(&state, |app| open_vault_of(app)?.preview_restore(&id, &changes, now_ms()))
+}
+
+/// What returning an open Work to a Milestone would do.
+#[tauri::command]
+fn preview_return(state: State<AppState>, id: String, milestone: String) -> Result<vault::ReturnPreview, String> {
+    with_app(&state, |app| open_vault_of(app)?.preview_return(&id, &milestone, now_ms()))
+}
+
+/// Gives a Milestone of an open Work a new name. Returns the Work's state.
+#[tauri::command]
+fn rename_milestone(state: State<AppState>, id: String, milestone: String, name: String) -> Result<WorkState, String> {
+    with_app(&state, |app| open_vault_of(app)?.rename_milestone(&id, &milestone, &name, now_ms()))
+}
+
+/// Deletes a Milestone of an open Work, or brings a deleted one back. Returns the Work's state.
+#[tauri::command]
+fn set_milestone_deleted(state: State<AppState>, id: String, milestone: String, deleted: bool) -> Result<WorkState, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_milestone_deleted(&id, &milestone, deleted, now_ms()))
+}
+
+/// Dismisses a Merge notice in an open Work (recorded, so it's gone on every Device).
+#[tauri::command]
+fn dismiss_notice(state: State<AppState>, id: String, key: String) -> Result<WorkState, String> {
+    with_app(&state, |app| open_vault_of(app)?.dismiss_notice(&id, &key, now_ms()))
+}
+
 /// A Work's Preamble, for the dialog. The Work needn't be open.
 #[tauri::command]
 fn get_preamble(state: State<AppState>, id: String) -> Result<vault::PreambleView, String> {
@@ -647,6 +701,15 @@ pub fn run() {
             get_preamble,
             set_preamble,
             get_milestones,
+            get_history,
+            get_snippets,
+            compare_versions,
+            preview_revert,
+            preview_restore,
+            preview_return,
+            rename_milestone,
+            set_milestone_deleted,
+            dismiss_notice,
             make_milestone,
             export_pdf,
             export_docx,

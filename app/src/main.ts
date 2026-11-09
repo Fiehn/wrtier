@@ -11,6 +11,7 @@ import { PreambleDialog, type Preamble } from "./preambledialog";
 import { openReviewers, type Reviewer } from "./reviewers";
 import { SidePanel } from "./sidepanel";
 import { CommentsPanel } from "./commentspanel";
+import { HistoryPanel, type ComparisonView, type HistoryView, type RestorePreview, type ReturnPreview, type RevertPreview, type SnippetsView } from "./historypanel";
 import { bindingsFrom, isCommand, keyLabel, onBindingsChanged, setBindings, withKey, type CommandId } from "./keys";
 import { openShortcuts } from "./shortcutsdialog";
 
@@ -145,6 +146,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     $("panel-toggle").hidden = !tabs.activeIsWork;
     preview.show(tabs.activeIsWork ? tabs.active : null);
     commentsPanel.render();
+    historyPanel.workChanged();
     rememberSoon();
     highlightOpen();
   },
@@ -164,6 +166,11 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
   },
   addComment: (id) => startComment(id),
   selectionMenu: (id, x, y) => showMenu(x, y, selectionMenu(id)),
+  historyGrew: (id) => historyPanel.grew(id),
+  textHistory: (id) => textHistory(id),
+  notices: (count) => {
+    $("panel-tab-history").textContent = count > 0 ? `History (${count})` : "History";
+  },
 });
 
 // ---- The side panel (Ctrl+Shift+P): the Page preview and the Comments ----
@@ -177,14 +184,79 @@ const preview = new PagePreview($("preview-bar"), $("preview-pages"), $<HTMLSele
   error: showError,
 });
 
+// ---- The History ----
+
+const historyPanel = new HistoryPanel($("history-list"), {
+  work: () => (tabs.activeIsWork ? tabs.active : null),
+  load: (work, limit, filtered) => invoke<HistoryView>("get_history", { id: work, limit, filtered }),
+  snippets: (work, changes, filtered) => invoke<SnippetsView>("get_snippets", { id: work, changes, filtered }),
+  compare: (work, from, to) => invoke<ComparisonView>("compare_versions", { id: work, from, to }),
+  previewRevert: (work, changes) => invoke<RevertPreview>("preview_revert", { id: work, changes }),
+  previewRestore: (work, changes) => invoke<RestorePreview>("preview_restore", { id: work, changes }),
+  previewReturn: (work, milestone) => invoke<ReturnPreview>("preview_return", { id: work, milestone }),
+  act: (work, op) => {
+    clearError();
+    tabs.history(work, op);
+  },
+  find: (work, first, last) => tabs.findText(work, first, last),
+  nameMilestone: (work) => nameMilestone(work),
+  renameMilestone: async (work, milestone, name) => {
+    tabs.status(work, await invoke<WorkState>("rename_milestone", { id: work, milestone, name }));
+    await preview.milestonesChanged(work);
+  },
+  setMilestoneDeleted: async (work, milestone, deleted) => {
+    tabs.status(work, await invoke<WorkState>("set_milestone_deleted", { id: work, milestone, deleted }));
+    await preview.milestonesChanged(work);
+  },
+  dismissNotice: async (work, key) => {
+    tabs.status(work, await invoke<WorkState>("dismiss_notice", { id: work, key }));
+  },
+  openPreamble: (work) => act(() => editPreamble(work)),
+  error: showError,
+});
+$("history-name-milestone").addEventListener("click", () => historyPanel.nameMilestone());
+$("history-compare").addEventListener("click", () => historyPanel.startCompare());
+
+// "Colour text by Session": on or off on this Device (off at first). While it's off, nothing
+// is worked out for it.
+const tintSwitch = $<HTMLInputElement>("history-tint");
+try {
+  tintSwitch.checked = localStorage.getItem("session-colours") === "on";
+} catch {
+  // not remembered: off
+}
+tabs.setTinting(tintSwitch.checked);
+tintSwitch.addEventListener("change", () => {
+  tabs.setTinting(tintSwitch.checked);
+  try {
+    localStorage.setItem("session-colours", tintSwitch.checked ? "on" : "off");
+  } catch {
+    // not remembered, then: no harm done
+  }
+});
+
+/** Its key (Ctrl+Shift+H at first) or "History of this text": the History tab narrows to the
+ *  selection, or to the paragraph the cursor is in. */
+function textHistory(id: string) {
+  act(async () => {
+    const quote = await tabs.stretch(id);
+    if (quote === null) throw new Error("Select some text, or put the cursor in a paragraph, to see its History.");
+    panel.setTab("history");
+    historyPanel.showTextHistory(id, quote);
+  });
+}
+
 // Shown or not, and which tab, are remembered on this Device. The pages only compile while
-// their tab is showing.
+// their tab is showing, and the History only loads while its tab is.
 const panel = new SidePanel(
   $("side-panel"),
-  [$("panel-tab-pages"), $("panel-tab-comments")],
-  { pages: $("preview"), comments: $("comments-pane") },
+  [$("panel-tab-pages"), $("panel-tab-comments"), $("panel-tab-history")],
+  { pages: $("preview"), comments: $("comments-pane"), history: $("history-pane") },
   $("panel-toggle"),
-  (pagesInView) => preview.setOpen(pagesInView),
+  (pagesInView, inView) => {
+    preview.setOpen(pagesInView);
+    historyPanel.setVisible(inView === "history");
+  },
 );
 
 // Resolved Comments' highlights: shown or not on this Device.
@@ -257,6 +329,7 @@ function selectionMenu(id: string): MenuItem[] {
   };
   return [
     { label: withKey("Add Comment", "addComment"), run: () => startComment(id) },
+    { label: withKey("History of this text", "textHistory"), run: () => textHistory(id) },
     "separator",
     { label: "Cut", run: command("cut") },
     { label: "Copy", run: command("copy") },
@@ -389,8 +462,7 @@ $("preview-docx").addEventListener("click", () => act(async () => {
   if (preview.shown) await exportDocx(preview.shown);
 }));
 
-/** Names the current point in a Work's History, to look back at later. (A stopgap until the
- *  History view in Phase 5, which is where Milestones will be made and compared.) */
+/** Names the current point in a Work's History, to come back to or compare with later. */
 async function nameMilestone(id: string) {
   const name = await askText(`Name this point in ${id}'s History:`, "", "Name it",
     "E.g. Draft 2, sent to editor. The Page preview can show the Work as it was then, at any time.");
