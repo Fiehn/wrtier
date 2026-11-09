@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, dropCursor, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from "@codemirror/view";
 import { history, historyKeymap, standardKeymap } from "@codemirror/commands";
-import { LibraryFile, fromDisk } from "./libraryfile";
+import { LibraryFile, fromDisk, libraryId } from "./libraryfile";
 import { storyElements, type ElementInfo } from "./elements";
 import { WorkSync, type WorkState } from "./sync";
 import { formattedView } from "./formatted";
@@ -283,6 +283,11 @@ class Tab {
   rename(id: string, name: string) {
     this.sync.id = id;
     this.setLabel(id, name);
+  }
+
+  /** A library file's new title (the name shown; its path stays). */
+  retitle(title: string) {
+    if (this.file) this.setLabel(this.file.path, title);
   }
 
   private setLabel(title: string, name: string) {
@@ -636,6 +641,11 @@ export class Tabs {
   }
 
   /** The Style library changed on disk: open library files take it in. */
+  /** A library file got a new title: its tab, if open, follows. */
+  libraryRetitled(path: string, title: string) {
+    this.find(libraryId(path))?.retitle(title);
+  }
+
   async libraryChanged() {
     for (const tab of this.open) {
       if (!tab.file) continue;

@@ -392,6 +392,21 @@ fn create_library(state: State<AppState>, kind: library::Kind, name: String, ele
     with_app(&state, |app| library::create(&open_vault_of(app)?.root, kind, &name, element))
 }
 
+/// Gives a library file a new title (the name shown); its file name, which Works use, stays.
+#[tauri::command]
+fn retitle_library(state: State<AppState>, path: String, title: String) -> Result<(), String> {
+    with_app(&state, |app| library::retitle(&open_vault_of(app)?.root, &path, &title))
+}
+
+/// Moves a library file to the Vault's trash folder.
+#[tauri::command]
+fn trash_library(state: State<AppState>, path: String) -> Result<(), String> {
+    with_app(&state, |app| {
+        let root = &open_vault_of(app)?.root;
+        library::trash(root, &root.join(vault::TRASH), &path)
+    })
+}
+
 /// Keeps one version of a library file that has a Conflict copy.
 #[tauri::command]
 fn resolve_library(state: State<AppState>, copy: String, keep: library::Keep) -> Result<(), String> {
@@ -746,6 +761,8 @@ pub fn run() {
             write_library,
             create_library,
             resolve_library,
+            retitle_library,
+            trash_library,
             forget_preview,
         ])
         .run(tauri::generate_context!())

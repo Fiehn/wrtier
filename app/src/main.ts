@@ -5,8 +5,8 @@ import { Tabs, type Layout, type OpenedWork } from "./tabs";
 import { buildTree, foldersOf, type Folder } from "./tree";
 import { showMenu, type MenuItem } from "./menu";
 import { PagePreview, type Milestone } from "./preview";
-import { LibraryPanel } from "./library";
-import { libraryPath } from "./libraryfile";
+import { LibraryPanel, type LibraryItem } from "./library";
+import { libraryId, libraryPath } from "./libraryfile";
 import { PreambleDialog, type Preamble } from "./preambledialog";
 import { openReviewers, type Reviewer } from "./reviewers";
 import { SidePanel } from "./sidepanel";
@@ -402,8 +402,60 @@ function remember() {
 
 const library: LibraryPanel = new LibraryPanel($("library-list"), $("library-conflicts"), {
   open: (path, title) => openLibraryFile(path, title),
+  menu: (item, x, y) => libraryMenu(item, x, y),
   error: showError,
 });
+
+const KIND_NAMES: Record<LibraryItem["kind"], string> = { style: "Style", look: "Look", storyElement: "Story element" };
+
+/** Right-click on a Style, Look or Story element: open, rename or remove it. */
+function libraryMenu(item: LibraryItem, x: number, y: number) {
+  const run = (f: () => Promise<unknown>) => () => act(f);
+  const items: MenuItem[] = [
+    { label: "Open", run: run(() => openLibraryFile(item.path, item.title)) },
+    "separator",
+    { label: "Rename…", run: run(() => renameLibraryItem(item)) },
+  ];
+  // The built-in Story elements are part of every Work, so they stay.
+  if (!(item.kind === "storyElement" && library.builtIn.includes(item.name))) {
+    items.push({ label: "Remove…", run: run(() => removeLibraryItem(item)) });
+  }
+  showMenu(x, y, items);
+}
+
+/**
+ * Renaming changes the name shown (the title in the file's first line). The file keeps its
+ * name, which is what Works and Looks find it by, so nothing using it loses it.
+ */
+async function renameLibraryItem(item: LibraryItem) {
+  const what = KIND_NAMES[item.kind];
+  const hint = item.kind === "storyElement"
+    ? `It's still written as #${item.name} in the text; only the name shown changes.`
+    : `Only the name shown changes: its file stays ${item.path.split("/").pop()}, so the Works and Looks using it still find it.`;
+  const title = await askText(`Rename the ${what} ${item.title} to:`, item.title, "Rename", hint);
+  if (title === null || title.trim() === item.title) return;
+  await tabs.settled(libraryId(item.path)); // anything typed in its tab is saved first
+  await invoke("retitle_library", { path: item.path, title });
+  await library.refresh();
+  tabs.libraryRetitled(item.path, library.titleOf(item.path));
+  await tabs.libraryChanged();
+}
+
+/** Removing moves the file to the Vault's trash folder; Works that recorded it keep their copy. */
+async function removeLibraryItem(item: LibraryItem) {
+  const what = KIND_NAMES[item.kind];
+  const lines = [`Remove the ${what} ${item.title} from the Style library?`];
+  if (item.kind === "style") {
+    const looks = library.items.filter((i) => i.kind === "look" && i.styles.includes(item.name)).map((i) => i.title);
+    if (looks.length) lines.push(`${looks.length === 1 ? "The Look" : "The Looks"} ${looks.join(", ")} ${looks.length === 1 ? "uses" : "use"} it and will say it's missing.`);
+  }
+  lines.push(`Works that use it keep the copy they recorded of it, so their pages don't change. The file goes to the Vault's .trash folder.`);
+  if (!(await confirmAsk(lines.join(" "), "Remove"))) return;
+  await tabs.close(libraryId(item.path)); // saved first, then closed
+  await invoke("trash_library", { path: item.path });
+  await library.refresh();
+  await refreshElements();
+}
 
 async function openLibraryFile(path: string, title: string = library.titleOf(path)): Promise<void> {
   const text = await invoke<string>("read_library", { path });

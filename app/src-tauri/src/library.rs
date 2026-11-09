@@ -143,6 +143,23 @@ fn header(text: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The header line that gives a file's title: "Style: Book text".
+fn label(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Style => "Style:",
+        Kind::Look => "Look:",
+        Kind::StoryElement => "Story element:",
+    }
+}
+
+fn what(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Style => "Style",
+        Kind::Look => "Look",
+        Kind::StoryElement => "Story element",
+    }
+}
+
 /// A Story element's name is its function's: letters, digits and `-`, starting with a letter.
 pub fn is_element_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -164,11 +181,7 @@ fn read_item(root: &Path, path: &Path, text: &str) -> Option<Item> {
         _ => return None,
     };
     let lines = header(text);
-    let label = match kind {
-        Kind::Style => "Style:",
-        Kind::Look => "Look:",
-        Kind::StoryElement => "Story element:",
-    };
+    let label = label(kind);
     let mut item = Item {
         kind, title: name.clone(), name, path: relative(root, path),
         description: String::new(), problems: Vec::new(),
@@ -348,6 +361,71 @@ pub fn create(root: &Path, kind: Kind, name: &str, element: Option<NewElement>) 
     Ok(path)
 }
 
+/// Gives a library file a new title: the name the app shows for it. The file keeps its name,
+/// which is what Works and Looks find it by, so nothing that uses it loses it, and a Story
+/// element is still written as before (`#scene-break()`).
+pub fn retitle(root: &Path, path: &str, title: &str) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() || title.chars().count() > 100 || title.contains(['\n', '\r']) {
+        return Err("A name needs 1 to 100 characters, on one line.".into());
+    }
+    let file = file(root, path)?;
+    let text = std::fs::read_to_string(&file).map_err(err)?;
+    let item = read_item(root, &file, &text).ok_or_else(|| format!("{path} isn't a file in the Style library."))?;
+    let taken = list(root).items.iter()
+        .any(|i| i.kind == item.kind && i.path != item.path && i.title.to_lowercase() == title.to_lowercase());
+    if taken {
+        return Err(format!("There's already a {} called {title}.", what(item.kind)));
+    }
+    // The header's title line becomes the new one; a file without one gets it as its first line.
+    let label = label(item.kind);
+    let mut out = String::with_capacity(text.len() + title.len());
+    let mut in_header = true;
+    let mut done = false;
+    for line in text.split_inclusive('\n') {
+        let bare = line.trim();
+        in_header &= bare.starts_with("//");
+        if in_header && !done && bare.trim_start_matches('/').trim().starts_with(label) {
+            let ending = &line[line.trim_end_matches(['\r', '\n']).len()..];
+            out.push_str(&format!("// {label} {title}{ending}"));
+            done = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    if !done {
+        out = format!("// {label} {title}\n{out}");
+    }
+    std::fs::write(file, out).map_err(err)
+}
+
+/// Moves a library file into the Vault's trash folder (`trash`), at the same place inside it
+/// (`.trash/styles/…`), so it's never lost outright; as "Book text (2).typ" if that's taken.
+/// Works that recorded it keep their own copy. The built-in Story elements stay: every Work
+/// has them.
+pub fn trash(root: &Path, trash: &Path, path: &str) -> Result<(), String> {
+    let file = file(root, path)?;
+    if !file.exists() {
+        return Err(format!("{path} isn't in the Style library any more."));
+    }
+    let element = path.strip_prefix(&format!("{FOLDER}/{ELEMENTS}/")).and_then(|n| n.strip_suffix(".typ"));
+    if let Some(name) = element.filter(|name| built_in_elements().any(|(n, _)| n == *name)) {
+        return Err(format!("#{name} is built in: every Work has it, so it can't be removed. It can be changed, though."));
+    }
+    let relative = Path::new(path);
+    let stem = relative.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let ext = relative.extension().and_then(|s| s.to_str()).unwrap_or("typ");
+    let dir = trash.join(relative.parent().unwrap_or(Path::new(FOLDER)));
+    let mut target = dir.join(format!("{stem}.{ext}"));
+    let mut n = 2;
+    while target.exists() {
+        target = dir.join(format!("{stem} ({n}).{ext}"));
+        n += 1;
+    }
+    std::fs::create_dir_all(&dir).map_err(err)?;
+    std::fs::rename(&file, &target).map_err(err)
+}
+
 /// Which version to keep when a library file has a Conflict copy.
 #[derive(serde::Deserialize, Debug, Clone, Copy, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -514,5 +592,55 @@ mod tests {
         assert!(file(dir.path(), "styles/../vault.db").is_err());
         assert!(file(dir.path(), "Rain.typ").is_err());
         assert!(file(dir.path(), "styles/notes.txt").is_err());
+    }
+
+    #[test]
+    fn a_new_title_keeps_the_file_name_so_nothing_loses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        library(dir.path());
+        retitle(dir.path(), "styles/Book text.typ", "Body text").unwrap();
+        let lib = list(dir.path());
+        let item = lib.items.iter().find(|i| i.path == "styles/Book text.typ").unwrap();
+        assert_eq!((item.name.as_str(), item.title.as_str()), ("Book text", "Body text"));
+        // The Looks still find it, and the rest of the file is as it was.
+        assert!(lib.items.iter().all(|i| i.problems.is_empty()), "{:?}", lib.items);
+        let text = read(dir.path(), "styles/Book text.typ").unwrap();
+        assert!(text.starts_with("// Style: Body text\n// Book typography"), "{text}");
+        // A Story element keeps how it's written.
+        retitle(dir.path(), "styles/elements/scene-break.typ", "Section break").unwrap();
+        let lib = list(dir.path());
+        let element = lib.items.iter().find(|i| i.name == "scene-break").unwrap();
+        assert_eq!((element.title.as_str(), element.written_as.as_deref()), ("Section break", Some("#scene-break()")));
+        // A file without a title line gets one; titles stay apart within a kind.
+        write(dir.path(), "styles/Plain.typ", "#set par(justify: false)\n").unwrap();
+        retitle(dir.path(), "styles/Plain.typ", "Ragged right").unwrap();
+        assert_eq!(read(dir.path(), "styles/Plain.typ").unwrap(), "// Style: Ragged right\n#set par(justify: false)\n");
+        assert!(retitle(dir.path(), "styles/Plain.typ", "body TEXT").is_err());
+        assert!(retitle(dir.path(), "styles/Plain.typ", " ").is_err());
+        assert!(retitle(dir.path(), "styles/Plain.typ", "Two\nlines").is_err());
+    }
+
+    #[test]
+    fn removing_puts_the_file_in_the_trash_and_built_in_elements_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        library(dir.path());
+        let bin = dir.path().join(".trash");
+        trash(dir.path(), &bin, "styles/Page numbers.typ").unwrap();
+        assert!(!dir.path().join("styles/Page numbers.typ").exists());
+        assert!(bin.join("styles/Page numbers.typ").exists());
+        // The Looks that named it say so.
+        let lib = list(dir.path());
+        assert!(lib.items.iter().any(|i| i.kind == Kind::Look && i.problems.iter().any(|p| p.contains("Page numbers"))));
+        // A second one of the same name doesn't replace the first in the trash.
+        write(dir.path(), "styles/Page numbers.typ", "// Style: Page numbers\n").unwrap();
+        trash(dir.path(), &bin, "styles/Page numbers.typ").unwrap();
+        assert!(bin.join("styles/Page numbers (2).typ").exists());
+        write(dir.path(), "styles/elements/dream.typ", "// Story element: Dream\n").unwrap();
+        trash(dir.path(), &bin, "styles/elements/dream.typ").unwrap();
+        assert!(bin.join("styles/elements/dream.typ").exists());
+        assert!(trash(dir.path(), &bin, "styles/elements/part.typ").is_err());
+        assert!(dir.path().join("styles/elements/part.typ").exists());
+        assert!(trash(dir.path(), &bin, "styles/Nothing.typ").is_err());
+        assert!(trash(dir.path(), &bin, "../outside.typ").is_err());
     }
 }

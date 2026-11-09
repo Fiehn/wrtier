@@ -25,6 +25,8 @@ export type NewElement = { title: string; shownAs: string; docx: string; descrip
 export type LibraryHooks = {
   /** Opens a library file in a tab. */
   open(path: string, title: string): Promise<void>;
+  /** Right-click on a file: what can be done with it (rename, remove), at (x, y). */
+  menu(item: LibraryItem, x: number, y: number): void;
   error(message: string): void;
 };
 
@@ -34,10 +36,23 @@ const GROUPS: { kind: Kind; label: string }[] = [
   { kind: "storyElement", label: "Story elements" },
 ];
 
+/** Which groups are open (Device state, in local storage): closed at first. */
+const OPEN_KEY = "library-open";
+
+function readOpen(): Set<Kind> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(OPEN_KEY) ?? "[]") as Kind[]);
+  } catch {
+    return new Set();
+  }
+}
+
 export class LibraryPanel {
   items: LibraryItem[] = [];
   /** The built-in Story elements' names: every Work has them. */
   builtIn: string[] = [];
+  /** The groups open in the list, kept as they are when it's drawn again. */
+  private open = readOpen();
 
   constructor(
     private readonly list: HTMLElement,
@@ -58,8 +73,22 @@ export class LibraryPanel {
     this.list.replaceChildren();
     for (const group of GROUPS) {
       const items = library.items.filter((i) => i.kind === group.kind);
-      const heading = document.createElement("h3");
-      heading.textContent = group.label;
+      // Each kind is a group of its own that opens and closes, with how many it has.
+      const details = document.createElement("details");
+      details.className = "library-group";
+      details.open = this.open.has(group.kind);
+      const summary = document.createElement("summary");
+      summary.textContent = group.label;
+      const count = document.createElement("span");
+      count.className = "library-count";
+      count.textContent = String(items.length);
+      summary.append(" ", count);
+      // A problem inside a closed group still shows.
+      if (items.some((i) => i.problems.length > 0)) {
+        summary.classList.add("has-problem");
+        summary.title = "Something in here has a problem: hover over the marked one for what.";
+      }
+      details.addEventListener("toggle", () => this.setOpen(group.kind, details.open));
       const ul = document.createElement("ul");
       for (const item of items) ul.append(this.itemElement(item));
       if (items.length === 0) {
@@ -68,7 +97,18 @@ export class LibraryPanel {
         none.textContent = "None yet";
         ul.append(none);
       }
-      this.list.append(heading, ul);
+      details.append(summary, ul);
+      this.list.append(details);
+    }
+  }
+
+  private setOpen(kind: Kind, open: boolean) {
+    if (open) this.open.add(kind);
+    else this.open.delete(kind);
+    try {
+      localStorage.setItem(OPEN_KEY, JSON.stringify([...this.open]));
+    } catch {
+      // not remembered, then: no harm done
     }
   }
 
@@ -91,6 +131,11 @@ export class LibraryPanel {
     }
     button.title = lines.filter(Boolean).join("\n");
     button.addEventListener("click", () => this.hooks.open(item.path, item.title).catch((e) => this.hooks.error(String(e))));
+    button.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation(); // not the Vault's own menu
+      this.hooks.menu(item, e.clientX, e.clientY);
+    });
     li.append(button);
     return li;
   }

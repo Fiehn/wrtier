@@ -370,18 +370,31 @@ kbd {
   color: var(--muted);
 }
 
-#library h3 {
-  margin: 10px 0 4px;
+/* Looks, Styles and Story elements: each a group that opens and closes. */
+.library-group {
+  margin: 8px 0 0 8px;
+}
+
+#library .library-group > summary {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--muted);
+}
+
+.library-count {
+  font-weight: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+#library .library-group > summary.has-problem::after {
+  content: " ⚠";
+  color: var(--warn-text);
 }
 
 #library ul {
   list-style: none;
-  margin: 0;
+  margin: 4px 0 0;
   padding: 0;
 }
 

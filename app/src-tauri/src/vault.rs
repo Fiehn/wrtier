@@ -95,7 +95,7 @@ mod reviewers;
 mod settings;
 pub use history::{ComparisonView, HistoryView, RestorePreview, ReturnPreview, RevertPreview, SnippetsView};
 pub use mods::Mods;
-pub use moves::TrashedWork;
+pub use moves::{TrashedWork, TRASH};
 pub use reviewers::{Reviewer, COLOURS};
 pub use settings::Settings;
 
