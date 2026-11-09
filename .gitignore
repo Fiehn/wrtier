@@ -6,3 +6,7 @@
 # Written by `cargo run --example sample_db`
 /sample.db
 /sample.sync-conflict.db
+
+# The WebKit tests (app/e2e) write these
+/app/test-results
+/app/playwright-report
