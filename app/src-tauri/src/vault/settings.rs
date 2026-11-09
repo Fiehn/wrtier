@@ -13,7 +13,7 @@ const SHARED: &str = "settings";
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
-    /// "system", "light" or "dark".
+    /// "system", "light", "dark", or "vault:<file>" for a theme in the Vault's `themes/`.
     pub theme: String,
     /// The editor's font size in pixels.
     pub font_size: u32,
@@ -59,6 +59,9 @@ fn check_shortcut(command: &str, key: &str) -> Result<(), String> {
 fn check(name: &str, value: &str) -> Result<(&'static str, String), String> {
     match name {
         "theme" if ["system", "light", "dark"].contains(&value) => Ok(("theme", value.to_string())),
+        // A Vault theme, by its file. It may be missing on some Device (not synced yet, or
+        // deleted): the interface then follows the system and says so.
+        "theme" if value.strip_prefix("vault:").is_some_and(crate::themes::is_theme_file) => Ok(("theme", value.to_string())),
         "fontSize" => match value.parse::<u32>() {
             Ok(size) if (10..=40).contains(&size) => Ok(("font_size", size.to_string())),
             _ => Err("The font size must be a whole number from 10 to 40.".into()),
@@ -241,6 +244,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = open(dir.path());
         assert!(vault.set_setting("theme", "purple", false, 1000).is_err());
+        assert!(vault.set_setting("theme", "vault:../vault.db", false, 1000).is_err());
+        vault.set_setting("theme", "vault:sepia.css", true, 1000).unwrap();
+        assert_eq!(vault.settings().theme, "vault:sepia.css");
         assert!(vault.set_setting("fontSize", "3", false, 1000).is_err());
         assert!(vault.set_setting("colour", "red", false, 1000).is_err());
     }

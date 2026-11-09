@@ -18,6 +18,7 @@ import { fillNewWorkMods, openMods } from "./modsdialog";
 import { inUse, modNamed, type ModsState } from "./mods";
 import { ChapterList } from "./chapterlist";
 import { CountLine } from "./countline";
+import { ThemeApplier, themeChoices, VAULT_PREFIX } from "./themes";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -37,7 +38,8 @@ type SyncProblem = { path: string; reason: string };
 type Listing = { entries: Entry[]; problems: SyncProblem[]; folders: string[] };
 type TrashedWork = { id: string; name: string };
 type Settings = {
-  theme: "system" | "light" | "dark";
+  /** "system", "light", "dark", or "vault:<file>" for a theme in the Vault's `themes/`. */
+  theme: string;
   fontSize: number;
   themeHere: boolean;
   fontSizeHere: boolean;
@@ -1257,12 +1259,39 @@ showKeys(); // the defaults, until a Vault's settings say otherwise
 
 // ---- Settings ----
 
+/** The theme setting as last applied, so a change to the Vault's themes can apply it again. */
+let themeSetting = "system";
+
+/** Shows the theme picker's choices and lines for the theme setting as it was last applied. */
+function showThemes() {
+  const { list, resolved } = themes;
+  const select = $<HTMLSelectElement>("theme");
+  select.replaceChildren();
+  const vaultGroup = document.createElement("optgroup");
+  vaultGroup.label = "This Vault's themes";
+  for (const choice of themeChoices(list, resolved.missing)) {
+    const option = new Option(choice.label, choice.value);
+    (choice.group === "vault" ? vaultGroup : select).append(option);
+  }
+  if (vaultGroup.children.length) select.append(vaultGroup);
+  select.value = themeSetting;
+  const missing = $("theme-missing");
+  missing.hidden = !resolved.missing;
+  missing.textContent = resolved.missing
+    ? `The theme ${resolved.missing} isn't in this Vault's themes folder, so the app follows the system. Choose another theme, or import it again.`
+    : "";
+  const problems = $("theme-problems");
+  problems.hidden = list.problems.length === 0;
+  problems.textContent = list.problems.map((p) => `${p.file} in the themes folder isn't a theme: ${p.reason}`).join("\n");
+}
+
+const themes = new ThemeApplier(showThemes);
+
 function applySettings(settings: Settings) {
   const root = document.documentElement;
-  if (settings.theme === "system") delete root.dataset.theme;
-  else root.dataset.theme = settings.theme;
+  themeSetting = settings.theme;
+  void themes.apply(settings.theme);
   root.style.setProperty("--editor-font-size", `${settings.fontSize}px`);
-  $<HTMLSelectElement>("theme").value = settings.theme;
   $<HTMLInputElement>("theme-here").checked = settings.themeHere;
   $<HTMLInputElement>("font-size").value = String(settings.fontSize);
   $<HTMLInputElement>("font-size-here").checked = settings.fontSizeHere;
@@ -1297,6 +1326,23 @@ function setting(name: string, value: string, here: boolean) {
 
 $("theme").addEventListener("change", () => setting("theme", $<HTMLSelectElement>("theme").value, $<HTMLInputElement>("theme-here").checked));
 $("theme-here").addEventListener("change", () => setting("theme", $<HTMLSelectElement>("theme").value, $<HTMLInputElement>("theme-here").checked));
+// Importing copies a theme's file into the Vault's themes folder, then uses it.
+$("import-theme").addEventListener("click", () => act(async () => {
+  type Imported = { status: "imported"; file: string; name: string } | { status: "exists"; name: string };
+  const path = await invoke<string | null>("pick_theme_file");
+  if (path === null) return;
+  let done = await invoke<Imported>("import_theme", { path, replace: false });
+  if (done.status === "exists") {
+    if (!(await confirmAsk(`This Vault already has a theme called “${done.name}”. Replace it with the one you picked?`, "Replace"))) return;
+    done = await invoke<Imported>("import_theme", { path, replace: true });
+  }
+  if (done.status !== "imported") return;
+  setting("theme", VAULT_PREFIX + done.file, $<HTMLInputElement>("theme-here").checked);
+}));
+
+// A theme was added, changed or removed (here, in another editor, or from another Device).
+void listen("themes-changed", () => void themes.apply(themeSetting));
+
 $("font-size").addEventListener("change", () => setting("fontSize", $<HTMLInputElement>("font-size").value, $<HTMLInputElement>("font-size-here").checked));
 $("font-size-here").addEventListener("change", () => setting("fontSize", $<HTMLInputElement>("font-size").value, $<HTMLInputElement>("font-size-here").checked));
 // Afterwards the highlights take any new names and colours.

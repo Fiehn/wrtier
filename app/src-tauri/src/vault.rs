@@ -46,6 +46,8 @@ pub struct Vault {
     vault_stamp: Option<(std::time::SystemTime, u64)>,
     /// The Style library's files as last seen: if they change, the interface hears of it.
     library_stamp: Vec<(PathBuf, u64, Option<std::time::SystemTime>)>,
+    /// The theme files as last seen: if they change, the interface hears of it.
+    themes_stamp: Vec<(PathBuf, u64, Option<std::time::SystemTime>)>,
     /// Counts the library's changes: a Work that recorded what it uses as of an older count
     /// records the new versions before its next edit.
     library_generation: u64,
@@ -252,6 +254,7 @@ impl Vault {
             aliases: HashMap::new(),
             vault_stamp: file_stamp(&file),
             library_stamp: Vec::new(),
+            themes_stamp: crate::themes::stamp(root),
             library_generation: 0,
             defaults_problem: None,
         };
@@ -288,6 +291,15 @@ impl Vault {
             self.library_generation += 1;
             self.refresh_style_notices();
         }
+        changed
+    }
+
+    /// Has a theme in `themes/` been added, changed or removed since this was last asked (here,
+    /// in another editor, or from another Device)?
+    pub fn themes_changed(&mut self) -> bool {
+        let now = crate::themes::stamp(&self.root);
+        let changed = now != self.themes_stamp;
+        self.themes_stamp = now;
         changed
     }
 

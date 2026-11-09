@@ -1,62 +1,123 @@
-/* The theme follows the Vault setting: light, dark, or the system's (no data-theme). */
-:root {
-  --bg: #fbfaf7;
-  --panel: #f1efe9;
-  --text: #22201c;
-  --muted: #77726a;
-  --line: #dedad1;
-  --accent: #3b5f8a;
-  --warn-bg: #fbefd9;
-  --warn-text: #6b4a10;
-  --error-bg: #f8dfdc;
-  --error-text: #7a221a;
-  --chip: #e6e2d9;
-  --chip-hover: #dcd7cc;
-  --chip-open: #d3dbe6;
-  --editor-font-size: 17px;
-  /* Reviewer colour slots (vault/reviewers.rs): the colour itself, for names and swatches, and
-     a see-through one for highlighting their Comments' text (overlapping highlights darken). A CSS theme can redefine any of them. */
-  --reviewer-teal: #1c7c74;
-  --reviewer-teal-soft: rgb(28 124 116 / 0.2);
-  --reviewer-amber: #946500;
-  --reviewer-amber-soft: rgb(148 101 0 / 0.2);
-  --reviewer-red: #b0343a;
-  --reviewer-red-soft: rgb(176 52 58 / 0.2);
-  --reviewer-violet: #6a4bb0;
-  --reviewer-violet-soft: rgb(106 75 176 / 0.2);
-  --reviewer-green: #4a7c22;
-  --reviewer-green-soft: rgb(74 124 34 / 0.2);
-  --reviewer-orange: #b5531a;
-  --reviewer-orange-soft: rgb(181 83 26 / 0.2);
-  --reviewer-pink: #a83a7c;
-  --reviewer-pink-soft: rgb(168 58 124 / 0.2);
-  --reviewer-brown: #8a5a3c;
-  --reviewer-brown-soft: rgb(138 90 60 / 0.2);
-  --comment-author: #3b5f8a;
-  --comment-author-soft: rgb(59 95 138 / 0.18);
-  --comment-unknown: #77726a;
-  --comment-unknown-soft: rgb(119 114 106 / 0.2);
-  /* "Colour text by Session": the newest Session's text (0) to the fifth newest (4). */
-  --session-tint-0: rgb(226 194 48 / 0.32);
-  --session-tint-1: rgb(226 194 48 / 0.23);
-  --session-tint-2: rgb(226 194 48 / 0.16);
-  --session-tint-3: rgb(226 194 48 / 0.1);
-  --session-tint-4: rgb(226 194 48 / 0.06);
-  /* Typst colouring in the Raw view and Style library tabs (colouring.ts). */
-  --syntax-comment: #8a857b;
-  --syntax-keyword: #8a3b6e;
-  --syntax-function: #27678a;
-  --syntax-string: #4d7a2a;
-  --syntax-number: #a4561c;
-  --syntax-label: #7a5a12;
-  --syntax-punctuation: #8a857b;
-  --syntax-escape: #a4561c;
-  --syntax-heading: var(--text);
-  color-scheme: light;
-}
+/* The theme follows the Vault setting: light, dark, the system's (no data-theme), or a Vault
+   theme from `themes/` (data-theme says whether it's light or dark; its file is added after
+   this one by main.ts). The built-in colours and the layout variables a theme can rely on are
+   in a layer, so a theme's plain `:root { … }` overrides them whatever its selectors. The
+   reference for theme authors is docs/themes/README.md. */
+@layer theme-defaults {
+  :root {
+    --bg: #fbfaf7;
+    --panel: #f1efe9;
+    --text: #22201c;
+    --muted: #77726a;
+    --line: #dedad1;
+    --accent: #3b5f8a;
+    --warn-bg: #fbefd9;
+    --warn-text: #6b4a10;
+    --error-bg: #f8dfdc;
+    --error-text: #7a221a;
+    --chip: #e6e2d9;
+    --chip-hover: #dcd7cc;
+    --chip-open: #d3dbe6;
+    --editor-font-size: 17px;
+    /* Layout a theme can change: the editor's font, the text column's width, its line spacing. */
+    --editor-font-family: Georgia, "Iowan Old Style", serif;
+    --text-width: 44em;
+    --editor-line-height: 1.6;
+    /* Reviewer colour slots (vault/reviewers.rs): the colour itself, for names and swatches, and
+       a see-through one for highlighting their Comments' text (overlapping highlights darken). A CSS theme can redefine any of them. */
+    --reviewer-teal: #1c7c74;
+    --reviewer-teal-soft: rgb(28 124 116 / 0.2);
+    --reviewer-amber: #946500;
+    --reviewer-amber-soft: rgb(148 101 0 / 0.2);
+    --reviewer-red: #b0343a;
+    --reviewer-red-soft: rgb(176 52 58 / 0.2);
+    --reviewer-violet: #6a4bb0;
+    --reviewer-violet-soft: rgb(106 75 176 / 0.2);
+    --reviewer-green: #4a7c22;
+    --reviewer-green-soft: rgb(74 124 34 / 0.2);
+    --reviewer-orange: #b5531a;
+    --reviewer-orange-soft: rgb(181 83 26 / 0.2);
+    --reviewer-pink: #a83a7c;
+    --reviewer-pink-soft: rgb(168 58 124 / 0.2);
+    --reviewer-brown: #8a5a3c;
+    --reviewer-brown-soft: rgb(138 90 60 / 0.2);
+    --comment-author: #3b5f8a;
+    --comment-author-soft: rgb(59 95 138 / 0.18);
+    --comment-unknown: #77726a;
+    --comment-unknown-soft: rgb(119 114 106 / 0.2);
+    /* "Colour text by Session": the newest Session's text (0) to the fifth newest (4). */
+    --session-tint-0: rgb(226 194 48 / 0.32);
+    --session-tint-1: rgb(226 194 48 / 0.23);
+    --session-tint-2: rgb(226 194 48 / 0.16);
+    --session-tint-3: rgb(226 194 48 / 0.1);
+    --session-tint-4: rgb(226 194 48 / 0.06);
+    /* Typst colouring in the Raw view and Style library tabs (colouring.ts). */
+    --syntax-comment: #8a857b;
+    --syntax-keyword: #8a3b6e;
+    --syntax-function: #27678a;
+    --syntax-string: #4d7a2a;
+    --syntax-number: #a4561c;
+    --syntax-label: #7a5a12;
+    --syntax-punctuation: #8a857b;
+    --syntax-escape: #a4561c;
+    --syntax-heading: var(--text);
+    color-scheme: light;
+  }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #1c1b19;
+      --panel: #24231f;
+      --text: #e8e4dc;
+      --muted: #9a958b;
+      --line: #36342f;
+      --accent: #8fb0d8;
+      --warn-bg: #3a2f17;
+      --warn-text: #f1d49a;
+      --error-bg: #3d1f1b;
+      --error-text: #f2b8b0;
+      --chip: #2f2d28;
+      --chip-hover: #383530;
+      --chip-open: #2c3a4a;
+      --reviewer-teal: #6cc7bd;
+      --reviewer-teal-soft: rgb(108 199 189 / 0.26);
+      --reviewer-amber: #e6bd57;
+      --reviewer-amber-soft: rgb(230 189 87 / 0.26);
+      --reviewer-red: #ef8d8f;
+      --reviewer-red-soft: rgb(239 141 143 / 0.26);
+      --reviewer-violet: #b39cf0;
+      --reviewer-violet-soft: rgb(179 156 240 / 0.26);
+      --reviewer-green: #9fcf6f;
+      --reviewer-green-soft: rgb(159 207 111 / 0.26);
+      --reviewer-orange: #f0a06a;
+      --reviewer-orange-soft: rgb(240 160 106 / 0.26);
+      --reviewer-pink: #e98fc4;
+      --reviewer-pink-soft: rgb(233 143 196 / 0.26);
+      --reviewer-brown: #d1a283;
+      --reviewer-brown-soft: rgb(209 162 131 / 0.26);
+      --comment-author: #8fb0d8;
+      --comment-author-soft: rgb(143 176 216 / 0.24);
+      --comment-unknown: #9a958b;
+      --comment-unknown-soft: rgb(154 149 139 / 0.24);
+      --session-tint-0: rgb(240 214 110 / 0.22);
+      --session-tint-1: rgb(240 214 110 / 0.16);
+      --session-tint-2: rgb(240 214 110 / 0.11);
+      --session-tint-3: rgb(240 214 110 / 0.07);
+      --session-tint-4: rgb(240 214 110 / 0.045);
+      --syntax-comment: #8b867c;
+      --syntax-keyword: #d59ac4;
+      --syntax-function: #8fc0d8;
+      --syntax-string: #a9cf86;
+      --syntax-number: #e7a874;
+      --syntax-label: #e2c27a;
+      --syntax-punctuation: #9a958b;
+      --syntax-escape: #e7a874;
+      --syntax-heading: var(--text);
+      color-scheme: dark;
+    }
+  }
+
+  :root[data-theme="dark"] {
     --bg: #1c1b19;
     --panel: #24231f;
     --text: #e8e4dc;
@@ -106,57 +167,6 @@
     --syntax-heading: var(--text);
     color-scheme: dark;
   }
-}
-
-:root[data-theme="dark"] {
-  --bg: #1c1b19;
-  --panel: #24231f;
-  --text: #e8e4dc;
-  --muted: #9a958b;
-  --line: #36342f;
-  --accent: #8fb0d8;
-  --warn-bg: #3a2f17;
-  --warn-text: #f1d49a;
-  --error-bg: #3d1f1b;
-  --error-text: #f2b8b0;
-  --chip: #2f2d28;
-  --chip-hover: #383530;
-  --chip-open: #2c3a4a;
-  --reviewer-teal: #6cc7bd;
-  --reviewer-teal-soft: rgb(108 199 189 / 0.26);
-  --reviewer-amber: #e6bd57;
-  --reviewer-amber-soft: rgb(230 189 87 / 0.26);
-  --reviewer-red: #ef8d8f;
-  --reviewer-red-soft: rgb(239 141 143 / 0.26);
-  --reviewer-violet: #b39cf0;
-  --reviewer-violet-soft: rgb(179 156 240 / 0.26);
-  --reviewer-green: #9fcf6f;
-  --reviewer-green-soft: rgb(159 207 111 / 0.26);
-  --reviewer-orange: #f0a06a;
-  --reviewer-orange-soft: rgb(240 160 106 / 0.26);
-  --reviewer-pink: #e98fc4;
-  --reviewer-pink-soft: rgb(233 143 196 / 0.26);
-  --reviewer-brown: #d1a283;
-  --reviewer-brown-soft: rgb(209 162 131 / 0.26);
-  --comment-author: #8fb0d8;
-  --comment-author-soft: rgb(143 176 216 / 0.24);
-  --comment-unknown: #9a958b;
-  --comment-unknown-soft: rgb(154 149 139 / 0.24);
-  --session-tint-0: rgb(240 214 110 / 0.22);
-  --session-tint-1: rgb(240 214 110 / 0.16);
-  --session-tint-2: rgb(240 214 110 / 0.11);
-  --session-tint-3: rgb(240 214 110 / 0.07);
-  --session-tint-4: rgb(240 214 110 / 0.045);
-  --syntax-comment: #8b867c;
-  --syntax-keyword: #d59ac4;
-  --syntax-function: #8fc0d8;
-  --syntax-string: #a9cf86;
-  --syntax-number: #e7a874;
-  --syntax-label: #e2c27a;
-  --syntax-punctuation: #9a958b;
-  --syntax-escape: #e7a874;
-  --syntax-heading: var(--text);
-  color-scheme: dark;
 }
 
 * {
@@ -888,9 +898,9 @@ main > :not(#panes) {
 
 .editor .cm-editor {
   height: 100%;
-  font-family: Georgia, "Iowan Old Style", serif;
+  font-family: var(--editor-font-family);
   font-size: var(--editor-font-size);
-  line-height: 1.6;
+  line-height: var(--editor-line-height);
 }
 
 .editor .cm-editor.cm-focused {
@@ -904,7 +914,7 @@ main > :not(#panes) {
 /* A comfortable column of text in the middle, at least as tall as the window, with room
    below the last line so it can be scrolled up to the middle. */
 .editor .cm-content {
-  max-width: 44em;
+  max-width: var(--text-width);
   margin: 0 auto;
   min-height: 100%;
   padding-bottom: 40vh;
@@ -1300,6 +1310,17 @@ dialog#reviewers {
 
 #settings label.check {
   margin-top: 14px;
+}
+
+/* A chosen theme that's missing, and files in themes/ that aren't themes. */
+#settings .theme-line {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-size: 13px;
+  white-space: pre-line;
 }
 
 #switcher {

@@ -1,0 +1,32 @@
+/* Theme: Sepia, light */
+
+/* An example Wrtier theme: warm paper and brown ink. Import it from Settings → Import theme…,
+   or copy it into your Vault's themes folder. The reference is README.md next to this file.
+   Anything not set here keeps the app's own light colours. */
+
+:root {
+  /* The app */
+  --bg: #f4ecd8;
+  --panel: #ebe1c8;
+  --text: #3b2f22;
+  --muted: #7d6b55;
+  --line: #d9cbaa;
+  --accent: #8a4b2a;
+  --chip: #e3d7b9;
+  --chip-hover: #d9cba8;
+  --chip-open: #e0cfae;
+
+  /* The writing */
+  --editor-font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --text-width: 40em;
+  --editor-line-height: 1.7;
+
+  /* The Author's Comments, in the accent colour */
+  --comment-author: #8a4b2a;
+  --comment-author-soft: rgb(138 75 42 / 0.18);
+
+  /* Typst colouring in the Raw view */
+  --syntax-keyword: #8a4b2a;
+  --syntax-function: #5a6b2a;
+  --syntax-string: #6b5a1c;
+}

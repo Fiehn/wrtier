@@ -9,6 +9,7 @@ pub mod patch;
 pub mod preamble;
 pub mod positions;
 pub mod recovery;
+pub mod themes;
 pub mod typeset;
 pub mod vault;
 pub mod work;
@@ -388,6 +389,36 @@ fn colour_typst(text: String) -> Vec<colouring::Colour> {
     colouring::colour(&text)
 }
 
+/// The Vault's themes, for the theme picker, and the files in `themes/` that aren't themes.
+#[tauri::command]
+fn list_themes(state: State<AppState>) -> Result<themes::Themes, String> {
+    with_app(&state, |app| Ok(themes::list(&open_vault_of(app)?.root)))
+}
+
+/// A Vault theme's CSS.
+#[tauri::command]
+fn read_theme(state: State<AppState>, file: String) -> Result<String, String> {
+    with_app(&state, |app| themes::read(&open_vault_of(app)?.root, &file))
+}
+
+/// Picks a theme's `.css` file to import. None if the Author cancelled.
+#[tauri::command]
+async fn pick_theme_file(app: AppHandle) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().set_title("Import a theme").add_filter("Theme", &["css"]).blocking_pick_file()
+            .and_then(|path| path.into_path().ok())
+            .map(|path| path.display().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Copies a theme into the Vault's `themes/`; one with the same name is replaced only with `replace`.
+#[tauri::command]
+fn import_theme(state: State<AppState>, path: String, replace: bool) -> Result<themes::Imported, String> {
+    with_app(&state, |app| themes::import(&open_vault_of(app)?.root, std::path::Path::new(&path), replace))
+}
+
 /// Saves a library file from its tab.
 #[tauri::command]
 fn write_library(state: State<AppState>, path: String, text: String) -> Result<(), String> {
@@ -489,6 +520,10 @@ fn start_timer(handle: AppHandle) {
         // The Style library changed (in the app, in another editor, or from another Device).
         if with_app(&state, |app| Ok(app.vault.as_mut().is_some_and(|v| v.library_changed()))).unwrap_or(false) {
             let _ = handle.emit("library-changed", ());
+        }
+        // A theme in `themes/` was added, changed or removed.
+        if with_app(&state, |app| Ok(app.vault.as_mut().is_some_and(|v| v.themes_changed()))).unwrap_or(false) {
+            let _ = handle.emit("themes-changed", ());
         }
     });
 }
@@ -766,6 +801,10 @@ pub fn run() {
             export_docx,
             get_library,
             colour_typst,
+            list_themes,
+            read_theme,
+            pick_theme_file,
+            import_theme,
             read_library,
             write_library,
             create_library,
