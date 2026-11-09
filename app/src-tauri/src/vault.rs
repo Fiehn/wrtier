@@ -113,6 +113,12 @@ fn ignore_journals(root: &Path) -> Result<(), String> {
     let Some(folder) = root.ancestors().find(|dir| dir.join(".stfolder").exists()) else {
         return Ok(()); // not in a Syncthing folder (yet)
     };
+    add_journal_ignore(folder)
+}
+
+/// Adds `*-journal` to the `.stignore` in `folder` (a Syncthing folder, or one about to be),
+/// unless it's there already.
+pub fn add_journal_ignore(folder: &Path) -> Result<(), String> {
     let path = folder.join(".stignore");
     let current = match std::fs::read_to_string(&path) {
         Ok(text) => text,

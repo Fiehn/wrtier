@@ -35,10 +35,11 @@ zip = { version = "9.5", default-features = false, features = ["deflate-flate2"]
 typst-ide = "0.15.1"     # click-to-jump from the pages to the text
 typst-kit = { version = "0.15.1", default-features = false, features = ["embedded-fonts", "scan-fonts"] }  # Vault, bundled and Device fonts
 comemo = "0.5"           # Typst's cache, evicted after every compile
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }  # Syncthing's REST API, on this Device only
+roxmltree = "0.21"  # reading Syncthing's settings file; tests also check a .docx's XML (already built for Typst)
 
 [dev-dependencies]
 tempfile = "3"
 rusqlite = { version = "0.41.1", features = ["bundled"] }  # tests write files as another program would
-roxmltree = "0.21"  # tests check a .docx's XML is well-formed (already built for Typst)
 
 # Build profiles live in the workspace root Cargo.toml.

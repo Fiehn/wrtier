@@ -9,6 +9,7 @@ pub mod patch;
 pub mod preamble;
 pub mod positions;
 pub mod recovery;
+pub mod syncthing;
 pub mod themes;
 pub mod typeset;
 pub mod vault;
@@ -419,6 +420,75 @@ fn import_theme(state: State<AppState>, path: String, replace: bool) -> Result<t
     with_app(&state, |app| themes::import(&open_vault_of(app)?.root, std::path::Path::new(&path), replace))
 }
 
+// ---- Syncthing (see `syncthing`): asked without holding the app's lock, so typing never waits ----
+
+/// The Vault's folder and how to reach Syncthing: set by hand on this Device, or found.
+fn syncthing_for(state: &AppState) -> Result<(PathBuf, Option<syncthing::Connection>), String> {
+    let (root, manual) = with_app(state, |app| Ok((open_vault_of(app)?.root.clone(), app.device.syncthing.clone())))?;
+    Ok((root, manual.or_else(syncthing::find)))
+}
+
+/// How the Vault is syncing, for the status line and the Sync dialog.
+#[tauri::command]
+async fn sync_status(state: State<'_, AppState>) -> Result<syncthing::SyncStatus, String> {
+    let (root, connection) = syncthing_for(&state)?;
+    let Some(connection) = connection else {
+        return Ok(syncthing::SyncStatus::NotFound { line: "Syncthing wasn't found".into() });
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let client = syncthing::Client::new(&connection);
+        syncthing::status(&client, &root).unwrap_or_else(|e| syncthing::SyncStatus::from_error(e, &connection))
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Sets Syncthing's address and API key by hand on this Device; both empty goes back to
+/// finding them in Syncthing's settings file.
+#[tauri::command]
+fn set_syncthing(state: State<AppState>, address: String, api_key: String) -> Result<(), String> {
+    let connection = if address.trim().is_empty() && api_key.trim().is_empty() {
+        None
+    } else {
+        let address = syncthing::local_url(&address, false)
+            .ok_or("Syncthing's address must be on this Device, such as 127.0.0.1:8384 or https://127.0.0.1:8384.")?;
+        if api_key.trim().is_empty() {
+            return Err("The API key is missing. Syncthing shows it under Actions → Settings → GUI.".into());
+        }
+        Some(syncthing::Connection { address, api_key: api_key.trim().to_string() })
+    };
+    with_app(&state, |app| {
+        app.device.syncthing = connection;
+        app.device.save()
+    })
+}
+
+/// The address and key set by hand on this Device, for the Sync dialog's form.
+#[tauri::command]
+fn get_syncthing(state: State<AppState>) -> Result<Option<syncthing::Connection>, String> {
+    with_app(&state, |app| Ok(app.device.syncthing.clone()))
+}
+
+/// Shares the Vault's Syncthing folder with a Sync peer (new, or waiting to be accepted).
+#[tauri::command]
+async fn share_with_peer(state: State<'_, AppState>, id: String, name: String) -> Result<(), String> {
+    let (root, connection) = syncthing_for(&state)?;
+    let connection = connection.ok_or("Syncthing wasn't found.")?;
+    tauri::async_runtime::spawn_blocking(move || syncthing::share_with(&syncthing::Client::new(&connection), &root, &id, &name))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Makes the Vault a Syncthing folder, so it can be shared.
+#[tauri::command]
+async fn share_vault_with_syncthing(state: State<'_, AppState>) -> Result<(), String> {
+    let (root, connection) = syncthing_for(&state)?;
+    let connection = connection.ok_or("Syncthing wasn't found.")?;
+    tauri::async_runtime::spawn_blocking(move || syncthing::share_vault(&syncthing::Client::new(&connection), &root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Saves a library file from its tab.
 #[tauri::command]
 fn write_library(state: State<AppState>, path: String, text: String) -> Result<(), String> {
@@ -801,6 +871,11 @@ pub fn run() {
             export_docx,
             get_library,
             colour_typst,
+            sync_status,
+            set_syncthing,
+            get_syncthing,
+            share_with_peer,
+            share_vault_with_syncthing,
             list_themes,
             read_theme,
             pick_theme_file,

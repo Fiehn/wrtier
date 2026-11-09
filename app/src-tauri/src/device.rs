@@ -17,6 +17,9 @@ pub struct DeviceState {
     pub layouts: HashMap<String, Layout>,
     /// Where the window was, and how big.
     pub window: Option<WindowPlace>,
+    /// Syncthing's address and API key, if set by hand (on Android, or when its settings file
+    /// isn't in a usual place). Otherwise the app reads them from Syncthing's settings file.
+    pub syncthing: Option<crate::syncthing::Connection>,
 }
 
 /// The tabs open in a Vault, which one is in front, and where the cursor was in each Work.
@@ -49,6 +52,8 @@ struct Stored {
     layouts: HashMap<String, Layout>,
     #[serde(default)]
     window: Option<WindowPlace>,
+    #[serde(default)]
+    syncthing: Option<crate::syncthing::Connection>,
 }
 
 impl DeviceState {
@@ -62,14 +67,14 @@ impl DeviceState {
                 .and_then(|s| Ok((s.device_id.parse::<DeviceId>()?, s)));
             match parsed {
                 Ok((device, s)) => {
-                    return Ok(DeviceState { dir: dir.to_path_buf(), device, last_vault: s.last_vault, layouts: s.layouts, window: s.window });
+                    return Ok(DeviceState { dir: dir.to_path_buf(), device, last_vault: s.last_vault, layouts: s.layouts, window: s.window, syncthing: s.syncthing });
                 }
                 Err(_) => {
                     let _ = std::fs::rename(&path, dir.join(format!("{FILE}.damaged")));
                 }
             }
         }
-        let state = DeviceState { dir: dir.to_path_buf(), device: new_device_id()?, last_vault: None, layouts: HashMap::new(), window: None };
+        let state = DeviceState { dir: dir.to_path_buf(), device: new_device_id()?, last_vault: None, layouts: HashMap::new(), window: None, syncthing: None };
         state.save()?;
         Ok(state)
     }
@@ -82,6 +87,7 @@ impl DeviceState {
             last_vault: self.last_vault.clone(),
             layouts: self.layouts.clone(),
             window: self.window,
+            syncthing: self.syncthing.clone(),
         };
         let json = serde_json::to_string_pretty(&stored).map_err(|e| e.to_string())?;
         let (path, partial) = (self.dir.join(FILE), self.dir.join(format!("{FILE}.writing")));

@@ -19,6 +19,7 @@
             <button id="open-settings" type="button" title="Settings, Reviewers and keyboard shortcuts" hidden>Settings</button>
           </div>
           <div id="vault-root" class="muted"></div>
+          <button id="sync-status" type="button" class="sync-status" hidden></button>
         </header>
         <div id="sidebar-vault">
         <div id="vault-actions" class="row" hidden>
@@ -318,6 +319,52 @@
         <p class="muted">Optional features for this Work. They change how you see and work on it, never its text or how its pages look. Kept in the Vault, not in the Work's History, so returning to a Milestone leaves them as they are.</p>
         <p id="mods-error" class="dialog-error" hidden></p>
         <ul id="mods-list" class="mod-list"></ul>
+        <menu>
+          <button value="done">Done</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="sync">
+      <form method="dialog">
+        <h2>Sync</h2>
+        <p id="sync-line" class="sync-status"></p>
+        <p id="sync-explain" class="sync-explain" hidden></p>
+        <p id="sync-error" class="sync-error" hidden></p>
+        <p class="row"><button type="button" id="sync-share" hidden>Share this Vault with Syncthing</button></p>
+        <section id="sync-folder" hidden>
+          <h3 id="sync-folder-label"></h3>
+          <ul id="sync-peers" class="sync-list"></ul>
+          <section id="sync-waiting" hidden>
+            <h3>Waiting to be accepted</h3>
+            <ul id="sync-waiting-list" class="sync-list"></ul>
+          </section>
+        </section>
+        <p id="sync-me" class="sync-me" hidden>
+          This Device's Syncthing ID: <code id="sync-my-id"></code>
+          <button type="button" id="sync-copy">Copy</button>
+        </p>
+      </form>
+      <form id="sync-add-form">
+        <section id="sync-add" hidden>
+          <h3>Add a Device</h3>
+          <p class="muted">Its Syncthing ID is shown in Syncthing on that Device, under Actions → Show ID. The other Device then asks to accept this one.</p>
+          <label>Syncthing ID <input id="sync-add-id" autocomplete="off" spellcheck="false" placeholder="MFZWI3D-BONSGYC-…" /></label>
+          <label>Name <input id="sync-add-name" autocomplete="off" placeholder="Phone" /></label>
+          <p class="row"><button type="submit">Add and share the Vault</button></p>
+        </section>
+      </form>
+      <form method="dialog">
+        <details id="sync-connection">
+          <summary>Syncthing's address and API key</summary>
+          <p class="muted">On desktop these are found in Syncthing's own settings. Set them here when Syncthing keeps them somewhere else, or on Android (the Syncthing app shows its API key in its settings). Leave both empty to find them again.</p>
+          <label>Address <input id="sync-address" autocomplete="off" spellcheck="false" placeholder="127.0.0.1:8384" /></label>
+          <label>API key <input id="sync-key" autocomplete="off" spellcheck="false" /></label>
+          <p class="row">
+            <button type="button" id="sync-save">Save</button>
+            <button type="button" id="sync-forget">Find them again</button>
+          </p>
+        </details>
         <menu>
           <button value="done">Done</button>
         </menu>

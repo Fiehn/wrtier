@@ -19,6 +19,7 @@ import { inUse, modNamed, type ModsState } from "./mods";
 import { ChapterList } from "./chapterlist";
 import { CountLine } from "./countline";
 import { ThemeApplier, themeChoices, VAULT_PREFIX } from "./themes";
+import { SyncPanel } from "./syncpanel";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -152,6 +153,9 @@ async function confirmAsk(text: string, yes: string): Promise<boolean> {
   $("ask-confirm-yes").textContent = yes;
   return (await ask($<HTMLDialogElement>("ask-confirm"))) === "yes";
 }
+
+/** How the Vault syncs through Syncthing: the line at the top of the sidebar and its dialog. */
+const syncPanel = new SyncPanel((message) => showError(message), (text, yes) => confirmAsk(text, yes));
 
 /** Runs something the Author asked for, showing any error. */
 function act(run: () => Promise<unknown>) {
@@ -752,6 +756,7 @@ async function openVault(path: string) {
   loadOpenFolders();
   $("vault-actions").hidden = false;
   $("open-settings").hidden = false;
+  syncPanel.start();
   if (opened.deviceName === null) await askDeviceName(opened.suggestedName);
   applySettings(await invoke<Settings>("get_settings"));
   await refreshList();
