@@ -5,6 +5,10 @@
 #
 # The tag must match the version in app/src-tauri/tauri.conf.json. A tag with a suffix
 # (v0.1.0-rc1) makes a pre-release. Check the draft on GitHub's Releases page, then publish it.
+#
+# The Android APK is signed with the release key from two repository secrets:
+#   ANDROID_KEY_BASE64    the .jks file, base64-encoded
+#   ANDROID_KEY_PASSWORD  its password
 
 name: Release
 
@@ -16,7 +20,39 @@ permissions:
   contents: write # create the release and upload its files
 
 jobs:
-  build:
+  # One draft release first, so the builds below don't each try to create it.
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      id: ${{ steps.create.outputs.id }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the tag matches the app's version
+        id: check
+        run: |
+          version=$(jq -r .version app/src-tauri/tauri.conf.json)
+          tag="${GITHUB_REF_NAME}"
+          if [[ "$tag" != "v$version" && "$tag" != "v$version-"* ]]; then
+            echo "::error::The tag $tag doesn't match the version $version in tauri.conf.json."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create the draft release
+        id: create
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          pre=""; [[ "$tag" == *-* ]] && pre="--prerelease"
+          gh release create "$tag" --draft --verify-tag $pre --title "Wrtier $tag" \
+            --notes "Download the file for your system below: the .msi or setup .exe for Windows, the .deb for Debian and Ubuntu, and the .apk for Android when there is one."
+          echo "id=$(gh release view "$tag" --json databaseId -q .databaseId)" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    needs: release
     strategy:
       fail-fast: false
       matrix:
@@ -27,19 +63,8 @@ jobs:
           - platform: ubuntu-22.04
             args: "--bundles deb"
     runs-on: ${{ matrix.platform }}
-
     steps:
       - uses: actions/checkout@v5
-
-      - name: Check the tag matches the app's version
-        shell: bash
-        run: |
-          version=$(jq -r .version app/src-tauri/tauri.conf.json)
-          tag="${GITHUB_REF_NAME}"
-          if [[ "$tag" != "v$version" && "$tag" != "v$version-"* ]]; then
-            echo "::error::The tag $tag doesn't match the version $version in tauri.conf.json."
-            exit 1
-          fi
 
       - name: Linux libraries Tauri needs
         if: runner.os == 'Linux'
@@ -72,8 +97,72 @@ jobs:
         with:
           projectPath: app
           args: ${{ matrix.args }}
-          tagName: ${{ github.ref_name }}
-          releaseName: Wrtier ${{ github.ref_name }}
-          releaseBody: See the assets below to download and install the app.
-          releaseDraft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          releaseId: ${{ needs.release.outputs.id }}
+
+  # Off until the app can open a Vault on Android (v1 plan, Phase 6). Turn it on with the
+  # repository variable ANDROID_RELEASE = true (Settings → Secrets and variables → Actions → Variables).
+  android:
+    needs: release
+    if: vars.ANDROID_RELEASE == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install the Android NDK
+        run: |
+          sdkmanager --install "ndk;28.2.13676358"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
+      - name: Install the editor's packages
+        run: npm ci
+        working-directory: app
+
+      - name: Write the signing key
+        env:
+          KEY: ${{ secrets.ANDROID_KEY_BASE64 }}
+          PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$KEY" || -z "$PASSWORD" ]]; then
+            echo "::error::The ANDROID_KEY_BASE64 and ANDROID_KEY_PASSWORD secrets aren't set."
+            exit 1
+          fi
+          echo "$KEY" | base64 --decode > "$RUNNER_TEMP/wrtier-release.jks"
+          printf 'keyAlias=wrtier\npassword=%s\nstoreFile=%s\n' "$PASSWORD" "$RUNNER_TEMP/wrtier-release.jks" \
+            > app/src-tauri/gen/android/keystore.properties
+
+      # 64-bit ARM only: nearly every Android phone from the last several years.
+      - name: Build the APK
+        run: npm run tauri android build -- --apk --target aarch64
+        working-directory: app
+
+      - name: Upload it to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          apk=$(find app/src-tauri/gen/android/app/build/outputs/apk -name "*-release.apk" | head -1)
+          name="Wrtier_${{ needs.release.outputs.version }}_android-arm64.apk"
+          cp "$apk" "$RUNNER_TEMP/$name"
+          gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/$name" --clobber

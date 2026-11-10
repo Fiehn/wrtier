@@ -9,12 +9,14 @@ import { LibraryPanel, type LibraryItem } from "./library";
 import { libraryId, libraryPath } from "./libraryfile";
 import { PreambleDialog, type Preamble } from "./preambledialog";
 import { openReviewers, type Reviewer } from "./reviewers";
-import { SidePanel } from "./sidepanel";
+import { SidePanel, type PanelTab } from "./sidepanel";
 import { CommentsPanel } from "./commentspanel";
 import { HistoryPanel, type ComparisonView, type HistoryView, type RestorePreview, type ReturnPreview, type RevertPreview, type SnippetsView } from "./historypanel";
 import { bindingsFrom, COMMANDS, isCommand, keyLabel, onBindingsChanged, setBindings, withKey, type CommandId } from "./keys";
 import { openShortcuts } from "./shortcutsdialog";
 import { openLicenses } from "./licensesdialog";
+import { browseForVault, ensureFilesAccess, onAndroid } from "./android";
+import { PhoneLayout } from "./phone";
 import { fillNewWorkMods, openMods } from "./modsdialog";
 import { inUse, modNamed, type ModsState } from "./mods";
 import { ChapterList } from "./chapterlist";
@@ -172,6 +174,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     // A library file is plain Typst: no Formatted view, and no pages of its own.
     $("view-mode").hidden = !tabs.activeIsWork;
     $("panel-toggle").hidden = !tabs.activeIsWork;
+    showToolbar();
     preview.show(tabs.activeIsWork ? tabs.active : null);
     commentsPanel.render();
     historyPanel.workChanged();
@@ -198,7 +201,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
   },
   addElement: (id, name) => act(() => addElement(id, name)),
   openComments: (_id, ids) => {
-    panel.setTab("comments");
+    openTab("comments");
     commentsPanel.focus(ids);
   },
   marks: (id) => {
@@ -218,7 +221,10 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
 
 const preview = new PagePreview($("preview-bar"), $("preview-pages"), $<HTMLSelectElement>("preview-look"), $<HTMLSelectElement>("preview-version"), {
   settled: (id) => tabs.settled(id),
-  reveal: (id, from, to) => void tabs.reveal(id, from, to),
+  reveal: (id, from, to) => {
+    phone.toWrite();
+    void tabs.reveal(id, from, to);
+  },
   cursorOf: (id) => tabs.cursorOf(id),
   looksOf: async (id) => (await invoke<{ preamble: Preamble }>("get_preamble", { id })).preamble.looks,
   milestonesOf: (id) => invoke<Milestone[]>("get_milestones", { id }),
@@ -239,7 +245,10 @@ const historyPanel = new HistoryPanel($("history-list"), {
     clearError();
     tabs.history(work, op);
   },
-  find: (work, first, last) => tabs.findText(work, first, last),
+  find: (work, first, last) => {
+    phone.toWrite();
+    return tabs.findText(work, first, last);
+  },
   nameMilestone: (work) => nameMilestone(work),
   renameMilestone: async (work, milestone, name) => {
     tabs.status(work, await invoke<WorkState>("rename_milestone", { id: work, milestone, name }));
@@ -282,7 +291,7 @@ function textHistory(id: string) {
   act(async () => {
     const quote = await tabs.stretch(id);
     if (quote === null) throw new Error("Select some text, or put the cursor in a paragraph, to see its History.");
-    panel.setTab("history");
+    openTab("history");
     historyPanel.showTextHistory(id, quote);
   });
 }
@@ -299,6 +308,15 @@ const panel = new SidePanel(
     historyPanel.setVisible(inView === "history");
   },
 );
+
+// On a phone (or any narrow window): one screen at a time, with a bar at the bottom.
+const phone = new PhoneLayout(panel);
+
+/** Opens one of the panel's tabs: on the phone, that tab's screen. */
+function openTab(tab: PanelTab) {
+  if (phone.active) phone.show(tab);
+  else panel.setTab(tab);
+}
 
 // Resolved Comments' highlights: shown or not on this Device.
 const showResolved = $<HTMLInputElement>("comments-show-resolved");
@@ -324,7 +342,10 @@ const commentsPanel = new CommentsPanel($("comments-list"), $("comments-new"), {
   work: () => (tabs.activeIsWork ? tabs.active : null),
   marks: (work) => tabs.marksOf(work),
   act: (work, op) => tabs.comment(work, op),
-  show: (work, comment, part) => tabs.showComment(work, comment, part),
+  show: (work, comment, part) => {
+    phone.toWrite();
+    return tabs.showComment(work, comment, part);
+  },
   setPending: (work, range) => tabs.setPending(work, range),
   pendingRange: (work) => tabs.pendingRange(work),
   reviewers: () => invoke<Reviewer[]>("get_reviewers"),
@@ -355,7 +376,7 @@ function startComment(id: string) {
     showError("Select some text to comment on, or put the cursor in a word.");
     return;
   }
-  panel.setTab("comments");
+  openTab("comments");
   act(() => commentsPanel.startAdding(id, target));
 }
 
@@ -543,7 +564,10 @@ function modCommand(id: string, command: CommandId): boolean {
 const chapterList = new ChapterList($("chapters"), $("chapters-list"), $("chapters-none"), {
   textOf: (id) => tabs.textOf(id),
   cursorOf: (id) => tabs.cursorOf(id),
-  goTo: (id, at) => void tabs.reveal(id, at, at),
+  goTo: (id, at) => {
+    phone.toWrite();
+    void tabs.reveal(id, at, at);
+  },
   move: (id, moves, cursor) => tabs.moveText(id, moves, cursor),
 });
 
@@ -705,7 +729,8 @@ $("new-element").addEventListener("click", () => act(async () => {
   });
 }));
 
-async function openWork(id: string, cursor?: number) {
+async function openWork(id: string, cursor?: number, restoring = false) {
+  if (!restoring) phone.show("write");
   const path = libraryPath(id);
   if (path) return openLibraryFile(path);
   if (tabs.has(id)) return tabs.activate(id);
@@ -767,12 +792,14 @@ async function openVault(path: string) {
   const layout = await invoke<Layout>("get_layout");
   for (const id of layout.tabs) {
     try {
-      await openWork(id, layout.cursors[id]);
+      await openWork(id, layout.cursors[id], true);
     } catch {
       // renamed or gone since: just not reopened
     }
   }
   if (layout.active && tabs.has(layout.active)) await tabs.activate(layout.active);
+  // On the phone: writing, if a Work was open last time.
+  phone.show(tabs.active ? "write" : "works");
   vaultOpen = true;
 }
 
@@ -1064,10 +1091,31 @@ $("empty-trash").addEventListener("click", () => act(async () => {
 }));
 
 $("choose-vault").addEventListener("click", () => act(async () => {
-  const path = await invoke<string | null>("pick_folder");
+  // Android's own picker gives no file path, so the app has its own folder browser there.
+  if (onAndroid && !(await ensureFilesAccess())) return;
+  const path = onAndroid ? await browseForVault() : await invoke<string | null>("pick_folder");
   if (path) await openVault(path);
 }));
 
+
+// Going to the background on Android (another app, the screen off): Android may end the app
+// there without warning, so everything typed goes to disk at once (the open burst closes, a cut
+// waiting for its paste becomes a deletion) and Syncthing can send it. Nothing compiles meanwhile.
+// Coming back, the Vault is checked for changes from outside at once.
+document.addEventListener("visibilitychange", () => {
+  const hidden = document.visibilityState === "hidden";
+  preview.setOpen(!hidden && panel.pagesInView);
+  if (!vaultOpen) return;
+  if (hidden) {
+    if (!onAndroid) return;
+    act(async () => {
+      await tabs.idle();
+      for (const { id, state } of await invoke<{ id: string; state: WorkState }[]>("app_hidden")) tabs.status(id, state);
+    });
+  } else {
+    void refreshQuietly();
+  }
+});
 
 // The Vault list follows what Syncthing brings (new Works, Conflict copies of Works that
 // aren't open): every 10 seconds, and whenever the window gets focus. The tabs and cursors are
@@ -1185,6 +1233,7 @@ $("sidebar-toggle").addEventListener("click", () => setSidebar($("app").classLis
 function setFormatted(on: boolean) {
   tabs.setFormatted(on);
   $("view-mode").textContent = on ? "Raw view" : "Formatted view";
+  $("toolbar-view").textContent = on ? "Raw" : "Formatted";
   try {
     localStorage.setItem("view", on ? "formatted" : "raw");
   } catch {
@@ -1198,6 +1247,28 @@ try {
   setFormatted(true);
 }
 $("view-mode").addEventListener("click", () => setFormatted(!tabs.formatted));
+
+// ---- The phone's toolbar under the text: each button does what its key does ----
+
+const toolbar = $("write-toolbar");
+for (const button of toolbar.querySelectorAll<HTMLButtonElement>("button")) {
+  // The editor keeps the focus, so the keyboard stays open.
+  button.addEventListener("pointerdown", (e) => e.preventDefault());
+  button.addEventListener("mousedown", (e) => e.preventDefault());
+}
+for (const button of toolbar.querySelectorAll<HTMLButtonElement>("button[data-command]")) {
+  button.addEventListener("click", () => tabs.runCommand(button.dataset.command as CommandId));
+}
+$("toolbar-view").addEventListener("click", () => setFormatted(!tabs.formatted));
+
+/** Shown with a tab in front; Comments, the History and the views are a Work's only. */
+function showToolbar() {
+  toolbar.hidden = tabs.active === null;
+  for (const id of ["addComment", "textHistory"]) {
+    toolbar.querySelector<HTMLButtonElement>(`[data-command="${id}"]`)!.disabled = !tabs.activeIsWork;
+  }
+  $<HTMLButtonElement>("toolbar-view").disabled = !tabs.activeIsWork;
+}
 
 // ---- Keyboard shortcuts: the app-wide ones (the editor's are in each editor's keymap) ----
 
@@ -1375,5 +1446,6 @@ $("open-licenses").addEventListener("click", () => act(openLicenses));
 
 window.addEventListener("DOMContentLoaded", () => act(async () => {
   const { lastVault } = await invoke<{ lastVault: string | null }>("startup");
-  if (lastVault) await openVault(lastVault);
+  // On Android the access can be turned off in Settings while the app is closed.
+  if (lastVault && (await ensureFilesAccess())) await openVault(lastVault);
 }));

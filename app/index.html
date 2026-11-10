@@ -57,6 +57,7 @@
         <div id="tabrow">
           <button id="sidebar-toggle" type="button" title="Hide the Works (Ctrl+\)" aria-label="Show or hide the Works">☰</button>
           <nav id="tabbar"></nav>
+          <button id="chapters-open" type="button" class="link" hidden>Chapters</button>
           <button id="view-mode" type="button" class="link" title="Ctrl+E" hidden>Raw view</button>
           <button id="panel-toggle" type="button" class="link" title="The Page preview, the Comments and the History (Ctrl+Shift+P)" hidden>Show panel</button>
         </div>
@@ -67,6 +68,16 @@
         <div id="panes"></div>
         <!-- The word and character count Mod: the Work in front's counts, if it has the Mod here. -->
         <div id="counts" hidden></div>
+        <!-- The phone's toolbar (phone layout only): just above the keyboard while it's open. -->
+        <div id="write-toolbar" role="toolbar" aria-label="Writing" hidden>
+          <button type="button" data-command="undo" aria-label="Undo" title="Undo">↶</button>
+          <button type="button" data-command="redo" aria-label="Redo" title="Redo">↷</button>
+          <button type="button" data-command="strong" aria-label="Bold" title="Bold"><b>B</b></button>
+          <button type="button" data-command="emph" aria-label="Italic" title="Italic"><i>I</i></button>
+          <button type="button" data-command="addComment" title="Add a Comment on the selection">Comment</button>
+          <button type="button" data-command="textHistory" title="History of the selection, or the paragraph">History</button>
+          <button type="button" id="toolbar-view" title="Formatted or Raw view">Raw</button>
+        </div>
         <p id="empty" class="muted">Open a Vault, then choose a Work on the left, or press Ctrl+O.</p>
       </main>
 
@@ -106,7 +117,52 @@
           <div id="history-list"></div>
         </section>
       </aside>
+
+      <!-- The phone layout (phone.ts): one screen at a time, switched here. -->
+      <nav id="phone-bar" aria-label="Screens">
+        <button type="button" data-screen="works">Works</button>
+        <button type="button" data-screen="write">Write</button>
+        <button type="button" data-screen="pages">Pages</button>
+        <button type="button" data-screen="comments">Comments</button>
+        <button type="button" data-screen="history">History</button>
+      </nav>
     </div>
+
+    <!-- The phone layout's Chapter list: the sidebar's #chapters moves in here. -->
+    <dialog id="chapters-sheet">
+      <form method="dialog">
+        <menu>
+          <button value="done">Done</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="files-access">
+      <form method="dialog">
+        <h2>Allow access to your files</h2>
+        <p>Wrtier keeps your Works as files in a folder you choose, such as one Syncthing syncs. To read and write them, it needs <strong>All files access</strong>.</p>
+        <p class="muted">Turn on “Allow access to manage all files” for Wrtier, then come back here.</p>
+        <p class="row"><button type="button" id="files-access-open">Open settings</button></p>
+        <p class="muted">If the switch is greyed out: open App info, tap ⋮ in the top corner, choose “Allow restricted settings”, then try again.</p>
+        <p class="row"><button type="button" id="files-access-app-info">App info</button></p>
+        <menu>
+          <button type="button" data-close="cancel">Not now</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="folders">
+      <form method="dialog" class="folders-form">
+        <h2>Choose your Vault</h2>
+        <p id="folders-path" class="path"></p>
+        <p id="folders-error" class="dialog-error" hidden></p>
+        <ul id="folders-list" class="folder-list"></ul>
+        <menu>
+          <button type="button" data-close="cancel">Cancel</button>
+          <button value="use" id="folders-use">Use this folder</button>
+        </menu>
+      </form>
+    </dialog>
 
     <dialog id="ask-create">
       <form method="dialog">

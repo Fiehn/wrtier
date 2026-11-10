@@ -997,6 +997,22 @@ impl Vault {
         self.aliases.retain(|_, to| to != id);
     }
 
+    /// The app went to the background, where Android may end it without warning: every open
+    /// Work closes its burst (a cut waiting for its paste becomes a deletion), saves, and writes
+    /// its Text file now, so Syncthing can send it. The Works stay open. Returns their states.
+    pub fn pause_all(&mut self, now_ms: u64) -> Vec<(String, WorkState)> {
+        let ids: Vec<String> = self.works.keys().cloned().collect();
+        ids.into_iter()
+            .filter_map(|id| {
+                let state = self.with_work(&id, now_ms, |w, _| {
+                    w.close(now_ms);
+                    Ok(w.state(Vec::new()))
+                });
+                state.ok().map(|state| (id, state))
+            })
+            .collect()
+    }
+
     /// Quitting, or opening another Vault: every open Work is closed and saved.
     pub fn close_all(&mut self, now_ms: u64) {
         let ids: Vec<String> = self.works.keys().cloned().collect();
@@ -1593,6 +1609,27 @@ mod tests {
         vault.edit("Rain", vec![Op::Undo], 61_000).unwrap();
         assert_eq!(vault.works["Rain"].text(), "");
         assert!(recovery::kept_for(&root.join(".recovery"), root).is_empty(), "nothing left to recover");
+    }
+
+    #[test]
+    fn going_to_the_background_puts_everything_on_disk_and_keeps_the_work_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut vault = open(root);
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![typing(0, "One. Two.")], 2000).unwrap();
+        vault.tick(10_000); // saved
+        // Cut, and typing still open, when the app goes to the background.
+        vault.edit("Rain", vec![Op::Cut { from: 0, to: 5 }], 11_000).unwrap();
+        let paused = vault.pause_all(12_000);
+        assert_eq!(paused.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["Rain"]);
+        let saved = storage::read_all(&root.join("Rain.db")).unwrap();
+        assert!(saved.iter().any(|c| matches!(c.kind, ChangeKind::Delete(_))), "the waiting cut is a deletion: {saved:?}");
+        let typ = std::fs::read_to_string(root.join("Rain.typ")).unwrap();
+        assert_eq!(wrtier::text_file::split_header(&wrtier::text_file::split_marker(&typ).0).1, "Two.");
+        // Still open: typing goes on as before.
+        vault.edit("Rain", vec![typing(4, " Three.")], 13_000).unwrap();
+        assert_eq!(vault.works["Rain"].text(), "Two. Three.");
     }
 
     #[test]

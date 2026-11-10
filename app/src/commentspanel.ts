@@ -249,7 +249,9 @@ export class CommentsPanel {
       const resolved = marks.length - shown.length;
       children.push(el("p", "muted", resolved > 0
         ? `No open Comments (${resolved} resolved).`
-        : `No Comments yet. Select some text and right-click it${keyLabel("addComment") ? `, or press ${keyLabel("addComment")}` : ""}.`));
+        : document.body.classList.contains("phone")
+          ? "No Comments yet. Select some text, then tap Comment under it."
+          : `No Comments yet. Select some text and right-click it${keyLabel("addComment") ? `, or press ${keyLabel("addComment")}` : ""}.`));
     }
     if (work) {
       children.push(...attached.map((m) => this.card(work, m)));
@@ -305,8 +307,10 @@ export class CommentsPanel {
     if (this.form?.comment === mark.id && this.form.element.dataset.for === `reply:${mark.id}`) card.append(this.form.element);
     // A reply being edited sits in place of the reply (see `reply`).
 
-    // Clicking the card selects its text (the first place, if it's in several).
-    card.addEventListener("click", () => {
+    // Clicking the card selects its text (the first place, if it's in several). Not its buttons
+    // or forms: on the phone, showing the text leaves the Comments screen.
+    card.addEventListener("click", (e) => {
+      if ((e.target as Element).closest("button, input, textarea, select, a, form")) return;
       if (mark.ranges.length > 0) this.hooks.show(work, mark.id, 0);
     });
     return card;

@@ -21,6 +21,15 @@
     /** Vault themes: file → { name, dark, css }. A test adds some before the page loads. */
     themes: {},
     settings: null,
+    /** Android's shared storage, for the folder browser: each folder and the folders in it. */
+    folders: {
+      "/storage/emulated/0": ["Download", "Sync"],
+      "/storage/emulated/0/Download": [],
+      "/storage/emulated/0/Sync": ["Novels"],
+      "/storage/emulated/0/Sync/Novels": [],
+    },
+    vaults: ["/storage/emulated/0/Sync/Novels"],
+    syncthingFolders: ["/storage/emulated/0/Sync"],
   };
   window.__fake = fake;
 
@@ -87,6 +96,7 @@
     save_layout: () => null,
     open_work: ({ id }) => ({ id, name: id, text: fake.texts[id], problems: [], notice: null }),
     leave_work: () => null,
+    close_work: () => null,
     get_mods: ({ id }) => ({ work: fake.mods[id] ?? [], newWorks: [], hidden: [] }),
     get_reviewers: () => [],
     get_preamble: () => ({ preamble: { looks: ["Paperback"], styles: [], elements: [], title: "Rain", author: "", language: "en", raw: "" }, rawOther: null }),
@@ -120,6 +130,16 @@
       return workState(id, wantsMarks ? { marks: fake.comments } : {});
     },
     work_text: ({ id }) => ({ text: fake.texts[id], state: workState(id) }),
+    list_folders: ({ path }) => {
+      if (!fake.folders[path]) throw new Error(`Couldn't open ${path}`);
+      const marks = (p) => ({ vault: fake.vaults.includes(p), syncthing: fake.syncthingFolders.includes(p) });
+      return {
+        path,
+        parent: path.slice(0, path.lastIndexOf("/")) || "/",
+        ...marks(path),
+        folders: fake.folders[path].map((name) => ({ name, path: `${path}/${name}`, ...marks(`${path}/${name}`) })),
+      };
+    },
     "plugin:event|listen": () => 0,
     "plugin:event|unlisten": () => null,
   };

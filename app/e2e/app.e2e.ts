@@ -146,3 +146,96 @@ test("a Vault theme wins over the built-in colours it starts from", async ({ pag
   const width = await page.locator(".cm-content").first().evaluate((el) => getComputedStyle(el).maxWidth);
   expect(width).toBe(`${30 * 17}px`);
 });
+
+test("on Android, the Vault needs All files access and is chosen in the app's folder browser", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  // MainActivity.kt's bridge, without "All files access" at first.
+  await page.addInitScript(() => {
+    const w = window as any;
+    w.__access = false;
+    w.__settingsOpened = 0;
+    w.WrtierAndroid = {
+      hasAllFilesAccess: () => w.__access,
+      openAllFilesAccessSettings: () => w.__settingsOpened++,
+      openAppInfo: () => {},
+      sharedStorage: () => "/storage/emulated/0",
+    };
+  });
+  await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+  await page.goto("/");
+
+  // The last Vault waits for the access; the dialog opens the switch in Settings.
+  const access = page.locator("#files-access");
+  await expect(access).toBeVisible();
+  await page.locator("#files-access-open").click();
+  expect(await page.evaluate(() => (window as any).__settingsOpened)).toBe(1);
+  // Coming back with the switch on carries on by itself.
+  await page.evaluate(() => {
+    (window as any).__access = true;
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect(access).toBeHidden();
+  await expect(line(page, "She walked home.")).toBeVisible();
+
+  // The folder browser: shared storage, Syncthing folders and Vaults marked, into a Vault.
+  await page.locator("#choose-vault").click();
+  const folders = page.locator("#folders");
+  await expect(page.locator("#folders-path")).toHaveText("Phone storage");
+  await expect(folders.locator(".folder-row")).toHaveText(["Download", "SyncSyncthing folder"]);
+  await folders.locator(".folder-row", { hasText: "Sync" }).click();
+  await expect(page.locator("#folders-path")).toHaveText("Sync");
+  await expect(folders.locator(".folder-row")).toHaveText(["↑ Up", "NovelsVault"]);
+  await folders.locator(".folder-row", { hasText: "Novels" }).click();
+  await expect(page.locator("#folders-use")).toHaveText("Open this Vault");
+  await page.locator("#folders-use").click();
+  await expect(folders).toBeHidden();
+  const opened = await page.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd === "open_vault").map((e: any) => e.args.path));
+  expect(opened).toEqual(["C:/Fake Vault", "/storage/emulated/0/Sync/Novels"]);
+  expect(errors, "errors in the page").toEqual([]);
+  expect(await page.evaluate(() => (window as any).__fake.unknown), "commands the fake doesn't know").toEqual([]);
+});
+
+test.describe("at phone width", () => {
+  test.use({ viewport: { width: 412, height: 860 } });
+
+  test("one screen at a time, with the bar at the bottom and the toolbar under the text", async ({ app }) => {
+    const bar = app.locator("#phone-bar");
+    const screen = (name: string) => bar.locator(`[data-screen="${name}"]`);
+    // A Work was open last time: writing, with the toolbar; the other parts aren't on screen.
+    await expect(screen("write")).toHaveAttribute("aria-current", "page");
+    await expect(app.locator("#write-toolbar")).toBeVisible();
+    await expect(app.locator("#sidebar")).toBeHidden();
+    await expect(app.locator("#side-panel")).toBeHidden();
+
+    // The toolbar does what the keys do, and the keyboard stays where it was.
+    await selectLine(app, "She walked home.");
+    await app.locator('#write-toolbar [data-command="strong"]').click();
+    await expect.poll(() => textOf(app)).toContain("*She walked home.*");
+    await expect(app.locator(".cm-content")).toBeFocused();
+
+    // Comment: a new Comment on the selection, on the Comments screen.
+    await selectLine(app, "Morning came slowly.");
+    await app.locator('#write-toolbar [data-command="addComment"]').click();
+    await expect(screen("comments")).toHaveAttribute("aria-current", "page");
+    await expect(app.locator("#comments-new")).toBeVisible();
+
+    // Works: the Vault; opening a Work goes back to writing.
+    await screen("works").click();
+    await expect(app.locator("#sidebar")).toBeVisible();
+    await expect(app.locator("#app > main")).toBeHidden();
+    await app.locator("#works").getByText("Rain").click();
+    await expect(screen("write")).toHaveAttribute("aria-current", "page");
+
+    // The Chapter list is a sheet; a Chapter goes there and closes it.
+    await app.locator("#chapters-open").click();
+    await expect(app.locator("#chapters-sheet")).toBeVisible();
+    await app.locator("#chapters-list li", { hasText: "Three" }).click();
+    await expect(app.locator("#chapters-sheet")).toBeHidden();
+
+    // With the keyboard open (Android says so), the bar makes room for the writing.
+    await app.evaluate(() => document.documentElement.classList.add("keyboard-open"));
+    await expect(bar).toBeHidden();
+    await expect(app.locator("#write-toolbar")).toBeVisible();
+  });
+});

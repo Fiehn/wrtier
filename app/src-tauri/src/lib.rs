@@ -4,6 +4,7 @@
 pub mod colouring;
 pub mod device;
 pub mod docx;
+pub mod folders;
 pub mod library;
 pub mod patch;
 pub mod preamble;
@@ -71,6 +72,21 @@ fn startup(state: State<AppState>) -> Result<Startup, String> {
     with_app(&state, |app| Ok(Startup { last_vault: app.device.last_vault.as_ref().map(|p| p.display().to_string()) }))
 }
 
+/// On Android the Vault is picked with the app's own folder browser instead (Android's picker
+/// gives no file path): see `list_folders`.
+#[cfg(mobile)]
+#[tauri::command]
+async fn pick_folder(_app: AppHandle) -> Result<Option<String>, String> {
+    Err("On Android, Vaults are chosen with the app's folder browser.".to_string())
+}
+
+/// The folder browser's view of one folder (Android).
+#[tauri::command]
+fn list_folders(path: String) -> Result<folders::FolderListing, String> {
+    folders::list(std::path::Path::new(&path))
+}
+
+#[cfg(desktop)]
 #[tauri::command]
 async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -598,6 +614,13 @@ fn start_timer(handle: AppHandle) {
     });
 }
 
+/// The app went to the background (Android): everything only in memory goes to disk now.
+#[tauri::command]
+fn app_hidden(state: State<AppState>) -> Result<Vec<WorkStatus>, String> {
+    let paused = with_app(&state, |app| Ok(app.vault.as_mut().map(|v| v.pause_all(now_ms())).unwrap_or_default()))?;
+    Ok(paused.into_iter().map(|(id, state)| WorkStatus { id, state }).collect())
+}
+
 #[tauri::command]
 fn delete_leftover(state: State<AppState>, id: String) -> Result<(), String> {
     with_app(&state, |app| open_vault_of(app)?.delete_leftover(&id))
@@ -785,6 +808,8 @@ pub fn run() {
             let local = app.path().app_local_data_dir()?;
             let device = DeviceState::load_or_create(&local)?;
             // The window where it was last time (if that's still on a screen, the system keeps it so).
+            // Desktop only: on Android the app always fills the screen.
+            #[cfg(desktop)]
             if let (Some(place), Some(window)) = (device.window, app.get_webview_window("main")) {
                 let _ = window.set_size(tauri::PhysicalSize::new(place.width, place.height));
                 let _ = window.set_position(tauri::PhysicalPosition::new(place.x, place.y));
@@ -813,6 +838,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             startup,
             pick_folder,
+            list_folders,
+            app_hidden,
             open_vault,
             set_device_name,
             list_works,

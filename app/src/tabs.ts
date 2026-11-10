@@ -252,10 +252,10 @@ class Tab {
   }
 
   /**
-   * The editor's commands on the keys the Author gave them (keys.ts). Undo and redo: the sync
-   * decides between the editor's own undo (inside a draft) and the History's.
+   * What the editor's commands do in this tab: on their keys (keys.ts), and the phone's toolbar.
+   * Undo and redo: the sync decides between the editor's own undo (inside a draft) and the History's.
    */
-  editorKeys(tabs: Tabs) {
+  commands(tabs: Tabs): Partial<Record<CommandId, () => boolean>> {
     const run: Partial<Record<CommandId, () => boolean>> = {
       undo: () => this.sync.undo(),
       redo: () => this.sync.redo(),
@@ -275,6 +275,12 @@ class Tab {
     for (const command of COMMANDS) {
       if (command.mod) run[command.id] = () => tabs.events.modCommand(this.id, command.id);
     }
+    return run;
+  }
+
+  /** The editor's commands on the keys the Author gave them (keys.ts). */
+  editorKeys(tabs: Tabs) {
+    const run = this.commands(tabs);
     const keys = bindings();
     return keymap.of(Object.entries(run).flatMap(([command, action]) => {
       const key = keys[command as CommandId];
@@ -508,6 +514,12 @@ export class Tabs {
 
   private find(id: string) {
     return this.open.find((tab) => tab.id === id);
+  }
+
+  /** Runs an editor command in the tab in front, as its key would (the phone's toolbar). */
+  runCommand(command: CommandId): boolean {
+    const run = this.front?.commands(this)[command];
+    return run ? run() : false;
   }
 
   /** Shows an opened Work in a new tab (or the tab it already has). `cursor`: where to put it. */
