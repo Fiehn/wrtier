@@ -40,12 +40,18 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # A tag moved to a newer commit (to fix a failed build) uses the draft it already has; the
+      # builds replace its files.
       - name: Create the draft release
         id: create
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "id=$(gh release view "$tag" --json databaseId -q .databaseId)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           pre=""; [[ "$tag" == *-* ]] && pre="--prerelease"
           gh release create "$tag" --draft --verify-tag $pre --title "Wrtier $tag" \
             --notes "Download the file for your system below: the .msi or setup .exe for Windows, the .deb for Debian and Ubuntu, and the .apk for Android when there is one."
@@ -113,12 +119,14 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      # Its default packages include "tools", which Google's SDK list no longer has. Gradle
+      # fetches the platform and build tools it needs by itself.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools ndk;28.2.13676358
 
-      - name: Install the Android NDK
-        run: |
-          sdkmanager --install "ndk;28.2.13676358"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - name: Point Tauri to the NDK
+        run: echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v5
         with:
