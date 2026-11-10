@@ -27,6 +27,7 @@ The cross device nature of the program relies on an optional installation of [Sy
 # Getting Started
 Currently there are two ways to get the program. Firstly the [release page](https://github.com/Fiehn/Wrtier/releases) which include executables for debian, windows and Android APK. This gives you the latest stable and tested release. Otherwise you can build the program yourself using [build](#building) guide. This should also allow for building on MacOS, but no guarantees of this are given.
 
+If you want cross device acces you need to install [Syncthing](https://syncthing.net/) on all devices desired. Then you can use the program to set it up or you can follow [Syncthings own guide](https://docs.syncthing.net/intro/getting-started.html) and set up a shared folder. This is usually quick and easy.
 
 # Getting in Touch or Suggestions
 If you find a bug or have suggestions for features you are welcome to report it in the [Github Issue Tracker](https://github.com/Fiehn/Wrtier/issues). Otherwise please don't I guess :)
