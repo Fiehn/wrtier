@@ -54,7 +54,7 @@ jobs:
           fi
           pre=""; [[ "$tag" == *-* ]] && pre="--prerelease"
           gh release create "$tag" --draft --verify-tag $pre --title "Wrtier $tag" \
-            --notes "Download the file for your system below: the .msi or setup .exe for Windows, the .deb for Debian and Ubuntu, and the .apk for Android when there is one."
+            --notes "Download the file for your system below: the portable .exe for Windows (no installing: just run it), the .deb for Debian and Ubuntu, and the .apk for Android when there is one."
           echo "id=$(gh release view "$tag" --json databaseId -q .databaseId)" >> "$GITHUB_OUTPUT"
 
   desktop:
@@ -63,8 +63,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # One portable .exe: the program itself, no installer.
           - platform: windows-latest
-            args: "" # .msi and setup .exe
+            args: "--no-bundle"
           # The oldest supported Ubuntu, so the .deb runs on Debian 12 and newer too.
           - platform: ubuntu-22.04
             args: "--bundles deb"
@@ -97,13 +98,24 @@ jobs:
         run: npm ci
         working-directory: app
 
-      - uses: tauri-apps/tauri-action@v0
+      - name: Build
+        run: npm run tauri build -- ${{ matrix.args }}
+        working-directory: app
+
+      - name: Upload it to the release
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: app
-          args: ${{ matrix.args }}
-          releaseId: ${{ needs.release.outputs.id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            # The app's program is named after its crate (wrtier.exe beside it is the engine's own).
+            file="$RUNNER_TEMP/wrtier_${VERSION}_windows-x64-portable.exe"
+            cp target/release/wrtier_app.exe "$file"
+          else
+            file=$(ls target/release/bundle/deb/*.deb | head -1)
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$file" --clobber
 
   # Off until the app can open a Vault on Android (v1 plan, Phase 6). Turn it on with the
   # repository variable ANDROID_RELEASE = true (Settings → Secrets and variables → Actions → Variables).
@@ -171,6 +183,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           apk=$(find app/src-tauri/gen/android/app/build/outputs/apk -name "*-release.apk" | head -1)
-          name="Wrtier_${{ needs.release.outputs.version }}_android-arm64.apk"
+          name="wrtier_${{ needs.release.outputs.version }}_android-arm64.apk"
           cp "$apk" "$RUNNER_TEMP/$name"
           gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/$name" --clobber
