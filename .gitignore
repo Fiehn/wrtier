@@ -16,3 +16,6 @@
 
 # Context and Agent helper files
 CONTEXT.md
+docs/adr/*
+docs/adr
+docs/v1-plan.md
