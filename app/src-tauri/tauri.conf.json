@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Wrtier",
+  "productName": "wrtier",
   "version": "0.1.0",
   "identifier": "com.fiehn.wrtier",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Wrtier",
+        "title": "wrtier",
         "width": 1280,
         "height": 800,
         "dragDropEnabled": false

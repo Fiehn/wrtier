@@ -1339,7 +1339,7 @@ mod tests {
         assert!(state.took_in.unwrap().contains("another program"));
         w.leave(2000);
         assert_eq!(text_of(&w.typ), "The rain had eased.", "written again, with its marker");
-        assert!(std::fs::read_to_string(&w.typ).unwrap().contains("// Wrtier version:"));
+        assert!(std::fs::read_to_string(&w.typ).unwrap().contains("// wrtier version:"));
     }
 
     #[test]

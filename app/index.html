@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="/src/styles.css" />
-    <title>Wrtier</title>
+    <title>wrtier</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
@@ -406,6 +406,19 @@
         <h3>Mods for new Works</h3>
         <ul id="new-work-mods" class="mod-list"></ul>
         <p class="muted">Settings are kept in the Vault, so every device that opens it uses them, unless it has its own.</p>
+        <menu>
+          <button type="button" id="open-licenses" class="link licenses-link" title="The open-source libraries and fonts the app is built with">Licenses</button>
+          <button value="done">Done</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="licenses">
+      <form method="dialog" class="licenses-form">
+        <h2>Licenses</h2>
+        <p class="muted">wrtier is open source under the Apache License 2.0. It's built with these open-source libraries and fonts. Each is used under the license shown; click one to read it.</p>
+        <p id="licenses-error" class="dialog-error" hidden></p>
+        <div id="licenses-list"></div>
         <menu>
           <button value="done">Done</button>
         </menu>

@@ -2081,6 +2081,61 @@ dialog#mods {
   margin: 0 0 12px;
 }
 
+/* Bottom left of Settings, on the line with Done. */
+button.licenses-link {
+  margin-right: auto;
+  padding: 0;
+  align-self: center;
+}
+
+dialog#licenses {
+  max-width: 640px;
+  max-height: calc(100vh - 32px);
+}
+
+#licenses p.muted {
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+
+#licenses h3 {
+  font-size: 14px;
+  margin: 18px 0 4px;
+}
+
+#licenses details {
+  border-top: 1px solid var(--line);
+  padding: 6px 0;
+  font-size: 13px;
+}
+
+#licenses summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+#licenses .license-name {
+  font-weight: 600;
+}
+
+#licenses .license-used {
+  margin: 6px 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+#licenses pre {
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--panel);
+  border-radius: 5px;
+  padding: 8px;
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+}
+
 .mod-list {
   list-style: none;
   margin: 0;

@@ -510,7 +510,7 @@ impl Typesetter {
             let document = self.previews.get(KEY).and_then(|p| p.last_good.as_ref()).ok_or("Nothing to export.")?;
             let options = typst_pdf::PdfOptions {
                 ident: typst::foundations::Smart::Custom(ident.to_string()),
-                creator: typst::foundations::Smart::Custom(Some("Wrtier".to_string())),
+                creator: typst::foundations::Smart::Custom(Some("wrtier".to_string())),
                 timestamp: Some(typst_pdf::Timestamp::new_utc(datetime_utc(date_ms))),
                 ..typst_pdf::PdfOptions::default()
             };

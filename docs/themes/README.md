@@ -1,4 +1,4 @@
-# Wrtier themes
+# wrtier themes
 
 A theme changes how the app looks: its colours, and the font and width of the text you write in. It never changes a Work's pages; those come from its Looks.
 

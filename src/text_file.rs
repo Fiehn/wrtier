@@ -12,7 +12,7 @@ use crate::ids::{ChangeId, DeviceId};
 /// the file before the History it came from then knows to wait, and an edit made in another
 /// editor is compared against exactly that version (ADR 0010). It's a Typst comment, so it
 /// changes nothing when the file is compiled, and it's never part of the Work's text.
-const MARKER: &str = "// Wrtier version:";
+const MARKER: &str = "// wrtier version:";
 
 /// A Text file's contents: `text`, then the marker line.
 pub fn with_marker(text: &str, version: &[(DeviceId, u32)]) -> String {
@@ -39,7 +39,7 @@ pub fn split_marker(file: &str) -> (String, Option<Vec<(DeviceId, u32)>>) {
 /// Like the marker line, it's never part of the Work's text: it's added when the file is
 /// written and taken off when it's read. Only its start is checked, so an edit to the rest of
 /// this line still finds it.
-pub const HEADER_START: &str = "// ---- This Work's Preamble, made by Wrtier from its History. Change it in the app's Preamble dialog: edits here are dropped. ----\n";
+pub const HEADER_START: &str = "// ---- This Work's Preamble, made by wrtier from its History. Change it in the app's Preamble dialog: edits here are dropped. ----\n";
 const HEADER_START_CHECK: &str = "// ---- This Work's Preamble";
 /// The header's last line.
 pub const HEADER_END: &str = "// ---- End of the Preamble ----\n";
@@ -280,7 +280,7 @@ mod tests {
     fn the_marker_comes_off_exactly() {
         let version = vec![(DeviceId(0x7f8c3ffd), 120), (DeviceId(0x3e91a2b0), 48)];
         let file = with_marker("The rain had stopped.", &version);
-        assert_eq!(file, "The rain had stopped.\n// Wrtier version: 7f8c3ffd:120, 3e91a2b0:48\n");
+        assert_eq!(file, "The rain had stopped.\n// wrtier version: 7f8c3ffd:120, 3e91a2b0:48\n");
         // Whatever the text ends with, it comes back as it was.
         for text in ["", "abc", "abc\n", "abc\n\n", "\n"] {
             assert_eq!(split_marker(&with_marker(text, &version)), (text.to_string(), Some(version.clone())), "{text:?}");
@@ -294,9 +294,9 @@ mod tests {
         // Windows line endings, a byte order mark, and no line break after the marker.
         let file = format!("\u{feff}{}", with_marker("one\ntwo", &version).replace('\n', "\r\n"));
         assert_eq!(split_marker(&file), ("one\ntwo".to_string(), Some(version.clone())));
-        assert_eq!(split_marker("abc\n// Wrtier version: 00000001:5"), ("abc".to_string(), Some(version)));
+        assert_eq!(split_marker("abc\n// wrtier version: 00000001:5"), ("abc".to_string(), Some(version)));
         // An edited or missing marker: the whole file is text, compared the old way.
-        assert_eq!(split_marker("abc\n// Wrtier version: garbled\n").1, None);
+        assert_eq!(split_marker("abc\n// wrtier version: garbled\n").1, None);
         assert_eq!(split_marker("plain text from elsewhere\n"), ("plain text from elsewhere\n".to_string(), None));
     }
 

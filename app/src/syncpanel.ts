@@ -45,7 +45,7 @@ export function peerCompletion(peer: Peer): string {
 export function explanation(status: SyncStatus): string {
   switch (status.kind) {
     case "notFound":
-      return "Wrtier works without Syncthing, but this Device's Syncthing wasn't found. If Syncthing runs here, give its address and API key below (Syncthing shows the key under Actions → Settings → GUI). On Android, paste the key from the Syncthing app's settings.";
+      return "wrtier works without Syncthing, but this Device's Syncthing wasn't found. If Syncthing runs here, give its address and API key below (Syncthing shows the key under Actions → Settings → GUI). On Android, paste the key from the Syncthing app's settings.";
     case "notRunning":
       return `Nothing answered at ${status.address}. Start Syncthing on this Device, and this shows how the Vault syncs. Writing works as usual meanwhile.`;
     case "refused":

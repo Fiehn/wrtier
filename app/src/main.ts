@@ -14,6 +14,7 @@ import { CommentsPanel } from "./commentspanel";
 import { HistoryPanel, type ComparisonView, type HistoryView, type RestorePreview, type ReturnPreview, type RevertPreview, type SnippetsView } from "./historypanel";
 import { bindingsFrom, COMMANDS, isCommand, keyLabel, onBindingsChanged, setBindings, withKey, type CommandId } from "./keys";
 import { openShortcuts } from "./shortcutsdialog";
+import { openLicenses } from "./licensesdialog";
 import { fillNewWorkMods, openMods } from "./modsdialog";
 import { inUse, modNamed, type ModsState } from "./mods";
 import { ChapterList } from "./chapterlist";
@@ -1367,6 +1368,8 @@ $("open-shortcuts").addEventListener("click", () => act(async () => {
   applySettings(settings);
   await openShortcuts(settings, { apply: applySettings, confirm: confirmAsk });
 }));
+
+$("open-licenses").addEventListener("click", () => act(openLicenses));
 
 // ---- Start ----
 

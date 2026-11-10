@@ -47,10 +47,10 @@ ls ../target/release/bundle/deb/
 ## 3. Install it
 
 ```sh
-sudo apt install ../target/release/bundle/deb/Wrtier_0.1.0_amd64.deb
+sudo apt install ../target/release/bundle/deb/wrtier_0.1.0_amd64.deb
 ```
 
-`apt` (rather than `dpkg -i`) also installs the WebKitGTK runtime it depends on. Wrtier then has an entry in the applications menu.
+`apt` (rather than `dpkg -i`) also installs the WebKitGTK runtime it depends on. wrtier then has an entry in the applications menu.
 
 **To update** later: `git pull`, then steps 2 and 3 again.
 
@@ -66,7 +66,7 @@ If that's not enough, also try `WEBKIT_DISABLE_COMPOSITING_MODE=1`. When one of 
 
 (The installed program may be called `wrtier` instead of `wrtier_app`, depending on the Tauri version: `dpkg -L wrtier | grep bin/` shows it.)
 
-## Where Wrtier keeps things on this Device
+## Where wrtier keeps things on this Device
 
 - Device state (the Device ID, open tabs, window size): `~/.local/share/com.fiehn.wrtier/device.json`
 - Recovery files: `~/.local/share/com.fiehn.wrtier/recovery/`
@@ -77,12 +77,12 @@ Neither is ever in the Vault. Don't copy `device.json` from another computer: tw
 
 *Done when:* you can write a short story on Windows and Debian, edit its Text file in vim, sync both machines through Syncthing with offline edits on each, and nothing is lost.
 
-1. **Set up.** Sync the Vault folder to Debian with Syncthing. Open it in Wrtier on Debian and give the Device a name (say "Debian"). The app adds `*-journal` to the folder's `.stignore`.
+1. **Set up.** Sync the Vault folder to Debian with Syncthing. Open it in wrtier on Debian and give the Device a name (say "Debian"). The app adds `*-journal` to the folder's `.stignore`.
 2. **Online, one at a time.** On Windows, make a Work "Rain" and write a paragraph. Within seconds of Syncthing syncing, Rain shows up in Debian's Vault browser; open it, and the text is the same.
 3. **Online, both open.** With Rain open on both, type on Windows. Debian takes it in within a few seconds ("Took in changes from …") without moving Debian's cursor. Then the other way round.
 4. **Offline on both.** Pause Syncthing on both machines (or take one off the network).
    - On Windows, write a new paragraph at the end of Rain.
-   - On Debian, change a sentence in the middle. Then close Rain, and in vim change a word in `Rain.typ` (leave the last `// Wrtier version:` line as it is) and save.
+   - On Debian, change a sentence in the middle. Then close Rain, and in vim change a word in `Rain.typ` (leave the last `// wrtier version:` line as it is) and save.
 5. **Back online.** Resume Syncthing. It makes Conflict copies; the app merges them and deletes them (open the Vault browser on each machine, or open Rain).
 6. **Check that nothing was lost.** On both machines, Rain has the Windows paragraph, the Debian sentence and the vim word.
    - The Text files should be identical once both have written them (switch away from the window or close Rain on each, then compare): `sha256sum Rain.typ` on Debian and `Get-FileHash Rain.typ` on Windows print the same hash.

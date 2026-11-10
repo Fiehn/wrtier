@@ -132,7 +132,7 @@ pub fn add_journal_ignore(folder: &Path) -> Result<(), String> {
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
-    text.push_str("// Added by Wrtier: SQLite's temporary files must never sync.\n*-journal\n");
+    text.push_str("// Added by wrtier: SQLite's temporary files must never sync.\n*-journal\n");
     std::fs::write(&path, text).map_err(err)
 }
 
@@ -1654,7 +1654,7 @@ mod tests {
         open(&root);
         open(&root); // only once
         assert_eq!(std::fs::read_to_string(dir.path().join(".stignore")).unwrap(),
-                   "*.tmp\n// Added by Wrtier: SQLite's temporary files must never sync.\n*-journal\n");
+                   "*.tmp\n// Added by wrtier: SQLite's temporary files must never sync.\n*-journal\n");
         assert!(!root.join(".stignore").exists());
     }
 

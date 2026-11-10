@@ -7,6 +7,12 @@
 /sample.db
 /sample.sync-conflict.db
 
+# Written by `npm run licenses` (and every `npm run build`) in app/
+/app/public/licenses.json
+
 # The WebKit tests (app/e2e) write these
 /app/test-results
 /app/playwright-report
+
+# Context and Agent helper files
+CONTEXT.md

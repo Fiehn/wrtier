@@ -1,9 +1,11 @@
 [package]
 name = "wrtier_app"
 version = "0.1.0"
-description = "Desktop and Android app for Wrtier"
+description = "Desktop and Android app for wrtier"
 authors = ["R.L. Fiehn"]
 edition = "2024"
+license = "Apache-2.0"
+publish = false  # also keeps it off the app's Licenses page (about.toml)
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

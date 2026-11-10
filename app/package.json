@@ -2,10 +2,12 @@
   "name": "wrtier-app",
   "private": true,
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "node scripts/licenses.mjs && tsc && vite build",
+    "licenses": "node scripts/licenses.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "tauri": "tauri",
