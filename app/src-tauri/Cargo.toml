@@ -1,6 +1,6 @@
 [package]
 name = "wrtier_app"
-version = "0.1.0"
+version = "0.1.2"
 description = "Desktop and Android app for wrtier"
 authors = ["R.L. Fiehn"]
 edition = "2024"
