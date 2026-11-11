@@ -2737,3 +2737,23 @@ body.phone #write-toolbar button:disabled {
 .cm-inclusion:focus {
   outline: none;
 }
+/* A whole included Work's own Chapters, a level down under it in the Chapter list. */
+#chapters-list li.included {
+  flex-wrap: wrap;
+}
+.chapter-sub {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0 0 0 14px;
+  flex-basis: 100%;
+  font-size: 0.9em;
+  color: var(--muted);
+}
+#chapters-list .chapter-sub li {
+  padding: 1px 0;
+  border: none;
+  cursor: inherit;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}

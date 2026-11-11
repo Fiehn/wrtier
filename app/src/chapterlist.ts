@@ -152,6 +152,24 @@ export class ChapterList {
         });
       }
       li.addEventListener("click", () => this.work && this.hooks.goTo(this.work, item.from));
+      // A whole included Work: its own Chapters, a level down (they go with it; clicking one
+      // goes to the Inclusion).
+      if (item.chapters?.length) {
+        const sub = document.createElement("ul");
+        sub.className = "chapter-sub";
+        for (const c of item.chapters) {
+          const row = document.createElement("li");
+          const t = document.createElement("span");
+          t.className = "chapter-title";
+          t.textContent = c.title;
+          const w = document.createElement("span");
+          w.className = "chapter-words";
+          w.textContent = c.words.toLocaleString();
+          row.append(t, w);
+          sub.append(row);
+        }
+        li.append(sub);
+      }
       this.dropTarget(li, index);
       return li;
     });

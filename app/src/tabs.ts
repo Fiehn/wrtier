@@ -17,7 +17,7 @@ import { completions } from "./completion";
 import { commentClasses, commentHighlights, pendingRange, rangesOf, setMarks, setPending, type CommentOptions } from "./comments";
 import type { CommentOp, HistoryOp, Mark } from "./sync";
 import { bindings, COMMANDS, withKey, type CommandId } from "./keys";
-import { type IncludedEntry, type MoveOp } from "./chapters";
+import { chaptersIn, type IncludedEntry, type MoveOp } from "./chapters";
 import { sessionTints, setTints } from "./sessiontints";
 import { modExtensions, type Mod } from "./mods";
 import { INCLUSION, includedSelection, inclusions, inclusionsOf, placeInclusion, readerText, setInclusions, type InclusionView } from "./inclusions";
@@ -544,9 +544,12 @@ export class Tabs {
     const tab = this.find(id);
     if (!tab?.isWork) return [];
     return inclusionsOf(tab.view.state).filter((v) => !v.missing).map((v) => {
-      const body = v.whole ? v.text : v.text.slice(v.text.indexOf("\n") + 1 || v.text.length);
+      // Heading lines aren't counted, as for the Chapters around it.
+      const body = v.text.split("\n").filter((line) => !/^=+\s/.test(line)).join("\n");
       const title = v.whole ? v.label : v.label.slice(v.label.indexOf(": ") + 2);
-      return { at: v.at, title, words: wordsIn(body) };
+      // A whole Work's own Chapters go under it, a level down.
+      const chapters = v.whole ? chaptersIn(v.text).filter((i) => i.kind === "chapter").map((i) => ({ title: i.title, words: i.words })) : undefined;
+      return { at: v.at, title, words: wordsIn(body), ...(chapters?.length ? { chapters } : {}) };
     });
   }
 

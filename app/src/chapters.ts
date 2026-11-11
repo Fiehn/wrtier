@@ -22,10 +22,12 @@ export type Item = {
   words: number;
   /** It's an Inclusion: a Chapter of another Work, or a whole Work. */
   included?: boolean;
+  /** For a whole included Work: its own Chapters, shown one level down. */
+  chapters?: { title: string; words: number }[];
 };
 
 /** An Inclusion as the Chapter list needs it: where its character is, and what it shows. */
-export type IncludedEntry = { at: number; title: string; words: number };
+export type IncludedEntry = { at: number; title: string; words: number; chapters?: { title: string; words: number }[] };
 
 /** One Move: the text at `from`..`to` goes to `at` (positions before the Move). */
 export type MoveOp = { from: number; to: number; at: number };
@@ -53,7 +55,7 @@ export function chaptersIn(text: string, included: IncludedEntry[] = []): Item[]
     if (end === -1) end = text.length;
     const line = text.slice(start, end);
     const inclusion = line === "￼" ? inclusions.get(start) : undefined;
-    if (inclusion) items.push({ kind: "chapter", title: inclusion.title, from: start, included: true, more: inclusion.words });
+    if (inclusion) items.push({ kind: "chapter", title: inclusion.title, from: start, included: true, more: inclusion.words, ...(inclusion.chapters ? { chapters: inclusion.chapters } : {}) });
     else if (line.startsWith("= ")) items.push({ kind: "chapter", title: plainTitle(line.slice(2)) || "Untitled", from: start, more: 0 });
     else if (PART.test(line)) items.push({ kind: "part", title: partTitle(line), from: start, more: 0 });
     start = end + 1;

@@ -423,3 +423,15 @@ test("a Comment on included text is kept in the Work it comes from, and shown he
   await expect.poll(() => app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "comment_in")?.args.work)).toBe("Zampanò");
   await expect(card).toContainText("A quarter inch.");
 });
+
+test("a whole included Work shows its own Chapters a level down in the Chapter list", async ({ app }) => {
+  await endOf(app, "The end.");
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "The whole Work" }).click();
+  const entry = app.locator("#chapters-list li.included");
+  await expect(entry.locator(".chapter-sub li .chapter-title")).toHaveText(["Exploration A", "The Navidson Record"]);
+  await expect(entry.locator("> .chapter-title")).toHaveText("Zampanò");
+  await expect(entry.locator("> .chapter-words")).toHaveText("15"); // its Chapters' 6 and 9: headings aren't counted
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/whole.png` : undefined });
+});
