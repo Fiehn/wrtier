@@ -6,6 +6,7 @@
 import { StateEffect, StateField, type EditorState, type Extension, type Text } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemirror/view";
 import { countsOf } from "./counts";
+import type { Mark } from "./sync";
 
 /** The character that stands for an Inclusion (change.rs `INCLUSION`). */
 export const INCLUSION = "￼";
@@ -25,6 +26,8 @@ export type InclusionView = {
   whole: boolean;
   /** Where the included text starts in its own Work (UTF-16): "Go to" opens it there. */
   starts: number;
+  /** The included Work's Comments on this text (they belong to it, and show in both); ranges in `text`. */
+  comments: Mark[];
 };
 
 /** A Chapter that can be included (vault/inclusions.rs `ChapterChoice`). */
@@ -67,7 +70,8 @@ class IncludedText extends WidgetType {
   eq(other: IncludedText) {
     const a = this.v;
     const b = other.v;
-    return this.folded === other.folded && a.label === b.label && a.text === b.text && a.missing === b.missing && a.work === b.work && a.at === b.at;
+    return this.folded === other.folded && a.label === b.label && a.text === b.text && a.missing === b.missing && a.work === b.work && a.at === b.at
+      && JSON.stringify(a.comments) === JSON.stringify(b.comments);
   }
 
   toDOM(view: EditorView) {
@@ -75,6 +79,7 @@ class IncludedText extends WidgetType {
     const box = document.createElement("div");
     box.className = "cm-inclusion" + (v.missing ? " missing" : "") + (this.folded ? " folded" : "");
     box.contentEditable = "false";
+    box.dataset.at = String(v.at);
     const bar = document.createElement("div");
     bar.className = "cm-inclusion-bar";
     const fold = document.createElement("button");
@@ -118,7 +123,15 @@ class IncludedText extends WidgetType {
       const text = document.createElement("div");
       text.className = "cm-inclusion-text";
       if (v.language) text.lang = v.language;
-      text.append(...readable(v.text));
+      text.append(...readable(v.text, v.comments));
+      // A highlight clicked: its Comments, in the Comments panel.
+      text.addEventListener("click", (e) => {
+        const ids: string[] = [];
+        for (let el = e.target as Element | null; el && el !== text; el = el.parentElement) {
+          if (el instanceof HTMLElement && el.dataset.comment) ids.push(el.dataset.comment);
+        }
+        if (ids.length > 0) box.dispatchEvent(new CustomEvent("wrtier-open-comments", { bubbles: true, detail: ids }));
+      });
       box.append(text);
     }
     return box;
@@ -130,36 +143,107 @@ class IncludedText extends WidgetType {
   }
 }
 
+/** A Comment's highlight in included text: where (UTF-16, in the included text) and whose. */
+type Highlight = { from: number; to: number; id: string; colour: string; resolved: boolean };
+
+/** `text` (which starts at `start` in the included text) with the highlights over it. */
+function marked(text: string, start: number, highlights: Highlight[]): (Node | string)[] {
+  const end = start + text.length;
+  const cuts = new Set([start, end]);
+  for (const h of highlights) {
+    if (h.to > start && h.from < end) {
+      cuts.add(Math.max(h.from, start));
+      cuts.add(Math.min(h.to, end));
+    }
+  }
+  const points = [...cuts].sort((a, b) => a - b);
+  const out: (Node | string)[] = [];
+  for (let i = 0; i + 1 < points.length; i++) {
+    const [a, b] = [points[i], points[i + 1]];
+    const piece = text.slice(a - start, b - start);
+    const over = highlights.filter((h) => h.from <= a && h.to >= b);
+    if (over.length === 0) {
+      out.push(piece);
+      continue;
+    }
+    // Nested, one per Comment, so overlapping highlights darken as they do in the editor.
+    let node: Node = document.createTextNode(piece);
+    for (const h of over) {
+      const span = document.createElement("span");
+      span.className = `cm-comment cm-comment-${h.colour}${h.resolved ? " cm-comment-resolved" : ""}`;
+      span.dataset.comment = h.id;
+      span.append(node);
+      node = span;
+    }
+    out.push(node);
+  }
+  return out;
+}
+
 /**
  * Included text as it reads: its headings as headings (their `=` marks off, one size per
- * level), the rest as written. Paragraphs are runs of lines between blank lines.
+ * level), the rest as written, with its Comments highlighted. Paragraphs are runs of lines
+ * between blank lines. Each block says where its text starts in `text` (`data-from`), so a
+ * selection in it can be traced back.
  */
-export function readable(text: string): HTMLElement[] {
+export function readable(text: string, comments: Mark[] = []): HTMLElement[] {
+  const highlights: Highlight[] = comments.flatMap((m) => m.ranges.map(([from, to]) => ({ from, to, id: m.id, colour: m.colour, resolved: m.resolved })));
   const out: HTMLElement[] = [];
-  let paragraph: string[] = [];
+  let paragraph: { from: number; lines: string[] } | null = null;
   const flush = () => {
-    if (paragraph.length === 0) return;
+    if (!paragraph) return;
     const p = document.createElement("p");
-    p.textContent = paragraph.join("\n");
+    p.dataset.from = String(paragraph.from);
+    p.append(...marked(paragraph.lines.join("\n"), paragraph.from, highlights));
     out.push(p);
-    paragraph = [];
+    paragraph = null;
   };
+  let at = 0;
   for (const line of text.split("\n")) {
-    const heading = /^(=+)\s+(.*)$/.exec(line);
+    const heading = /^(=+\s+)(.*)$/.exec(line);
     if (heading) {
       flush();
       const h = document.createElement("div");
-      h.className = `cm-inclusion-heading level-${Math.min(heading[1].length, 3)}`;
-      h.textContent = heading[2];
+      h.className = `cm-inclusion-heading level-${Math.min(heading[1].trim().length, 3)}`;
+      const from = at + heading[1].length;
+      h.dataset.from = String(from);
+      h.append(...marked(heading[2], from, highlights));
       out.push(h);
     } else if (line.trim() === "") {
       flush();
+    } else if (paragraph) {
+      paragraph.lines.push(line);
     } else {
-      paragraph.push(line);
+      paragraph = { from: at, lines: [line] };
     }
+    at += line.length + 1;
   }
   flush();
   return out;
+}
+
+/**
+ * The text selected inside an Inclusion's text in `view`, if that's where the selection is:
+ * the Inclusion's character (`at`), and where the selection is in its text (UTF-16).
+ */
+export function includedSelection(view: EditorView): { at: number; from: number; to: number; quote: string } | null {
+  const selection = view.dom.ownerDocument.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  const range = selection.getRangeAt(0);
+  const place = (node: Node, offset: number): { box: HTMLElement; pos: number } | null => {
+    const element = node instanceof HTMLElement ? node : node.parentElement;
+    const block = element?.closest<HTMLElement>("[data-from]");
+    const box = block?.closest<HTMLElement>(".cm-inclusion");
+    if (!block || !box || !view.dom.contains(box)) return null;
+    const before = document.createRange();
+    before.selectNodeContents(block);
+    before.setEnd(node, offset);
+    return { box, pos: Number(block.dataset.from) + before.toString().length };
+  };
+  const start = place(range.startContainer, range.startOffset);
+  const end = place(range.endContainer, range.endOffset);
+  if (!start || !end || start.box !== end.box || start.pos >= end.pos) return null;
+  return { at: Number(start.box.dataset.at), from: start.pos, to: end.pos, quote: range.toString() };
 }
 
 function decorations(state: EditorState): DecorationSet {

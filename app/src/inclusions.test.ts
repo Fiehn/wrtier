@@ -6,7 +6,7 @@ import { countsLine, countsOf } from "./counts";
 const doc = (s: string) => Text.of(s.split("\n"));
 
 const rain = (at: number): InclusionView => ({
-  at, work: "Rain", label: "Rain", text: "The rain had stopped.", missing: null, language: "da", whole: true, starts: 0,
+  at, work: "Rain", label: "Rain", text: "The rain had stopped.", missing: null, language: "da", whole: true, starts: 0, comments: [],
 });
 
 function withInclusion(text: string, views: InclusionView[]) {

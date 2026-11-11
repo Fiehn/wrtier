@@ -1653,12 +1653,14 @@ dialog#reviewers {
   font-size: 13px;
 }
 
-.comments-detached-heading {
+.comments-detached-heading,
+.comments-included-heading {
   font-size: 13px;
   margin: 14px 0 2px;
 }
 
-.comments-detached-note {
+.comments-detached-note,
+.comments-included-note {
   font-size: 12px;
   margin: 0 0 8px;
 }

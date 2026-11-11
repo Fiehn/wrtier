@@ -277,6 +277,11 @@ impl Doc {
         self.burst.as_ref()
     }
 
+    /// Where the open burst's draft shows in `text()` (in characters); 0 without one.
+    pub fn burst_at(&self) -> usize {
+        self.burst.as_ref().map_or(0, |b| b.at)
+    }
+
     /// The History's visible characters in reading order, with the piece each is drawn in.
     /// (Without the open burst's draft, which has no characters in the History yet.)
     pub fn visible(&self) -> Vec<(CharId, Option<Piece>)> {

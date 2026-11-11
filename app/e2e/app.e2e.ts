@@ -371,3 +371,46 @@ test("an Export with an Inclusion that can't be shown asks first", async ({ app 
   await app.locator("#ask-confirm-yes", { hasText: "Export anyway" }).click();
   await expect.poll(exported).toBe(1);
 });
+
+test("a Comment on included text is kept in the Work it comes from, and shown here", async ({ app }) => {
+  await endOf(app, "She walked home.");
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "Chapter: The Navidson Record" }).click();
+  const text = app.locator(".cm-inclusion-text p", { hasText: "quarter inch" });
+  await expect(text).toBeVisible();
+  // Select "quarter inch" in the included text, and right-click it.
+  await text.evaluate((p) => {
+    const node = p.firstChild!;
+    const start = node.textContent!.indexOf("quarter inch");
+    const range = document.createRange();
+    range.setStart(node, start);
+    range.setEnd(node, start + "quarter inch".length);
+    getSelection()!.removeAllRanges();
+    getSelection()!.addRange(range);
+  });
+  // Right-click on the selected words (a real right-click there keeps the selection).
+  const box = await app.evaluate(() => JSON.parse(JSON.stringify(getSelection()!.getRangeAt(0).getBoundingClientRect())));
+  await app.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: "right" });
+  await app.locator("#menu button", { hasText: "Add Comment" }).click({ timeout: 5000 });
+  await expect(app.locator("#comments-new")).toContainText("kept in Zampanò");
+  await app.locator("#comments-new textarea").fill("How much, exactly?");
+  await app.locator("#comments-new button", { hasText: "Save" }).click();
+  // It went to the included Work, at the selection in the shown text ("= The Navidson Record\n\n" is 23).
+  const sent = await app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "comment_on_inclusion")?.args);
+  expect(sent).toMatchObject({ id: "Rain", from: 23 + "It measured a ".length, to: 23 + "It measured a quarter inch".length, body: "How much, exactly?" });
+  // Shown on the Inclusion, and in the Comments panel under the Inclusion.
+  await expect(app.locator(".cm-inclusion .cm-comment")).toHaveText("quarter inch");
+  await expect(app.locator(".comments-included-heading")).toHaveText("In Zampanò: The Navidson Record");
+  const card = app.locator(".comment-card", { hasText: "How much, exactly?" });
+  await expect(card).toBeVisible();
+  await expect(app.locator("#counts")).toContainText("(12 included)");
+  await expect(app.locator("#chapters-list li.included")).toBeVisible();
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/comment.png` : undefined });
+  // A Reply from here goes to Zampanò too.
+  await card.locator("button", { hasText: "Reply" }).click();
+  await card.locator("textarea").fill("A quarter inch.");
+  await card.locator("button", { hasText: "Reply" }).last().click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "comment_in")?.args.work)).toBe("Zampanò");
+  await expect(card).toContainText("A quarter inch.");
+});

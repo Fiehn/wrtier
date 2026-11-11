@@ -201,6 +201,20 @@ fn missing_inclusions(state: State<AppState>, id: String) -> Result<Vec<String>,
     with_app(&state, |app| open_vault_of(app)?.missing_inclusions(&id))
 }
 
+/// A new Comment on included text (`from..to`, UTF-16, in the text of the Inclusion whose
+/// character is at `at` in the Work `id`): kept in the Work it includes (ADR 0015).
+#[tauri::command]
+fn comment_on_inclusion(state: State<AppState>, id: String, at: usize, from: usize, to: usize, sender: String, body: String) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.comment_on_inclusion(&id, at, from, to, &sender, &body, now_ms()))
+}
+
+/// A Comment's Replies and settings changed in a Work that may not be open (from the Comments
+/// panel of a Work that includes it).
+#[tauri::command]
+fn comment_in(state: State<AppState>, work: String, ops: Vec<Op>) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.comment_in(&work, ops, now_ms()))
+}
+
 /// The Chapters of a Work (open or not), to pick one to include.
 #[tauri::command]
 fn chapters_of(state: State<AppState>, work: String) -> Result<Vec<vault::ChapterChoice>, String> {
@@ -1062,6 +1076,8 @@ pub fn run() {
             get_inclusions,
             chapters_of,
             missing_inclusions,
+            comment_on_inclusion,
+            comment_in,
             rename_work,
             trash_work,
             list_trash,

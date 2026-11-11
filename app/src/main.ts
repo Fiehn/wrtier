@@ -367,10 +367,32 @@ showResolved.addEventListener("change", () => {
 const commentsPanel = new CommentsPanel($("comments-list"), $("comments-new"), {
   work: () => (tabs.activeIsWork ? tabs.active : null),
   marks: (work) => tabs.marksOf(work),
-  act: (work, op) => tabs.comment(work, op),
+  includedMarks: (work) => tabs.includedMarksOf(work),
+  // A Comment may belong to a Work that isn't open (one shown on an Inclusion): then it's
+  // changed without opening a tab, and the Inclusions in front follow.
+  act: (work, op) => {
+    if (tabs.has(work)) {
+      tabs.comment(work, op);
+      return;
+    }
+    act(async () => {
+      await invoke("comment_in", { work, ops: [op] });
+      if (tabs.active) tabs.refreshInclusionsOf(tabs.active);
+    });
+  },
+  addIncluded: async (work, target, sender, body) => {
+    await invoke("comment_on_inclusion", { id: work, at: target.at, from: target.from, to: target.to, sender, body });
+    tabs.refreshInclusionsOf(work);
+  },
   show: (work, comment, part) => {
     phone.toWrite();
-    return tabs.showComment(work, comment, part);
+    if (tabs.has(work)) return tabs.showComment(work, comment, part);
+    // One on an Inclusion: its own Work opens, at it.
+    act(async () => {
+      await openWork(work);
+      tabs.showComment(work, comment, part);
+    });
+    return 1;
   },
   setPending: (work, range) => tabs.setPending(work, range),
   pendingRange: (work) => tabs.pendingRange(work),
@@ -396,7 +418,13 @@ const commentsPanel = new CommentsPanel($("comments-list"), $("comments-new"), {
 });
 
 /** Its key (Ctrl+Shift+M at first) or "Add Comment": a new Comment on the selection, or the word at the cursor. */
-function startComment(id: string) {
+function startComment(id: string, included = tabs.includedSelectionOf(id)) {
+  // Text selected in an Inclusion: the Comment goes to the Work it includes (ADR 0015).
+  if (included) {
+    openTab("comments");
+    act(() => commentsPanel.startAddingIncluded(id, included));
+    return;
+  }
   const target = tabs.commentTarget(id);
   if (!target) {
     showError("Select some text to comment on, or put the cursor in a word.");
@@ -410,6 +438,15 @@ function startComment(id: string) {
 function selectionMenu(id: string): MenuItem[] {
   const view = tabs.viewOf(id);
   if (!view) return [];
+  // In an Inclusion's text, which can't be changed here: Add Comment and Copy. (Read now: the
+  // selection may not survive clicking the menu.)
+  const included = tabs.includedSelectionOf(id);
+  if (included) {
+    return [
+      { label: withKey("Add Comment", "addComment"), run: () => startComment(id, included) },
+      { label: "Copy", run: () => act(() => navigator.clipboard.writeText(included.quote)) },
+    ];
+  }
   // Cut and Copy go through the editor, so a cut pasted back is still a Move.
   const command = (name: "cut" | "copy") => () => {
     view.focus();

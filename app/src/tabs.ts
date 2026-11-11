@@ -20,7 +20,7 @@ import { bindings, COMMANDS, withKey, type CommandId } from "./keys";
 import { type IncludedEntry, type MoveOp } from "./chapters";
 import { sessionTints, setTints } from "./sessiontints";
 import { modExtensions, type Mod } from "./mods";
-import { INCLUSION, inclusions, inclusionsOf, placeInclusion, readerText, setInclusions, type InclusionView } from "./inclusions";
+import { INCLUSION, includedSelection, inclusions, inclusionsOf, placeInclusion, readerText, setInclusions, type InclusionView } from "./inclusions";
 import { wordsIn } from "./counts";
 
 export type OpenedWork = { id: string; name: string; text: string; problems: { path: string; reason: string }[]; notice: string | null };
@@ -123,8 +123,13 @@ class Tab {
       this.hasInclusions = views.length > 0 || this.view.state.doc.toString().includes(INCLUSION);
       // Typed meanwhile: they're asked for again next time rather than put in the wrong place.
       if (this.sync.isIdle()) {
+        const comments = (list: InclusionView[]) => JSON.stringify(list.map((v) => v.comments));
+        const changed = comments(inclusionsOf(this.view.state)) !== comments(views);
         this.view.dispatch({ effects: setInclusions.of(views) });
         events.edited(this.sync.id); // the counts include them
+        // The Comments panel lists their Comments (redrawn only when they change: a redraw
+        // would take the focus from a Reply being written).
+        if (changed) events.marks(this.sync.id, this.marks);
       }
     } catch (e) {
       events.error(String(e));
@@ -288,12 +293,21 @@ class Tab {
     // Right-click inside a selection: the app's menu (Add Comment, Cut, Copy, Paste). Anywhere
     // else the system's own, which has the spelling suggestions.
     this.view.contentDOM.addEventListener("contextmenu", (e) => {
+      // Text selected in an Inclusion's text (ADR 0015): the app's menu too, to comment on it.
+      const inIncluded = (e.target as Element).closest(".cm-inclusion") !== null;
+      if (inIncluded) {
+        if (!includedSelection(this.view)) return;
+        e.preventDefault();
+        tabs.events.selectionMenu(this.id, e.clientX, e.clientY);
+        return;
+      }
       const selection = this.view.state.selection.main;
       const pos = this.view.posAtCoords({ x: e.clientX, y: e.clientY });
       if (selection.empty || pos === null || pos < selection.from || pos > selection.to) return;
       e.preventDefault();
       tabs.events.selectionMenu(this.id, e.clientX, e.clientY);
     });
+    this.pane.addEventListener("wrtier-open-comments", (e) => tabs.events.openComments(this.id, (e as CustomEvent<string[]>).detail));
     this.pane.addEventListener("wrtier-add-element", (e) => tabs.events.addElement(this.id, (e as CustomEvent<string>).detail));
 
     // A click anywhere in the writing area (the margins beside the text, the space below it)
@@ -533,6 +547,33 @@ export class Tabs {
       const title = v.whole ? v.label : v.label.slice(v.label.indexOf(": ") + 2);
       return { at: v.at, title, words: wordsIn(body) };
     });
+  }
+
+  /**
+   * Text selected inside one of a Work's Inclusions, if that's where the selection is: the
+   * Inclusion's character, the selection in its text, and what it includes.
+   */
+  includedSelectionOf(id: string): { at: number; from: number; to: number; quote: string; label: string } | null {
+    const tab = this.find(id);
+    if (!tab?.isWork) return null;
+    const picked = includedSelection(tab.view);
+    const v = picked && inclusionsOf(tab.view.state).find((i) => i.at === picked.at);
+    return picked && v ? { ...picked, label: v.label } : null;
+  }
+
+  /** The Comments shown on a Work's Inclusions, by the Work they belong to. */
+  includedMarksOf(id: string): { work: string; label: string; marks: Mark[] }[] {
+    const tab = this.find(id);
+    if (!tab?.isWork) return [];
+    return inclusionsOf(tab.view.state)
+      .filter((v) => v.work && v.comments.length > 0)
+      .map((v) => ({ work: v.work!, label: v.label, marks: v.comments }));
+  }
+
+  /** Asks the Work in front for its Inclusions again now (a Comment on one changed). */
+  refreshInclusionsOf(id: string) {
+    const tab = this.find(id);
+    if (tab?.isWork) void tab.refreshInclusions(this.events);
   }
 
   /** Puts an Inclusion of `work` (or its Chapter at `chapter`) at the cursor in the Work `id`. */

@@ -21,7 +21,7 @@ use wrtier::storage;
 use wrtier::text_file::{inclusion_block, parse_version, version_text};
 use crate::library::Kind;
 use crate::preamble::{self, Preamble, Shelf, Version};
-use crate::work::OpenWork;
+use crate::work::{Op, OpenWork};
 use super::{err, file_stamp, walk_works, Vault};
 
 /// A Work's version: the highest Change counter it holds from each Device.
@@ -107,6 +107,13 @@ pub struct Shown {
     pub title: Option<String>,
     /// Where the included text starts in its own Work (UTF-16), for "Go to".
     pub starts: usize,
+    /// Where the included Work's own text is in `plain` (not its own Inclusions'): runs of
+    /// (start in `plain`, start in the included Work's `committed_text`, length), in characters.
+    pub runs: Vec<(usize, usize, usize)>,
+    /// The included Work's Comments on that text, ranges in `plain` (UTF-16); names left to fill in.
+    pub comments: Vec<crate::work::Mark>,
+    /// The included Work's author name, for its Author's Comments.
+    pub author: String,
 }
 
 /// What working out Inclusions reads from.
@@ -185,7 +192,7 @@ pub(super) fn expand(ctx: &mut Ctx, doc: &Doc, stack: &mut Vec<String>) -> Vec<S
 fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut Vec<String>) -> Shown {
     let mut s = Shown {
         at, index, target: Target::of(including, at), name: None, label: "An Inclusion".into(),
-        missing: None, plain: String::new(), typst: String::new(), version: None, language: String::new(), elements: Vec::new(), title: None, starts: 0,
+        missing: None, plain: String::new(), typst: String::new(), version: None, language: String::new(), elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), author: String::new(),
     };
     let result = (|| {
         let target = s.target.clone().ok_or("This Inclusion has lost what it includes.")?;
@@ -228,23 +235,35 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
         stack.pop();
         let nested: Vec<&Shown> = all_nested.iter().filter(|n| n.index >= from && n.index < to).collect();
         let (mut plain, mut typst) = (String::new(), String::new());
+        let mut plain_len = 0; // in characters
+        let mut runs: Vec<(usize, usize, usize)> = Vec::new();
         let mut next = nested.iter().peekable();
         for (i, &c) in chars.iter().enumerate().take(to).skip(from) {
             match next.peek() {
                 Some(n) if n.index == i => {
-                    match &n.missing {
-                        Some(why) => plain.push_str(&format!("[{}: {why}]", n.label)),
-                        None => plain.push_str(&n.plain),
-                    }
+                    let inner = match &n.missing {
+                        Some(why) => format!("[{}: {why}]", n.label),
+                        None => n.plain.clone(),
+                    };
+                    plain_len += inner.chars().count();
+                    plain.push_str(&inner);
                     typst.push_str(&inclusion_block(n.at, &n.label, &n.typst));
                     next.next();
                 }
                 _ => {
+                    match runs.last_mut() {
+                        Some((p, b, len)) if *p + *len == plain_len && *b + *len == i => *len += 1,
+                        _ => runs.push((plain_len, i, 1)),
+                    }
+                    plain_len += 1;
                     plain.push(c);
                     typst.push(c);
                 }
             }
         }
+        s.comments = comments_in(&doc, &plain, &runs);
+        s.runs = runs;
+        s.author = preamble.author.clone();
         let mode = if ctx.recorded { Version::Recorded } else { Version::Library };
         let styles: Vec<String> = target.styles.iter()
             .filter_map(|style| preamble::find(including, ctx.shelf, mode, Kind::Style, style))
@@ -269,6 +288,65 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
         s.missing = Some(why);
     }
     s
+}
+
+/// A place in the shown text (`text()`, with the open burst's draft) as a place in
+/// `committed_text`: the draft isn't there, and what it's typed over still is.
+fn committed_at(doc: &Doc, at: usize) -> usize {
+    let Some(burst) = doc.burst() else { return at };
+    let text_len = doc.len();
+    let committed_len = doc.visible().len();
+    let draft = burst.draft.chars().count();
+    let hidden = committed_len + draft - text_len;
+    let start = doc.burst_at();
+    if at <= start {
+        at
+    } else if at <= start + draft {
+        start
+    } else {
+        at - draft + hidden
+    }
+}
+
+/// The included Work's Comments on its own text in `plain` (`runs` says where that is), with
+/// their ranges in `plain` (UTF-16). A Comment none of whose text is shown there is left out.
+fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]) -> Vec<crate::work::Mark> {
+    let comments = doc.comments();
+    if comments.is_empty() || runs.is_empty() {
+        return Vec::new();
+    }
+    // UTF-16 position of each character of `plain` (and its end).
+    let mut utf16 = Vec::with_capacity(plain.len() + 1);
+    let mut at = 0;
+    for c in plain.chars() {
+        utf16.push(at);
+        at += c.len_utf16();
+    }
+    utf16.push(at);
+    comments.into_iter().filter_map(|c| {
+        let mut ranges = Vec::new();
+        for &(from, to) in &c.ranges {
+            let (from, to) = (committed_at(doc, from), committed_at(doc, to));
+            for &(p, b, len) in runs {
+                let (lo, hi) = (from.max(b), to.min(b + len));
+                if lo < hi {
+                    ranges.push((utf16[p + lo - b], utf16[p + hi - b]));
+                }
+            }
+        }
+        if ranges.is_empty() {
+            return None;
+        }
+        let id = c.id.to_string();
+        Some(crate::work::Mark {
+            id, ranges, sender: c.sender, name: String::new(), colour: String::new(), body: c.body,
+            resolved: c.resolved, quote: c.quote, time_ms: c.hlc.0, other_body: None,
+            replies: c.replies.into_iter().map(|r| crate::work::ReplyMark {
+                id: r.id.to_string(), sender: r.sender, name: String::new(), colour: String::new(),
+                body: r.body, time_ms: r.hlc.0, other_body: None,
+            }).collect(),
+        })
+    }).collect()
 }
 
 /// The included text as Typst that renders in the including Work's Look: in its own language,
@@ -392,6 +470,9 @@ pub struct InclusionView {
     pub whole: bool,
     /// Where the included text starts in its own Work (UTF-16): "Go to" opens it there.
     pub starts: usize,
+    /// The included Work's Comments on its text here, ranges in `text` (UTF-16): they belong to that
+    /// Work, and show in both.
+    pub comments: Vec<crate::work::Mark>,
 }
 
 /// A Chapter that can be included.
@@ -417,6 +498,7 @@ pub fn views(text: &str, shown: &[Shown]) -> Vec<InclusionView> {
                     missing: s.missing.clone(), language: s.language.clone(),
                     whole: s.target.as_ref().is_some_and(|t| t.chapter.is_none()),
                     starts: s.starts,
+                    comments: s.comments.clone(),
                 });
             }
         }
@@ -543,9 +625,96 @@ impl Vault {
 
     /// The Inclusions of an open Work, for the editor.
     pub fn inclusions(&mut self, id: &str) -> Result<Vec<InclusionView>, String> {
-        let shown = self.shown_in(id, false)?;
+        let mut shown = self.shown_in(id, false)?;
+        for s in &mut shown {
+            let author = &s.author;
+            for mark in &mut s.comments {
+                (mark.name, mark.colour) = self.included_sender(author, &mark.sender);
+                for reply in &mut mark.replies {
+                    (reply.name, reply.colour) = self.included_sender(author, &reply.sender);
+                }
+            }
+        }
         let work = self.works.get(&self.current_id(id)).ok_or_else(|| format!("{id} isn't open."))?;
         Ok(views(&work.text(), &shown))
+    }
+
+    /// The name and colour of a Comment's sender in an included Work (`author`: its author name).
+    fn included_sender(&self, author: &str, sender: &str) -> (String, String) {
+        match sender.strip_prefix("reviewer/") {
+            None => (if author.trim().is_empty() { "Author".into() } else { author.to_string() }, "author".into()),
+            Some(id) => match self.reviewer(id) {
+                Some(r) => (r.name, r.colour),
+                None => ("Unknown reviewer".into(), "unknown".into()),
+            },
+        }
+    }
+
+    /// A new Comment on included text, made in the including Work `id` but kept in the Work it
+    /// includes (ADR 0015): `at` is where the Inclusion's character is in `id`'s text, `from..to`
+    /// what was selected in the included text as shown (UTF-16). It can't reach past the
+    /// included Work's own text (into its own Inclusions).
+    pub fn comment_on_inclusion(&mut self, id: &str, at: usize, from: usize, to: usize, sender: &str, body: &str, now_ms: u64) -> Result<(), String> {
+        let shown = self.shown_in(id, false)?;
+        let text = self.works.get(&self.current_id(id)).ok_or_else(|| format!("{id} isn't open."))?.text();
+        let mut utf16 = 0;
+        let mut k = 0;
+        let mut found = None;
+        for c in text.chars() {
+            if c == INCLUSION {
+                if utf16 == at {
+                    found = shown.get(k);
+                    break;
+                }
+                k += 1;
+            }
+            utf16 += c.len_utf16();
+        }
+        let s = found.ok_or("That Inclusion isn't there any more.")?;
+        let work = s.name.clone().ok_or("The Work it includes can't be found.")?;
+        let chars = |p: usize| crate::positions::Positions::new(&s.plain).to_char(p).map_err(|e| e.to_string());
+        let (from, to) = (chars(from)?, chars(to)?);
+        if from >= to {
+            return Err("Select some of the included text to comment on.".into());
+        }
+        let &(p, b, _) = s.runs.iter().find(|&&(p, _, len)| from >= p && to <= p + len)
+            .ok_or("A Comment can't reach past the edge of the included text: select less.")?;
+        let (from, to) = (b + from - p, b + to - p);
+        self.edit_other(&work, now_ms, |text| {
+            let positions = crate::positions::Positions::new(text);
+            vec![Op::Comment { from: positions.to_utf16(from), to: positions.to_utf16(to), sender: sender.into(), body: body.into(), sender_name: None }]
+        })
+    }
+
+    /// Comment ops (by Comment ID: Reply, Resolve, Edit, Delete…) on a Work that may not be
+    /// open, from the Comments panel of a Work that includes it.
+    pub fn comment_in(&mut self, work: &str, ops: Vec<Op>, now_ms: u64) -> Result<(), String> {
+        if ops.iter().any(|op| !matches!(op, Op::Reply { .. } | Op::EditComment { .. } | Op::SetCommentSender { .. } | Op::Resolve { .. } | Op::DeleteComment { .. })) {
+            return Err("Only a Comment's Replies and settings can be changed this way.".into());
+        }
+        self.edit_other(work, now_ms, |_| ops)
+    }
+
+    /// Edits another Work (`work`: its ID in the Vault) from elsewhere: opened here for it if it
+    /// isn't open, and closed again. Its open burst closes first, so `ops` (made from its text by
+    /// `make`) see the text as its History has it.
+    fn edit_other(&mut self, work: &str, now_ms: u64, make: impl FnOnce(&str) -> Vec<Op>) -> Result<(), String> {
+        let opened_here = !self.works.contains_key(&self.current_id(work));
+        if opened_here {
+            self.open_work(work, now_ms)?;
+        }
+        let result = (|| {
+            let text = self.with_work(work, now_ms, |w, _| {
+                w.close_burst(now_ms);
+                w.save();
+                Ok(w.text())
+            })?;
+            self.edit(work, make(&text), now_ms).map(|_| ())
+        })();
+        if opened_here {
+            self.close_work(work, now_ms);
+        }
+        result
     }
 
     /// The Chapters of a Work (an ID in the Vault), to pick one to include: each one's title and
@@ -648,7 +817,7 @@ pub fn elements_of(shown: &[Shown]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::vault::tests_support::open;
-    use crate::work::{Op, Origin};
+    use crate::work::Origin;
     use crate::typeset::Block;
 
     fn chars(s: &str) -> Vec<char> {
@@ -784,6 +953,57 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_on_included_text_is_kept_in_the_included_work_and_shown_in_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        // Commented in "Collected", on "rain had" in the included text ("Rain" isn't open).
+        let from = RAIN.find("rain had").unwrap();
+        v.comment_on_inclusion("Collected", 18, from, from + 8, "author", "Too plain?", 12_000).unwrap();
+        assert!(!v.works.contains_key("Rain"), "opened only to record it, then closed");
+        let (_, rain) = storage::load(&dir.path().join("Rain.db"), crate::vault::tests_support::ME).unwrap();
+        let comments = rain.comments();
+        assert_eq!((comments.len(), comments[0].quote.as_str(), comments[0].body.as_str()), (1, "rain had", "Too plain?"));
+        assert!(storage::load(&dir.path().join("Collected.db"), crate::vault::tests_support::ME).unwrap().1.comments().is_empty());
+        // Shown on the Inclusion, where it is in the included text.
+        let views = v.inclusions("Collected").unwrap();
+        let mark = &views[0].comments[0];
+        assert_eq!((mark.ranges.clone(), mark.name.as_str(), mark.colour.as_str()), (vec![(from, from + 8)], "Author", "author"));
+        // Replied to from "Collected": also kept in "Rain".
+        let reply = Op::Reply { comment: mark.id.clone(), sender: "author".into(), body: "Leave it.".into(), sender_name: None };
+        v.comment_in("Rain", vec![reply], 13_000).unwrap();
+        assert_eq!(v.inclusions("Collected").unwrap()[0].comments[0].replies[0].body, "Leave it.");
+        // A Comment made in "Rain" itself shows on the Inclusion too, and one outside it doesn't.
+        v.open_work("Rain", 14_000).unwrap();
+        let went = RAIN.find("went").unwrap();
+        v.edit("Rain", vec![Op::Comment { from: went, to: went + 4, sender: "author".into(), body: "Where?".into(), sender_name: None }], 14_100).unwrap();
+        assert_eq!(v.inclusions("Collected").unwrap()[0].comments.len(), 2);
+        // Typing in "Rain" before them (its burst still open) doesn't shift them on the
+        // Inclusion, which shows what "Rain" has recorded.
+        v.edit("Rain", vec![typing(0, "Prologue. ")], 15_000).unwrap();
+        assert!(v.works["Rain"].doc.burst().is_some());
+        let views = v.inclusions("Collected").unwrap();
+        assert_eq!(views[0].comments[0].ranges, vec![(from, from + 8)]);
+        assert_eq!(views[0].comments[1].ranges, vec![(went, went + 4)]);
+    }
+
+    #[test]
+    fn a_comment_on_included_text_stops_at_the_included_works_own_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        let two = RAIN.find("= Two").unwrap();
+        include(&mut v, "Collected", 0, "Rain", Some(two), 12_000);
+        // Only the Chapter is shown: positions are in what's shown, not in the whole story.
+        let shown = &v.inclusions("Collected").unwrap()[0];
+        let at = shown.text.find("went").unwrap();
+        v.comment_on_inclusion("Collected", 0, at, at + 4, "author", "Here.", 13_000).unwrap();
+        let (_, rain) = storage::load(&dir.path().join("Rain.db"), crate::vault::tests_support::ME).unwrap();
+        assert_eq!(rain.comments()[0].quote, "went");
+        // Nothing selected, or past the end: refused.
+        assert!(v.comment_on_inclusion("Collected", 0, at, at, "author", "x", 13_100).is_err());
+        assert!(v.comment_on_inclusion("Collected", 0, at, 999, "author", "x", 13_200).is_err());
+    }
+
+    #[test]
     fn places_in_the_preview_map_around_inclusions() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = collected(dir.path());
@@ -819,7 +1039,7 @@ mod tests {
         let s = Shown {
             at, index: 2, target: None, name: None, label: "Rain".into(), missing: None,
             plain: "Rain.".into(), typst: "#[\nRain.\n]".into(), version: None, language: String::new(),
-            elements: Vec::new(), title: None, starts: 0,
+            elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), author: String::new(),
         };
         let (body, blocks) = typst_body(&format!("A\n{INCLUSION}\nB"), &[s]);
         assert!(body.starts_with("A\n// ---- Included by wrtier") && body.ends_with("\nB"), "{body}");

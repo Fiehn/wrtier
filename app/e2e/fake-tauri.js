@@ -19,6 +19,8 @@
     comments: [],
     /** What each Work's Inclusions include, in reading order (vault/inclusions.rs). */
     included: {},
+    /** Comments made on included text, by the Work they're kept in (positions in the shown text). */
+    includedComments: {},
     changes: 1,
     /** Mods each Work has (the Chapter list is on Rain). */
     mods: { Rain: ["chapters", "counts"] },
@@ -136,6 +138,20 @@
     },
     complete_at: () => null,
     missing_inclusions: () => fake.missingInclusions ?? [],
+    comment_on_inclusion: ({ id, at, from, to, sender, body }) => {
+      const target = fake.included[id][[...fake.texts[id].slice(0, at)].filter((c) => c === "￼").length];
+      const list = (fake.includedComments[target.work] ??= []);
+      const quote = handlers.get_inclusions({ id }).find((v) => v.at === at).text.slice(from, to);
+      list.push({ id: `ic${list.length + 1}`, from, to, sender, body, quote, replies: [] });
+      return null;
+    },
+    comment_in: ({ work, ops }) => {
+      for (const op of ops) {
+        const c = (fake.includedComments[work] ?? []).find((x) => x.id === op.comment);
+        if (op.op === "reply" && c) c.replies.push({ id: `r${c.replies.length + 1}`, sender: op.sender, name: "Author", colour: "author", body: op.body, timeMs: now, otherBody: null });
+      }
+      return null;
+    },
     export_pdf: () => null, // as if the save dialog was cancelled
     compile_preview: () => ({ pages: [], stale: false, errors: [], warnings: [], deviceFonts: [], ms: 1 }),
     forget_preview: () => null,
@@ -176,7 +192,11 @@
           shown = source.slice(target.chapter, next === -1 ? source.length : next + 1);
           label = `${target.work}: ${shown.split("\n")[0].slice(2)}`;
         }
-        views.push({ at, work: target.work, label, text: shown.trimEnd(), missing: null, language: "en", whole: target.chapter === null });
+        const comments = (fake.includedComments[target.work] ?? []).map((c) => ({
+          id: c.id, ranges: [[c.from, c.to]], sender: c.sender, name: "Author", colour: "author", body: c.body, resolved: false,
+          quote: c.quote, timeMs: now, replies: c.replies, otherBody: null,
+        }));
+        views.push({ at, work: target.work, label, text: shown.trimEnd(), missing: null, language: "en", whole: target.chapter === null, starts: target.chapter ?? 0, comments });
       }
       return views;
     },
