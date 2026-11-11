@@ -515,6 +515,8 @@ pub struct InclusionView {
     pub comments: Vec<crate::work::Mark>,
     /// A new Chapter found right after the included one (see `Target::next`), if one.
     pub split: Option<SplitNote>,
+    /// Styles given to this Inclusion only.
+    pub styles: Vec<String>,
 }
 
 /// A new Chapter right after an included one, not included: the included Chapter was split, or
@@ -552,6 +554,7 @@ pub fn views(text: &str, shown: &[Shown]) -> Vec<InclusionView> {
                     starts: s.starts,
                     comments: s.comments.clone(),
                     split: s.split.clone(),
+                    styles: s.target.as_ref().map(|t| t.styles.clone()).unwrap_or_default(),
                 });
             }
         }
@@ -758,6 +761,32 @@ impl Vault {
             w.save();
             Ok(())
         })
+    }
+
+    /// Gives the Inclusion whose character is at `at` (UTF-16) in `id` these Styles (from the
+    /// Style library, by name), for it only, on top of the Work's Look. Recorded in `id`, like
+    /// what it includes, so Milestones keep them; the Styles' content is recorded on the next edit.
+    pub fn set_inclusion_styles(&mut self, id: &str, at: usize, styles: &[String], now_ms: u64) -> Result<(), String> {
+        if styles.iter().any(|s| s.trim().is_empty() || s.contains('\n')) {
+            return Err("Not a Style's name.".into());
+        }
+        let shown = self.shown_in(id, false)?;
+        let key = self.current_id(id);
+        let text = self.works.get(&key).ok_or_else(|| format!("{id} isn't open."))?.text();
+        let found = inclusion_at(&text, at, &shown).ok_or("That Inclusion isn't there any more.")?;
+        let record = inclusion_record(found.at);
+        let shelf = Shelf::read(&self.root);
+        let generation = self.library_generation;
+        self.with_work(id, now_ms, |w, _| {
+            w.close_burst(now_ms);
+            w.record_fields(&[(record, "styles".into(), styles.join("\n"))], now_ms);
+            // The Styles' content too, now, so the Text file and Exports have them.
+            w.record_library(&shelf, generation, now_ms);
+            w.save();
+            Ok(())
+        })?;
+        self.refresh_text_file_inclusions(id);
+        Ok(())
     }
 
     /// Comment ops (by Comment ID: Reply, Resolve, Edit, Delete…) on a Work that may not be
@@ -1101,6 +1130,31 @@ mod tests {
         v.edit("Rain", vec![Op::Delete { from: rain_at, to: rain_at + 13, origin: Origin::Input }], 22_000).unwrap();
         v.tick(30_000);
         assert_eq!(v.inclusions("Collected").unwrap()[0].split, None);
+    }
+
+    #[test]
+    fn an_inclusion_gets_styles_of_its_own_recorded_in_the_including_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        v.set_inclusion_styles("Collected", 18, &["Book text".into()], 12_000).unwrap();
+        assert_eq!(v.inclusions("Collected").unwrap()[0].styles, vec!["Book text".to_string()]);
+        // Applied inside the Inclusion, in its block (scoped to it there).
+        let (body, header, blocks) = v.typeset_input("Collected", None, 12_100).unwrap();
+        let block = &body[body.find("// ---- Included by wrtier").unwrap()..];
+        assert!(block.contains("first-line-indent: 1.2em"), "{block}");
+        compiles(&header, body, blocks);
+        // Its content is recorded in "Collected" at once, so the Text file and Milestones have it.
+        let work = &v.works["Collected"];
+        assert!(work.doc.field("style/Book text", "content").is_some_and(|c| c.contains("first-line-indent")));
+        v.close_work("Collected", 13_000);
+        let file = std::fs::read_to_string(dir.path().join("Collected.typ")).unwrap();
+        let block = &file[file.find("// ---- Included by wrtier").unwrap()..];
+        assert!(block.contains("first-line-indent: 1.2em"));
+        // Taken off again.
+        v.open_work("Collected", 14_000).unwrap();
+        v.set_inclusion_styles("Collected", 18, &[], 14_100).unwrap();
+        assert!(v.inclusions("Collected").unwrap()[0].styles.is_empty());
+        assert!(v.set_inclusion_styles("Collected", 0, &["Book text".into()], 14_200).is_err(), "no Inclusion there");
     }
 
     #[test]

@@ -237,6 +237,25 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     $("panel-tab-history").textContent = count > 0 ? `History (${count})` : "History";
   },
   modCommand: (id, command) => modCommand(id, command),
+  inclusionStyles: (id, at, styles, x, y) => {
+    const all = library.items.filter((i) => i.kind === "style");
+    if (all.length === 0) {
+      showError("The Style library has no Styles yet.");
+      return;
+    }
+    const set = (next: string[]) => act(async () => {
+      await tabs.settled(id);
+      await invoke("set_inclusion_styles", { id, at, styles: next });
+      tabs.refreshInclusionsOf(id);
+    });
+    showMenu(x, y, [
+      ...all.map((s): MenuItem => {
+        const on = styles.includes(s.name);
+        return { label: `${on ? "✓ " : "    "}${s.title}`, run: () => set(on ? styles.filter((n) => n !== s.name) : [...styles, s.name]) };
+      }),
+      ...(styles.length > 0 ? ["separator" as const, { label: "No Styles of its own", run: () => set([]) }] : []),
+    ]);
+  },
   openWork: (id, at) => act(async () => {
     await openWork(id, at);
     await tabs.reveal(id, at, at); // also when it was open already

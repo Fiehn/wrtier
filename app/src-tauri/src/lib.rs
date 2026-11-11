@@ -222,6 +222,12 @@ fn settle_split(state: State<AppState>, id: String, at: usize) -> Result<(), Str
     with_app(&state, |app| open_vault_of(app)?.settle_split(&id, at, now_ms()))
 }
 
+/// Gives the Inclusion whose character is at `at` in the Work `id` its own Styles (by name).
+#[tauri::command]
+fn set_inclusion_styles(state: State<AppState>, id: String, at: usize, styles: Vec<String>) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.set_inclusion_styles(&id, at, &styles, now_ms()))
+}
+
 /// The Chapters of a Work (open or not), to pick one to include.
 #[tauri::command]
 fn chapters_of(state: State<AppState>, work: String) -> Result<Vec<vault::ChapterChoice>, String> {
@@ -1086,6 +1092,7 @@ pub fn run() {
             comment_on_inclusion,
             comment_in,
             settle_split,
+            set_inclusion_styles,
             rename_work,
             trash_work,
             list_trash,

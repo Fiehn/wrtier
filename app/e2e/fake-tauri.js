@@ -110,7 +110,10 @@
     },
     list_works: () => ({ entries: Object.keys(fake.texts).map((id) => ({ id, name: id, kind: "work" })), problems: fake.problems, folders: [] }),
     list_trash: () => [],
-    get_library: () => ({ items: [], conflicts: [], builtIn: [] }),
+    get_library: () => ({
+      items: [{ kind: "style", name: "Courier voice", title: "Courier voice", path: "styles/Courier voice.typ", description: "", problems: [], writtenAs: null, shownAs: null, docx: null, styles: [] }],
+      conflicts: [], builtIn: [],
+    }),
     get_layout: () => ({ tabs: ["Rain"], active: "Rain", cursors: {} }),
     save_layout: () => null,
     open_work: ({ id }) => ({ id, name: id, text: fake.texts[id], problems: [], notice: null }),
@@ -153,6 +156,11 @@
       return null;
     },
     export_pdf: () => null, // as if the save dialog was cancelled
+    set_inclusion_styles: ({ id, at, styles }) => {
+      const k = [...fake.texts[id].slice(0, at)].filter((c) => c === "￼").length;
+      fake.included[id][k].styles = styles;
+      return null;
+    },
     settle_split: ({ id, at }) => {
       const k = [...fake.texts[id].slice(0, at)].filter((c) => c === "￼").length;
       fake.included[id][k].settled = true;
@@ -203,7 +211,7 @@
         }));
         const found = fake.splits?.[target.work];
         const split = found && found.after === target.chapter && !target.settled ? { title: found.title, at: found.at } : null;
-        views.push({ at, work: target.work, label, text: shown.trimEnd(), missing: null, language: "en", whole: target.chapter === null, starts: target.chapter ?? 0, comments, split });
+        views.push({ at, work: target.work, label, text: shown.trimEnd(), missing: null, language: "en", whole: target.chapter === null, starts: target.chapter ?? 0, comments, split, styles: target.styles ?? [] });
       }
       return views;
     },

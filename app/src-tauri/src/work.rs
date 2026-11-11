@@ -651,6 +651,13 @@ impl OpenWork {
         true
     }
 
+    /// Records the library files it uses that changed (or were never recorded) now, whether or
+    /// not that's due: after it started using new ones. Only while no burst is open.
+    pub fn record_library(&mut self, shelf: &crate::preamble::Shelf, generation: u64, now_ms: u64) {
+        self.styles_checked = None;
+        self.record_styles(Some((shelf, generation)), now_ms);
+    }
+
     /// Does this Work need to record the Style library as of `generation` before an edit?
     pub fn styles_due(&self, generation: u64) -> bool {
         self.styles_checked != Some(generation)

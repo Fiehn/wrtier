@@ -2678,6 +2678,7 @@ body.phone #write-toolbar button:disabled {
 .cm-inclusion-words {
   margin-right: auto;
 }
+.cm-inclusion-styles,
 .cm-inclusion-fold,
 .cm-inclusion-go {
   border: none;
@@ -2692,6 +2693,7 @@ body.phone #write-toolbar button:disabled {
   color: var(--muted);
   width: 1.4em;
 }
+.cm-inclusion-styles:hover,
 .cm-inclusion-fold:hover,
 .cm-inclusion-go:hover {
   background: var(--chip-hover);

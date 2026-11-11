@@ -453,3 +453,21 @@ test("a Chapter split in its own Work shows a note, and the new one can be inclu
   await expect(note).toHaveCount(0);
   expect(await app.evaluate(() => (window as any).__fake.log.some((e: any) => e.cmd === "settle_split"))).toBe(true);
 });
+
+test("an Inclusion gets Styles of its own from the bar", async ({ app }) => {
+  await endOf(app, "She walked home.");
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "The whole Work" }).click();
+  const styles = app.locator(".cm-inclusion .cm-inclusion-styles");
+  await expect(styles).toHaveText("Styles");
+  await styles.click();
+  await app.locator("#menu button", { hasText: "Courier voice" }).click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "set_inclusion_styles")?.args.styles)).toEqual(["Courier voice"]);
+  await expect(styles).toHaveText("Styles (1)");
+  // Picked again: taken off.
+  await styles.click();
+  await expect(app.locator("#menu button", { hasText: "✓ Courier voice" })).toBeVisible();
+  await app.locator("#menu button", { hasText: "No Styles of its own" }).click();
+  await expect(styles).toHaveText("Styles");
+});

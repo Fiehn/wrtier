@@ -63,6 +63,8 @@ export type TabEvents = {
   notices(count: number): void;
   /** "Go to" on an Inclusion: open the Work it includes (its ID). */
   openWork(id: string, at: number): void;
+  /** "Styles" on an Inclusion's bar: pick Styles for it only (it has `styles`), with a menu at (x, y). */
+  inclusionStyles(id: string, at: number, styles: string[], x: number, y: number): void;
   /** A Mod's command's key, while writing in a Work: it runs it, or offers to add the Mod. */
   modCommand(id: string, command: CommandId): boolean;
 };
@@ -123,13 +125,17 @@ class Tab {
       this.hasInclusions = views.length > 0 || this.view.state.doc.toString().includes(INCLUSION);
       // Typed meanwhile: they're asked for again next time rather than put in the wrong place.
       if (this.sync.isIdle()) {
+        const before = inclusionsOf(this.view.state);
         const comments = (list: InclusionView[]) => JSON.stringify(list.map((v) => v.comments));
-        const changed = comments(inclusionsOf(this.view.state)) !== comments(views);
+        const commentsChanged = comments(before) !== comments(views);
+        const changed = JSON.stringify(before) !== JSON.stringify(views);
         this.view.dispatch({ effects: setInclusions.of(views) });
-        events.edited(this.sync.id); // the counts include them
+        // Only when something changed (this is asked every 2 s): the counts, Chapter list and
+        // Page preview follow.
+        if (changed) events.edited(this.sync.id);
         // The Comments panel lists their Comments (redrawn only when they change: a redraw
         // would take the focus from a Reply being written).
-        if (changed) events.marks(this.sync.id, this.marks);
+        if (commentsChanged) events.marks(this.sync.id, this.marks);
       }
     } catch (e) {
       events.error(String(e));
@@ -309,6 +315,10 @@ class Tab {
     });
     this.pane.addEventListener("wrtier-open-comments", (e) => tabs.events.openComments(this.id, (e as CustomEvent<string[]>).detail));
     this.pane.addEventListener("wrtier-add-comment", () => tabs.events.addComment(this.id));
+    this.pane.addEventListener("wrtier-inclusion-styles", (e) => {
+      const { at, styles, x, y } = (e as CustomEvent<{ at: number; styles: string[]; x: number; y: number }>).detail;
+      tabs.events.inclusionStyles(this.id, at, styles, x, y);
+    });
     // The note about a new Chapter after an Inclusion: include it too (just after), or dismiss.
     this.pane.addEventListener("wrtier-split", (e) => {
       const { at, work, chapter } = (e as CustomEvent<{ at: number; work: string | null; chapter: number | null }>).detail;

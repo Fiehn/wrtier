@@ -32,6 +32,8 @@ export type InclusionView = {
   /** A new Chapter right after the included one, not included (it was split, or one was put
    *  after it), until the Author includes it too or dismisses this. */
   split?: { title: string; at: number } | null;
+  /** Styles given to this Inclusion only. */
+  styles?: string[];
 };
 
 /** A Chapter that can be included (vault/inclusions.rs `ChapterChoice`). */
@@ -75,7 +77,7 @@ class IncludedText extends WidgetType {
     const a = this.v;
     const b = other.v;
     return this.folded === other.folded && a.label === b.label && a.text === b.text && a.missing === b.missing && a.work === b.work && a.at === b.at
-      && JSON.stringify(a.comments) === JSON.stringify(b.comments) && JSON.stringify(a.split) === JSON.stringify(b.split);
+      && JSON.stringify(a.comments) === JSON.stringify(b.comments) && JSON.stringify(a.split) === JSON.stringify(b.split) && JSON.stringify(a.styles) === JSON.stringify(b.styles);
   }
 
   toDOM(view: EditorView) {
@@ -115,6 +117,17 @@ class IncludedText extends WidgetType {
       words.textContent = `${n.toLocaleString()} ${n === 1 ? "word" : "words"}`;
       bar.append(words);
     }
+    // Styles for this Inclusion only (Courier for one narrator…), picked from the library.
+    const styles = document.createElement("button");
+    styles.type = "button";
+    styles.className = "cm-inclusion-styles";
+    styles.textContent = v.styles?.length ? `Styles (${v.styles.length})` : "Styles";
+    styles.title = v.styles?.length ? `Its own Styles: ${v.styles.join(", ")}` : "Give it Styles of its own, on top of the Work's Look";
+    styles.addEventListener("mousedown", (e) => e.preventDefault());
+    styles.addEventListener("click", (e) => {
+      box.dispatchEvent(new CustomEvent("wrtier-inclusion-styles", { bubbles: true, detail: { at: v.at, styles: v.styles ?? [], x: e.clientX, y: e.clientY } }));
+    });
+    bar.append(styles);
     if (v.work) {
       const go = document.createElement("button");
       go.type = "button";
