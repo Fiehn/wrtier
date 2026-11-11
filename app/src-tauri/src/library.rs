@@ -37,6 +37,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("Chapter openings.typ", include_str!("../defaults/styles/Chapter openings.typ")),
     ("Page numbers.typ", include_str!("../defaults/styles/Page numbers.typ")),
     ("Manuscript.typ", include_str!("../defaults/styles/Manuscript.typ")),
+    ("Inclusion titles.typ", include_str!("../defaults/styles/Inclusion titles.typ")),
     ("Paperback.look", include_str!("../defaults/styles/Paperback.look")),
     ("Manuscript.look", include_str!("../defaults/styles/Manuscript.look")),
     ("A4 draft.look", include_str!("../defaults/styles/A4 draft.look")),
@@ -487,7 +488,7 @@ mod tests {
         }
         let paperback = lib.items.iter().find(|i| i.name == "Paperback").unwrap();
         assert_eq!(paperback.kind, Kind::Look);
-        assert_eq!(paperback.styles, ["Paperback page", "Book text", "Chapter openings", "Page numbers"]);
+        assert_eq!(paperback.styles, ["Paperback page", "Book text", "Chapter openings", "Page numbers", "Inclusion titles"]);
         let scene = lib.items.iter().find(|i| i.name == "scene-break").unwrap();
         assert_eq!((scene.kind, scene.title.as_str()), (Kind::StoryElement, "Scene break"));
         assert_eq!((scene.shown_as.as_deref(), scene.docx.as_deref()), (Some("chip"), Some("centred #")));

@@ -321,6 +321,28 @@ kbd {
   font-weight: 600;
 }
 
+/* Selected for a new Collection (Ctrl+click): outlined, with its place in the Collection. */
+#works li.picked > .entry {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.entry-pick {
+  margin-left: 6px;
+  min-width: 1.3em;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* A Work can be dragged into a Work's text, to include it there. */
+.entry[draggable="true"] {
+  -webkit-user-drag: element;
+}
+
 #works small {
   display: block;
   padding: 1px 9px 0;
@@ -2649,6 +2671,19 @@ body.phone #write-toolbar button:disabled {
 
 #chapters-sheet #chapters > summary::-webkit-details-marker {
   display: none;
+}
+
+/* An Inclusion in the Raw view: its one uneditable `#inclusion(…)` line. */
+.cm-inclusion-raw {
+  color: var(--accent);
+  background: var(--panel);
+  border-radius: 3px;
+  padding: 0 2px;
+  cursor: default;
+}
+.cm-inclusion-raw.missing {
+  color: var(--warn-text);
+  background: var(--warn-bg);
 }
 
 /* An Inclusion (ADR 0015): another Work's text, shown read-only under a bar that names it. */

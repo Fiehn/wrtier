@@ -98,6 +98,8 @@ pub struct Shown {
     pub name: Option<String>,
     /// What it includes, as the Author reads it: "Zampanò", or "Zampanò: The Navidson Record".
     pub label: String,
+    /// The included Chapter's title ("The Navidson Record"), if it includes one and it was found.
+    pub chapter: Option<String>,
     /// Why it can't be shown, if it can't.
     pub missing: Option<String>,
     /// The included text as written there (its own Inclusions written out the same way).
@@ -200,7 +202,7 @@ pub(super) fn expand(ctx: &mut Ctx, doc: &Doc, stack: &mut Vec<String>) -> Vec<S
 
 fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut Vec<String>) -> Shown {
     let mut s = Shown {
-        at, index, target: Target::of(including, at), name: None, label: "An Inclusion".into(),
+        at, index, target: Target::of(including, at), name: None, label: "An Inclusion".into(), chapter: None,
         missing: None, plain: String::new(), typst: String::new(), version: None, language: String::new(), elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), author: String::new(), split: None,
     };
     let result = (|| {
@@ -211,7 +213,7 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
         s.label = name.clone();
         s.name = Some(located.id.clone());
         if located.duplicate {
-            return Err(format!("Two Works claim to be {name}: remove or rename one, so it's clear which is meant."));
+            return Err(format!("Two Works claim to be {name}: move one to the trash, so it's clear which is meant (see Sync problems)."));
         }
         if located.trashed {
             return Err(format!("{name} is in the trash."));
@@ -234,7 +236,9 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
                 let range = doc.index_of_char(chapter).and_then(|start| chapter_range(&chars, start));
                 let range = range.ok_or_else(|| format!("The Chapter it includes is no longer in {name}."))?;
                 let heading: String = chars[range.0..].iter().take_while(|&&c| c != '\n').collect();
-                s.label = format!("{name}: {}", heading.trim_start_matches('=').trim());
+                let heading = heading.trim_start_matches('=').trim().to_string();
+                s.label = format!("{name}: {heading}");
+                s.chapter = Some(heading);
                 s.starts = chars[..range.0].iter().map(|c| c.len_utf16()).sum();
                 // A new heading between this Chapter and the one that followed it when it was
                 // included: it was split, or a Chapter was put after it (live only).
@@ -292,7 +296,13 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
             .filter_map(|style| preamble::find(including, ctx.shelf, mode, Kind::Style, style))
             .map(|used| used.content)
             .collect();
-        s.typst = wrap(&typst, &preamble.language, target.chapter.is_none().then_some(title.as_str()), &styles);
+        // A whole Work's title, and its author's name when it isn't the including Work's.
+        let heading = target.chapter.is_none().then(|| {
+            let author = preamble.author.trim();
+            let shown = !author.is_empty() && author != Preamble::of(including).author.trim();
+            (title.as_str(), shown.then_some(author))
+        });
+        s.typst = wrap(&typst, &preamble.language, heading, &styles);
         s.title = target.chapter.is_none().then_some(title);
         s.plain = plain;
         s.version = Some(doc.version());
@@ -373,15 +383,21 @@ fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]) -> Vec<cr
 }
 
 /// The included text as Typst that renders in the including Work's Look: in its own language,
-/// a whole Work under its title with its Chapters a level down, then its own Styles, kept apart
-/// from the text around it by paragraph breaks.
-fn wrap(text: &str, language: &str, title: Option<&str>, styles: &[String]) -> String {
+/// a whole Work under its title (`heading`: the title, and the author's name if it's to be
+/// shown) with its Chapters a level down, then its own Styles, kept apart from the text around
+/// it by paragraph breaks. The title is labelled `<inclusion-title>` and the author's name is
+/// `<inclusion-author>` metadata, so a Style ("Inclusion titles") can show them its own way.
+fn wrap(text: &str, language: &str, heading: Option<(&str, Option<&str>)>, styles: &[String]) -> String {
     let mut out = String::from("#[\n\n");
     if !language.trim().is_empty() {
         out.push_str(&format!("#set text(lang: {})\n", preamble::string(language.trim())));
     }
-    if let Some(title) = title {
-        out.push_str(&format!("#heading(level: 1, {})\n#set heading(offset: 1)\n", preamble::string(title)));
+    if let Some((title, author)) = heading {
+        out.push_str(&format!("#heading(level: 1, {})<inclusion-title>\n", preamble::string(title)));
+        if let Some(author) = author {
+            out.push_str(&format!("#metadata({})<inclusion-author>\n", preamble::string(author)));
+        }
+        out.push_str("#set heading(offset: 1)\n");
     }
     for style in styles {
         out.push_str(style);
@@ -503,6 +519,8 @@ pub struct InclusionView {
     /// The included Work's ID in the Vault, to open it ("Go to"); None if it wasn't found.
     pub work: Option<String>,
     pub label: String,
+    /// The included Chapter's title, if it includes one Chapter and it was found.
+    pub chapter: Option<String>,
     /// The included text, read-only.
     pub text: String,
     pub missing: Option<String>,
@@ -548,7 +566,7 @@ pub fn views(text: &str, shown: &[Shown]) -> Vec<InclusionView> {
         if c == INCLUSION {
             if let Some(s) = next.next() {
                 out.push(InclusionView {
-                    at, work: s.name.clone(), label: s.label.clone(), text: s.plain.clone(),
+                    at, work: s.name.clone(), label: s.label.clone(), chapter: s.chapter.clone(), text: s.plain.clone(),
                     missing: s.missing.clone(), language: s.language.clone(),
                     whole: s.target.as_ref().is_some_and(|t| t.chapter.is_none()),
                     starts: s.starts,
@@ -573,15 +591,7 @@ impl Vault {
             .chain(walk_works(&trash).dbs.into_iter().map(|d| (d, true)))
         {
             seen.insert(db.clone());
-            let identity = match self.identities.get(&db) {
-                Some(known) => known.clone(),
-                None => {
-                    let read = storage::identity(&db).ok().flatten();
-                    self.identities.insert(db.clone(), read.clone());
-                    read
-                }
-            };
-            let Some(identity) = identity else { continue };
+            let Some(identity) = self.identity_of(&db) else { continue };
             let id = if trashed { relative_id(&trash, &db) } else { self.id_of(&db) };
             match index.get_mut(&identity) {
                 // The Vault's own copy wins over one in the trash; two in the Vault are a problem.
@@ -595,6 +605,51 @@ impl Vault {
         }
         self.identities.retain(|db, _| seen.contains(db));
         index
+    }
+
+    /// A `.db`'s Work ID (`storage::identity`), read once and kept.
+    fn identity_of(&mut self, db: &Path) -> Option<String> {
+        if let Some(known) = self.identities.get(db) {
+            return known.clone();
+        }
+        let read = storage::identity(db).ok().flatten();
+        self.identities.insert(db.to_path_buf(), read.clone());
+        read
+    }
+
+    /// Works in the Vault (`dbs`, its Histories) that have the same Work ID, because one was
+    /// copied by hand: a Sync problem until one is removed, since an Inclusion of it can't tell
+    /// which is meant. One problem per Work, on the copies after the first.
+    pub(super) fn duplicate_problems(&mut self, dbs: &[PathBuf]) -> Vec<super::SyncProblem> {
+        let mut by_identity: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        for db in dbs {
+            if let Some(identity) = self.identity_of(db) {
+                by_identity.entry(identity).or_default().push(db.clone());
+            }
+        }
+        let mut groups: Vec<Vec<String>> = by_identity.into_values()
+            .filter(|dbs| dbs.len() > 1)
+            .map(|dbs| {
+                // The one with the plainest name first ("Rain" before "Old/Rain copy"): it names them.
+                let mut ids: Vec<String> = dbs.iter().map(|db| self.id_of(db)).collect();
+                let short = |id: &String| id.rsplit('/').next().unwrap_or(id).chars().count();
+                ids.sort_by_key(|id| (short(id), id.to_lowercase()));
+                ids
+            })
+            .collect();
+        groups.sort();
+        groups.into_iter().map(|ids| {
+            let name = ids[0].rsplit('/').next().unwrap_or(&ids[0]).to_string();
+            let count = if ids.len() == 2 { "Two".to_string() } else { ids.len().to_string() };
+            super::SyncProblem {
+                path: ids[1..].join(", "),
+                reason: format!(
+                    "{count} Works claim to be {name} ({}): one was copied from the other outside the app. Move all but one to the trash, so it's clear which one Inclusions show.",
+                    ids.join(", "),
+                ),
+                newer: false,
+            }
+        }).collect()
     }
 
     /// The Inclusions of an open Work, worked out. `recorded`: at the versions it recorded.
@@ -824,6 +879,9 @@ impl Vault {
     /// where its heading starts (UTF-16).
     pub fn chapters_of(&mut self, work: &str) -> Result<Vec<ChapterChoice>, String> {
         let (db, _) = self.paths(work)?;
+        if !db.exists() {
+            return Err(format!("{work} isn't in the Vault any more."));
+        }
         let text = match self.works.values().find(|w| w.db == db) {
             Some(w) => w.doc.committed_text(),
             None => storage::load(&db, self.device).map_err(err)?.1.committed_text(),
@@ -840,11 +898,78 @@ impl Vault {
         Ok(found)
     }
 
+    /// Can the Work `work` (an ID in the Vault) be included in the open Work `id`? Not if that
+    /// would make a Work include itself (ADR 0015): `id` itself, or a Work that already includes
+    /// `id` (directly, or through Works it includes). Asked before the Inclusion is put in the
+    /// text, so a refusal changes nothing.
+    pub fn check_inclusion(&mut self, id: &str, work: &str) -> Result<(), String> {
+        let target = self.target_for(work, None)?;
+        self.refuse_loop(id, work, &target)
+    }
+
+    /// `check_inclusion`, for a Target already worked out.
+    pub(super) fn refuse_loop(&mut self, id: &str, work: &str, target: &Target) -> Result<(), String> {
+        let Some(me) = self.works.get(&self.current_id(id)).and_then(|w| w.identity()).map(str::to_string) else { return Ok(()) };
+        let name = work.rsplit('/').next().unwrap_or(work);
+        if target.work == me {
+            return Err("A Work can't include itself.".into());
+        }
+        let index = self.work_index();
+        let mut seen = std::collections::HashSet::new();
+        let mut todo = vec![target.work.clone()];
+        while let Some(next) = todo.pop() {
+            if !seen.insert(next.clone()) {
+                continue;
+            }
+            let Some(located) = index.get(&next) else { continue };
+            let read;
+            let doc = match self.works.values().find(|w| w.db == located.db) {
+                Some(open) => &open.doc,
+                None => match storage::load(&located.db, self.device) {
+                    Ok((_, doc)) => {
+                        read = doc;
+                        &read
+                    }
+                    Err(_) => continue, // can't be read now: nothing it includes can be known
+                },
+            };
+            let includes: Vec<String> = doc.inclusions().into_iter().filter_map(|(at, _)| Target::of(doc, at)).map(|t| t.work).collect();
+            if includes.contains(&me) {
+                return Err(format!("{name} already includes this Work, so including it here would make it include itself."));
+            }
+            todo.extend(includes);
+        }
+        Ok(())
+    }
+
+    /// "New Collection from selected Works…": a new Work `id` holding an Inclusion of each of
+    /// `works` (IDs in the Vault), whole and in that order, with a blank line between them.
+    /// Every one is checked before anything is made.
+    pub fn create_collection(&mut self, id: &str, works: &[String], now_ms: u64) -> Result<crate::vault::OpenedWork, String> {
+        if works.is_empty() {
+            return Err("Select the Works to collect first.".into());
+        }
+        for work in works {
+            self.target_for(work, None)?;
+        }
+        let created = self.create_work(id, now_ms)?;
+        // One character each, on lines of their own: at 0, 3, 6…
+        let mut ops = vec![Op::Paste { from: 0, to: 0, text: vec![INCLUSION.to_string(); works.len()].join("\n\n") }];
+        ops.extend(works.iter().enumerate().map(|(k, work)| Op::Include { at: 3 * k, work: work.clone(), chapter: None, target: None }));
+        self.edit(&created.id, ops, now_ms)?;
+        let text = self.works.get(&self.current_id(&created.id)).map(|w| w.text()).unwrap_or_default();
+        Ok(crate::vault::OpenedWork { text, ..created })
+    }
+
     /// What an Inclusion of the Work `work` (an ID in the Vault) should record: its ID, and the
     /// character starting the heading of the Chapter that starts at `chapter` (a position in
     /// its text, UTF-16), if one.
     pub(super) fn target_for(&mut self, work: &str, chapter: Option<usize>) -> Result<Target, String> {
         let (db, _) = self.paths(work)?;
+        // (Loading a `.db` that isn't there would make an empty one.)
+        if !db.exists() {
+            return Err(format!("{work} isn't in the Vault any more."));
+        }
         let open = self.works.values().find(|w| w.db == db);
         let loaded;
         let doc = match open {
@@ -1040,9 +1165,23 @@ mod tests {
     fn a_loop_and_a_trashed_work_show_placeholders() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = collected(dir.path());
-        // "Rain" includes "Collected" back.
         v.open_work("Rain", 12_000).unwrap();
-        include(&mut v, "Rain", 0, "Collected", None, 12_100);
+        // Including "Collected" back in "Rain" is refused, before anything changes, and so is
+        // including a Work in itself.
+        let refused = v.check_inclusion("Rain", "Collected").unwrap_err();
+        assert!(refused.contains("Collected already includes this Work"), "{refused}");
+        assert_eq!(v.check_inclusion("Collected", "Collected").unwrap_err(), "A Work can't include itself.");
+        assert!(v.check_inclusion("Collected", "Rain").is_ok(), "one more of it is fine");
+        assert!(v.edit("Rain", vec![
+            Op::Paste { from: 0, to: 0, text: INCLUSION.to_string() },
+            Op::Include { at: 0, work: "Collected".into(), chapter: None, target: None },
+        ], 12_050).is_err());
+        // A loop can still arrive by merging (each Device made its half): as if, here.
+        let target = v.target_for("Collected", None).unwrap();
+        v.with_work("Rain", 12_100, |w, name| w.edit(vec![
+            Op::Paste { from: 0, to: 0, text: INCLUSION.to_string() },
+            Op::Include { at: 0, work: "Collected".into(), chapter: None, target: Some(target) },
+        ], name, None, 12_100)).unwrap();
         let views = v.inclusions("Collected").unwrap();
         assert!(views[0].missing.is_none(), "Rain itself is still shown");
         // Inside it, where Collected would come again (it's what is being shown), a note instead.
@@ -1179,6 +1318,81 @@ mod tests {
         assert!(v.export_input("Collected", None, 22_000).unwrap().text.contains("Changed later."));
     }
 
+    /// The pages' text without spaces (lines break and justify differently from font to font).
+    fn squeezed(pages: &[String]) -> Vec<String> {
+        pages.iter().map(|p| p.split_whitespace().collect()).collect()
+    }
+
+    #[test]
+    fn a_whole_included_work_starts_on_a_page_of_its_own_under_its_title_and_author() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = open(dir.path());
+        v.create_work("Rain", 1000).unwrap();
+        let p = Preamble { looks: vec!["Paperback".into()], title: "Rain at Night".into(), author: "Ana Lind".into(), ..Preamble::default() };
+        v.set_preamble("Rain", &p, 1100).unwrap();
+        v.edit("Rain", vec![typing(0, RAIN)], 1200).unwrap();
+        v.close_work("Rain", 1300);
+        v.create_work("Collected", 2000).unwrap();
+        v.edit("Collected", vec![typing(0, "My introduction.\n\n")], 2100).unwrap();
+        v.tick(10_000);
+        include(&mut v, "Collected", 18, "Rain", None, 11_000);
+        // The default Paperback Look has "Inclusion titles", last.
+        let (body, header, blocks) = v.typeset_input("Collected", None, 12_000).unwrap();
+        assert!(body.contains("<inclusion-title>") && body.contains("#metadata(\"Ana Lind\")<inclusion-author>"), "{body}");
+        let mut t = crate::typeset::Typesetter::new(false);
+        let c = t.compile_body("c", Path::new("none"), &header, body, blocks);
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        let pages = squeezed(&t.page_texts("c"));
+        let title = pages.iter().position(|p| p.contains("RainatNight")).expect("the title is on a page");
+        assert!(pages[0].contains("Myintroduction.") && title > 0, "after a page break: {pages:?}");
+        assert!(pages[title].contains("AnaLind"), "with its author's name: {pages:?}");
+        assert_eq!(pages.iter().map(|p| p.matches("RainatNight").count()).sum::<usize>(), 1, "shown once, not also as a Chapter: {pages:?}");
+        // By the same author as the Collection: no author line.
+        let mut mine = v.preamble("Collected", 13_000).unwrap();
+        mine.author = "Ana Lind".into();
+        v.set_preamble("Collected", &mine, 13_100).unwrap();
+        let (body, _, _) = v.typeset_input("Collected", None, 13_200).unwrap();
+        assert!(body.contains("<inclusion-title>") && !body.contains("<inclusion-author>"), "{body}");
+    }
+
+    #[test]
+    fn a_collection_is_made_of_the_works_given_in_their_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        v.create_work("Sun", 12_000).unwrap();
+        v.edit("Sun", vec![typing(0, "It was sunny.")], 12_100).unwrap();
+        v.close_work("Sun", 12_200);
+        let made = v.create_collection("Short stories/Both", &["Sun".into(), "Rain".into()], 13_000).unwrap();
+        assert_eq!((made.id.as_str(), made.text.clone()), ("Short stories/Both", format!("{INCLUSION}\n\n{INCLUSION}")));
+        let views = v.inclusions("Short stories/Both").unwrap();
+        let shown: Vec<(&str, &str)> = views.iter().map(|v| (v.label.as_str(), v.text.as_str())).collect();
+        assert_eq!(shown, vec![("Sun", "It was sunny."), ("Rain", RAIN)]);
+        // One that can't be included (gone meanwhile): nothing is made, and no empty file left.
+        assert!(v.create_collection("Gone", &["Rain".into(), "Nowhere".into()], 14_000).is_err());
+        assert!(!dir.path().join("Gone.db").exists() && !dir.path().join("Nowhere.db").exists());
+    }
+
+    #[test]
+    fn two_works_with_one_id_are_a_sync_problem_until_one_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        assert!(v.list(12_000).problems.is_empty());
+        // "Rain" copied by hand: both claim to be the same Work.
+        std::fs::create_dir_all(dir.path().join("Old")).unwrap();
+        std::fs::copy(dir.path().join("Rain.db"), dir.path().join("Old/Rain copy.db")).unwrap();
+        let problems = v.list(13_000).problems;
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].path, "Old/Rain copy");
+        assert!(problems[0].reason.starts_with("Two Works claim to be Rain (Rain, Old/Rain copy)"), "{}", problems[0].reason);
+        assert!(problems[0].reason.contains("trash"));
+        // The Inclusion can't tell which is meant either.
+        assert!(v.inclusions("Collected").unwrap()[0].missing.as_deref().is_some_and(|m| m.starts_with("Two Works claim to be")));
+        // One goes to the trash: no problem, and the Inclusion shows the one left.
+        v.trash_work("Old/Rain copy", 14_000).unwrap();
+        assert!(v.list(14_100).problems.is_empty());
+        assert!(v.inclusions("Collected").unwrap()[0].missing.is_none());
+    }
+
     #[test]
     fn places_in_the_preview_map_around_inclusions() {
         let dir = tempfile::tempdir().unwrap();
@@ -1213,7 +1427,7 @@ mod tests {
     fn places_in_the_pages_trace_back_to_the_inclusions_character() {
         let at: CharId = "00000001:1+0".parse().unwrap();
         let s = Shown {
-            at, index: 2, target: None, name: None, label: "Rain".into(), missing: None,
+            at, index: 2, target: None, name: None, label: "Rain".into(), chapter: None, missing: None,
             plain: "Rain.".into(), typst: "#[\nRain.\n]".into(), version: None, language: String::new(),
             elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), author: String::new(), split: None,
         };

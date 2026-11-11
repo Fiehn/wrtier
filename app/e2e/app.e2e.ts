@@ -490,3 +490,59 @@ test("the PDF of a Milestone shown in the Page preview is of that Milestone", as
   await app.locator("#preview-pdf").click();
   await expect.poll(() => app.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd === "export_pdf").map((e: any) => e.args.milestone))).toEqual(["00000001:90", null]);
 });
+
+test("a Work dragged from the Vault into the text is included where it's dropped", async ({ app }) => {
+  const zampano = app.locator("#works li.work-entry", { hasText: "Zampanò" }).locator(".entry");
+  await zampano.dragTo(line(app, "She walked home."));
+  // Dropped on a line with text: on a line of its own after it.
+  await expect.poll(async () => (await ops(app)).find((op) => op.op === "include")).toMatchObject({ work: "Zampanò", chapter: null });
+  expect(await textOf(app)).toContain("She walked home.\n\uFFFC\n");
+  await expect(app.locator(".cm-inclusion .cm-inclusion-label")).toHaveText("Zampanò");
+  // A Work dragged into itself is refused, and nothing changes.
+  await app.locator("#works li.work-entry", { hasText: "Rain" }).locator(".entry").dragTo(line(app, "The end."));
+  await expect(app.locator("#error")).toContainText("can't include itself");
+  expect((await ops(app)).filter((op) => op.op === "include")).toHaveLength(1);
+  expect((await textOf(app)).match(/\uFFFC/g)).toHaveLength(1);
+});
+
+test("Works picked in the Vault become a new Collection, in the order they were picked", async ({ app }) => {
+  const entry = (name: string) => app.locator("#works li.work-entry", { hasText: name });
+  await entry("Zampanò").locator(".entry-name").click({ modifiers: ["ControlOrMeta"] });
+  await entry("Rain").locator(".entry-name").click({ modifiers: ["ControlOrMeta"] });
+  // Each is marked with its place in the Collection (Rain is listed first, picked second).
+  await expect(app.locator("#works li.picked .entry-pick")).toHaveText(["2", "1"]);
+  expect(await app.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd === "open_work").length)).toBe(1); // only Rain, at the start
+  await entry("Rain").click({ button: "right" });
+  await app.locator("#menu button", { hasText: "New Collection from selected Works (2)…" }).click();
+  await expect(app.locator("#ask-text")).toContainText("It includes Zampanò, Rain, in that order.");
+  await app.locator("#ask-text-input").fill("Both");
+  await app.locator("#ask-text-ok").click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "create_collection")?.args))
+    .toEqual({ id: "Both", works: ["Zampanò", "Rain"] });
+  // It opens, showing both, and the selection is cleared.
+  await expect(app.locator(".pane:not([hidden]) .cm-inclusion-label")).toHaveText(["Zampanò", "Rain"]);
+  await expect(app.locator("#works li.picked")).toHaveCount(0);
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/collection.png` : undefined });
+});
+
+test("in the Raw view an Inclusion is one line saying what it includes", async ({ app }) => {
+  await endOf(app, "She walked home.");
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "Chapter: The Navidson Record" }).click();
+  await expect(app.locator(".cm-inclusion")).toBeVisible();
+  await app.locator("#view-mode").click();
+  const raw = app.locator(".cm-inclusion-raw");
+  await expect(raw).toHaveText('#inclusion("Zampanò", chapter: "The Navidson Record")');
+  await expect(app.locator(".cm-inclusion")).toHaveCount(0);
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/raw.png` : undefined });
+  // Typing after it goes after it; the line itself can't be typed in.
+  await line(app, "She walked home.").click();
+  await app.keyboard.press("ArrowDown");
+  await app.keyboard.press("End");
+  await app.keyboard.type(" After.");
+  await expect.poll(() => textOf(app)).toContain("\uFFFC After.");
+  // Back in the Formatted view: the block again.
+  await app.locator("#view-mode").click();
+  await expect(app.locator(".cm-inclusion .cm-inclusion-label")).toHaveText("Zampanò: The Navidson Record");
+});

@@ -192,6 +192,16 @@
       }
       return found;
     },
+    // A Work can't include itself (the fake knows no deeper loops).
+    check_inclusion: ({ id, work }) => {
+      if (id === work) throw "A Work can't include itself.";
+      return null;
+    },
+    create_collection: ({ id, works }) => {
+      fake.texts[id] = works.map(() => "￼").join("\n\n");
+      fake.included[id] = works.map((work) => ({ work, chapter: null }));
+      return { id, name: id.split("/").pop(), text: fake.texts[id], problems: [], notice: null };
+    },
     get_inclusions: ({ id }) => {
       const text = fake.texts[id];
       const list = fake.included[id] ?? [];
@@ -204,10 +214,12 @@
         const source = fake.texts[target.work];
         let shown = source;
         let label = target.work;
+        let chapter = null;
         if (target.chapter !== null) {
           const next = source.indexOf("\n= ", target.chapter + 1);
           shown = source.slice(target.chapter, next === -1 ? source.length : next + 1);
-          label = `${target.work}: ${shown.split("\n")[0].slice(2)}`;
+          chapter = shown.split("\n")[0].slice(2);
+          label = `${target.work}: ${chapter}`;
         }
         const comments = (fake.includedComments[target.work] ?? []).map((c) => ({
           id: c.id, ranges: [[c.from, c.to]], sender: c.sender, name: "Author", colour: "author", body: c.body, resolved: false,
@@ -215,7 +227,7 @@
         }));
         const found = fake.splits?.[target.work];
         const split = found && found.after === target.chapter && !target.settled ? { title: found.title, at: found.at } : null;
-        views.push({ at, work: target.work, label, text: shown.trimEnd(), missing: null, language: "en", whole: target.chapter === null, starts: target.chapter ?? 0, comments, split, styles: target.styles ?? [] });
+        views.push({ at, work: target.work, label, chapter, text: shown.trimEnd(), missing: null, language: "en", whole: target.chapter === null, starts: target.chapter ?? 0, comments, split, styles: target.styles ?? [] });
       }
       return views;
     },

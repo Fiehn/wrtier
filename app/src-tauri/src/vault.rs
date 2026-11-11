@@ -469,6 +469,8 @@ impl Vault {
             }
         }
 
+        problems.extend(self.duplicate_problems(&histories));
+
         let dbs: HashSet<&PathBuf> = files.dbs.iter().collect();
         for typ in &files.typs {
             let (id, name) = (self.id_of(typ), name_of(typ));
@@ -780,7 +782,10 @@ impl Vault {
         // An Inclusion records the ID of the Work it includes, which only the Vault can find.
         for op in &mut ops {
             if let Op::Include { work, chapter, target, .. } = op {
-                *target = Some(self.target_for(work, *chapter)?);
+                let found = self.target_for(work, *chapter)?;
+                // Asked before the editor put it in (`check_inclusion`); this only catches a race.
+                self.refuse_loop(id, work, &found)?;
+                *target = Some(found);
             }
         }
         let edits = ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks | Op::Tints | Op::Find { .. } | Op::Stretch { .. }));
@@ -1520,7 +1525,9 @@ mod tests {
         let root = dir.path();
         let mut vault = open(root);
         work(root, "The Long Night", "It was dark.", ME);
-        work(root, "Short stories/Rain", "The rain had stopped.", ME);
+        // (From another Device: two Works without a given ID, begun by one Device in the same
+        // millisecond, would be one Work to `storage::identity`.)
+        work(root, "Short stories/Rain", "The rain had stopped.", OTHER);
         create_foreign_db(&root.join("addresses.db"));                           // hidden
         std::fs::write(root.join("Lone.typ"), "Written in vim.").unwrap();      // a new Work
         std::fs::create_dir_all(root.join(".stversions")).unwrap();             // Syncthing's old copies

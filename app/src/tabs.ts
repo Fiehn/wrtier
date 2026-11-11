@@ -20,7 +20,7 @@ import { bindings, COMMANDS, withKey, type CommandId } from "./keys";
 import { chaptersIn, type IncludedEntry, type MoveOp } from "./chapters";
 import { sessionTints, setTints } from "./sessiontints";
 import { modExtensions, type Mod } from "./mods";
-import { INCLUSION, includedSelection, inclusions, inclusionsOf, placeInclusion, readerText, setInclusions, type InclusionView } from "./inclusions";
+import { INCLUSION, includedSelection, inclusions, inclusionsOf, placeInclusion, rawInclusions, readerText, setInclusions, workDrops, type InclusionView } from "./inclusions";
 import { wordsIn } from "./counts";
 
 export type OpenedWork = { id: string; name: string; text: string; problems: { path: string; reason: string }[]; notice: string | null };
@@ -63,6 +63,8 @@ export type TabEvents = {
   notices(count: number): void;
   /** "Go to" on an Inclusion: open the Work it includes (its ID). */
   openWork(id: string, at: number): void;
+  /** A Work (its ID) dragged from the Vault browser was dropped at `pos` in the text of the Work `id`. */
+  dropWork(id: string, work: string, pos: number): void;
   /** "Styles" on an Inclusion's bar: pick Styles for it only (it has `styles`), with a menu at (x, y). */
   inclusionStyles(id: string, at: number, styles: string[], x: number, y: number): void;
   /** A Mod's command's key, while writing in a Work: it runs it, or offers to add the Mod. */
@@ -72,6 +74,8 @@ export type TabEvents = {
 const historyCompartment = new Compartment();
 /** The Formatted view, or the Raw view's Typst colouring. */
 const viewCompartment = new Compartment();
+/** What goes in it: in the Raw view, Inclusions are their one `#inclusion(…)` line too. */
+const viewExtension = (formatted: boolean) => (formatted ? formattedView() : [typstColouring(false), rawInclusions.of(true)]);
 /** Line numbers and the shaded cursor line (settings). */
 const linesCompartment = new Compartment();
 /** The Story elements the Work has (from its Preamble and the Style library). */
@@ -245,10 +249,12 @@ class Tab {
           // Only the basics: no shortcuts that move lines, which would bypass Moves.
           keymap.of(standardKeymap),
           dropCursor(),
+          // A Work dragged in from the Vault browser is included where it's dropped.
+          workDrops((work, pos) => tabs.events.dropWork(this.id, work, pos)),
           dragToMove(),
           completions({ work: () => this.sync.id, settled: () => this.sync.idle() }),
           elementsCompartment.of(storyElements([])),
-          viewCompartment.of(tabs.formatted ? formattedView() : typstColouring(false)),
+          viewCompartment.of(viewExtension(tabs.formatted)),
           linesCompartment.of(lineExtensions(tabs.options)),
           commentHighlights(() => tabs.commentOptions, (ids) => tabs.events.openComments(this.id, ids)),
           commentsCompartment.of(commentClasses(tabs.commentOptions)),
@@ -604,10 +610,12 @@ export class Tabs {
     if (tab?.isWork) void tab.refreshInclusions(this.events);
   }
 
-  /** Puts an Inclusion of `work` (or its Chapter at `chapter`) at the cursor in the Work `id`. */
-  include(id: string, work: string, chapter: number | null) {
+  /** Puts an Inclusion of `work` (or its Chapter at `chapter`) at the cursor in the Work `id`, or near `near`. */
+  include(id: string, work: string, chapter: number | null, near?: number) {
     const tab = this.find(id);
-    if (tab?.isWork) tab.include(work, chapter, this.events);
+    if (!tab?.isWork) return;
+    tab.include(work, chapter, this.events, near);
+    if (near !== undefined) tab.view.focus(); // dropped in: the writing goes on there
   }
 
   /** The Work in front asks for its Inclusions again, so they follow the Works they include. */
@@ -656,7 +664,7 @@ export class Tabs {
   setFormatted(on: boolean) {
     this.formatted = on;
     for (const tab of this.open) {
-      if (tab.isWork) tab.view.dispatch({ effects: viewCompartment.reconfigure(on ? formattedView() : typstColouring(false)) });
+      if (tab.isWork) tab.view.dispatch({ effects: viewCompartment.reconfigure(viewExtension(on)) });
     }
   }
 

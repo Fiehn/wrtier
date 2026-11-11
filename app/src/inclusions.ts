@@ -3,7 +3,7 @@
 // names it, with "Go to" to open that Work; each one folds to just its bar. The character is
 // one unit: the cursor goes before or after it, never inside, and deleting it removes it whole.
 
-import { StateEffect, StateField, type EditorState, type Extension, type Text } from "@codemirror/state";
+import { Facet, StateEffect, StateField, type EditorState, type Extension, type Text } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemirror/view";
 import { countsOf } from "./counts";
 import type { Mark } from "./sync";
@@ -19,6 +19,8 @@ export type InclusionView = {
   /** The included Work's ID in the Vault, to open it; null if it wasn't found. */
   work: string | null;
   label: string;
+  /** The included Chapter's title, if it includes one Chapter and it was found. */
+  chapter?: string | null;
   /** The included text, read-only. */
   text: string;
   /** Why it can't be shown, if it can't. */
@@ -193,6 +195,52 @@ class IncludedText extends WidgetType {
   }
 }
 
+/** A Typst string literal. */
+function typstString(s: string): string {
+  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
+}
+
+/**
+ * How the Raw view writes an Inclusion: one line, `#inclusion("Zampanò", chapter: "The Navidson
+ * Record")`. The names are for reading; what it includes is the Work's hidden ID. One that can't
+ * be shown says why after it, as a comment.
+ */
+export function rawLine(v: InclusionView): string {
+  const name = v.work?.split("/").pop() ?? (v.label.split(": ")[0] || "?");
+  const args = [typstString(name)];
+  if (v.chapter) args.push(`chapter: ${typstString(v.chapter)}`);
+  if (v.styles?.length) args.push(`styles: (${v.styles.map(typstString).join(", ")}${v.styles.length === 1 ? "," : ""})`);
+  const line = `#inclusion(${args.join(", ")})`;
+  return v.missing ? `${line} // ${v.missing}` : line;
+}
+
+/** An Inclusion in the Raw view: its one uneditable line. */
+class RawInclusion extends WidgetType {
+  constructor(readonly v: InclusionView) {
+    super();
+  }
+
+  eq(other: RawInclusion) {
+    return rawLine(this.v) === rawLine(other.v) && this.v.at === other.v.at;
+  }
+
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "cm-inclusion-raw" + (this.v.missing ? " missing" : "");
+    span.textContent = rawLine(this.v);
+    span.title = "An Inclusion: shown in full in the Formatted view and on the pages. Change its text in the Work it includes.";
+    return span;
+  }
+
+  // The cursor goes before or after it, as around any character.
+  ignoreEvent() {
+    return false;
+  }
+}
+
+/** The Raw view is on: each Inclusion shows as its one `#inclusion(…)` line instead of the block. */
+export const rawInclusions = Facet.define<boolean, boolean>({ combine: (values) => values.some(Boolean) });
+
 /** A Comment's highlight in included text: where (UTF-16, in the included text) and whose. */
 type Highlight = { from: number; to: number; id: string; colour: string; resolved: boolean };
 
@@ -299,7 +347,9 @@ export function includedSelection(view: EditorView): { at: number; from: number;
 function decorations(state: EditorState): DecorationSet {
   const { views, folded } = state.field(shownField);
   const doc = state.doc;
+  const raw = state.facet(rawInclusions);
   const ranges = [...views].sort((a, b) => a.at - b.at).map((v) => {
+    if (raw) return Decoration.replace({ widget: new RawInclusion(v) }).range(v.at, v.at + 1);
     const line = doc.lineAt(v.at);
     // On a line of its own (as Rust puts it): a block. Anywhere else (typed oddly in another
     // editor): inline, so the rest of the line still shows.
@@ -312,7 +362,9 @@ function decorations(state: EditorState): DecorationSet {
 const decorationField = StateField.define<DecorationSet>({
   create: (state) => decorations(state),
   update(deco, tr) {
-    return tr.startState.field(shownField) === tr.state.field(shownField) ? deco.map(tr.changes) : decorations(tr.state);
+    const same = tr.startState.field(shownField) === tr.state.field(shownField)
+      && tr.startState.facet(rawInclusions) === tr.state.facet(rawInclusions);
+    return same ? deco.map(tr.changes) : decorations(tr.state);
   },
   provide: (field) => [EditorView.decorations.from(field), EditorView.atomicRanges.of((view) => view.state.field(field))],
 });
@@ -320,6 +372,59 @@ const decorationField = StateField.define<DecorationSet>({
 /** Shows a Work's Inclusions in its editor. */
 export function inclusions(): Extension {
   return [shownField, decorationField];
+}
+
+/** What a Work dragged from the Vault browser carries: its ID in the Vault. */
+const WORK_DRAG = "application/x-wrtier-work";
+
+/**
+ * The Work being dragged from the Vault browser, noted here too: WebKit doesn't always hand a
+ * drag's own data type on to where it's dropped. Kept a moment past the drag's end, since
+ * WebKitGTK reports the end before the drop (see dragging.ts).
+ */
+let draggedWork: string | null = null;
+let forgetDrag: number | undefined;
+
+/** A Work's pill in the Vault browser started being dragged: it can be dropped in a Work's text. */
+export function startWorkDrag(event: DragEvent, work: string) {
+  draggedWork = work;
+  window.clearTimeout(forgetDrag);
+  event.dataTransfer?.setData(WORK_DRAG, work);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "copy";
+}
+
+/** The drag ended (dropped, or let go elsewhere). */
+export function endWorkDrag() {
+  window.clearTimeout(forgetDrag);
+  forgetDrag = window.setTimeout(() => (draggedWork = null), 1000);
+}
+
+/**
+ * A Work dragged from the Vault browser and dropped in the text: `dropped` is told which Work
+ * (its ID) and where in the text it was dropped, to include it there. Other drops are left alone.
+ */
+export function workDrops(dropped: (work: string, pos: number) => void): Extension {
+  const workOf = (e: DragEvent) => (e.dataTransfer?.types.includes(WORK_DRAG) ? e.dataTransfer.getData(WORK_DRAG) : "") || draggedWork;
+  return EditorView.domEventHandlers({
+    dragstart() {
+      draggedWork = null; // text dragged in the editor, not a Work
+      return false;
+    },
+    dragover(event) {
+      if (!draggedWork &&!event.dataTransfer?.types.includes(WORK_DRAG)) return false;
+      event.preventDefault(); // it may be dropped here
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      return false; // the drop cursor still follows the mouse
+    },
+    drop(event, view) {
+      const work = workOf(event);
+      if (!work) return false;
+      event.preventDefault();
+      draggedWork = null;
+      dropped(work, view.posAtCoords({ x: event.clientX, y: event.clientY }, false));
+      return true;
+    },
+  });
 }
 
 /** The Inclusions the editor shows now. */

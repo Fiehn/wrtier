@@ -21,7 +21,7 @@ import { fillNewWorkMods, openMods } from "./modsdialog";
 import { inUse, modNamed, type ModsState } from "./mods";
 import { ChapterList } from "./chapterlist";
 import { CountLine } from "./countline";
-import type { ChapterChoice } from "./inclusions";
+import { endWorkDrag, startWorkDrag, type ChapterChoice } from "./inclusions";
 import { ThemeApplier, themeChoices, VAULT_PREFIX } from "./themes";
 import { SyncPanel } from "./syncpanel";
 import { UpdateDialog } from "./updates";
@@ -237,6 +237,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     $("panel-tab-history").textContent = count > 0 ? `History (${count})` : "History";
   },
   modCommand: (id, command) => modCommand(id, command),
+  dropWork: (id, work, pos) => act(() => includeChecked(id, work, null, pos)),
   inclusionStyles: (id, at, styles, x, y) => {
     const all = library.items.filter((i) => i.kind === "style");
     if (all.length === 0) {
@@ -675,6 +676,8 @@ function showModViews() {
  * menu at `at` if it has Chapters) one of its Chapters.
  */
 async function includeIn(into: string, work: string, at: { x: number; y: number }) {
+  // Refused before the menu, if it would make a Work include itself.
+  await invoke("check_inclusion", { id: into, work });
   const chapters = await invoke<ChapterChoice[]>("chapters_of", { work });
   if (chapters.length === 0) {
     tabs.include(into, work, null);
@@ -685,6 +688,54 @@ async function includeIn(into: string, work: string, at: { x: number; y: number 
     "separator",
     ...chapters.map((c): MenuItem => ({ label: `Chapter: ${c.title}`, run: () => tabs.include(into, work, c.at) })),
   ]);
+}
+
+/**
+ * Includes `work` (or its Chapter at `chapter`) in the Work `into`, at the cursor or near `near`,
+ * once Rust has said it can be: not if that would make a Work include itself.
+ */
+async function includeChecked(into: string, work: string, chapter: number | null, near?: number) {
+  await invoke("check_inclusion", { id: into, work });
+  tabs.include(into, work, chapter, near);
+}
+
+// ---- Collections: Works selected in the Vault browser (Ctrl+click, or "Select" in its menu) ----
+
+/** The Works selected for a new Collection, in the order they were picked. */
+let picked: string[] = [];
+
+function togglePicked(id: string) {
+  picked = picked.includes(id) ? picked.filter((p) => p !== id) : [...picked, id];
+  showPicked();
+}
+
+/** Marks the selected Works in the Vault browser, numbered in the order they'll be in. */
+function showPicked() {
+  picked = picked.filter((id) => entries.some((e) => e.id === id && e.kind === "work"));
+  for (const item of $("works").querySelectorAll<HTMLElement>("li.work-entry")) {
+    const n = picked.indexOf(item.dataset.id ?? "");
+    item.classList.toggle("picked", n !== -1);
+    item.querySelector(".entry-pick")?.remove();
+    if (n !== -1) {
+      const badge = document.createElement("span");
+      badge.className = "entry-pick";
+      badge.textContent = String(n + 1);
+      badge.title = "Selected for a new Collection, in this place";
+      item.querySelector(".entry")?.prepend(badge);
+    }
+  }
+}
+
+/** "New Collection from selected Works…": a new Work holding an Inclusion of each, in that order. */
+async function newCollection(works: string[], folder?: string) {
+  const id = await askText(`A new Collection of ${works.length === 1 ? "1 Work" : `${works.length} Works`}. What's it called?`, folder ? `${folder}/` : "", "Create",
+    `It includes ${works.map((w) => w.split("/").pop()).join(", ")}, in that order. ${FOLDER_HINT}`);
+  if (id === null) return;
+  const created = await invoke<OpenedWork>("create_collection", { id, works });
+  picked = [];
+  await tabs.add(created);
+  await refreshElements(created.id);
+  await refreshList();
 }
 
 // The Work in front follows the Works it includes as they're written (in other tabs, or arriving
@@ -991,8 +1042,18 @@ function workItem(entry: Entry): HTMLElement {
   name.textContent = entry.name;
   name.title = entry.id;
   name.disabled = disabled(entry);
-  name.addEventListener("click", () => act(() => openWork(entry.id)));
+  name.addEventListener("click", (e) => {
+    // Ctrl+click (⌘ on a Mac) picks it for a new Collection instead.
+    if ((e.ctrlKey || e.metaKey) && entry.kind === "work") togglePicked(entry.id);
+    else act(() => openWork(entry.id));
+  });
   pill.append(name);
+  if (entry.kind === "work") {
+    // Dragged into a Work's text, it's included there.
+    pill.draggable = true;
+    pill.addEventListener("dragstart", (e) => startWorkDrag(e, entry.id));
+    pill.addEventListener("dragend", endWorkDrag);
+  }
   const actions = document.createElement("span");
   actions.className = "entry-actions";
   if (entry.kind === "work") {
@@ -1063,6 +1124,7 @@ async function refreshList() {
   const list = $("works");
   list.replaceChildren();
   fillList(list, buildTree(entries, folders));
+  showPicked();
   highlightOpen();
   await refreshTrash();
 }
@@ -1138,6 +1200,13 @@ $("sidebar-vault").addEventListener("contextmenu", (e) => {
   const workEl = target.closest<HTMLElement>("li.work-entry");
   const folderEl = target.closest<HTMLElement>("li.folder");
   const run = (f: () => Promise<unknown>) => () => act(f);
+  const folderHere = workEl ? foldersOf(workEl.dataset.id ?? "").pop() : folderEl?.dataset.path;
+  // With Works selected (Ctrl+click, or "Select" here): a Collection of them.
+  const collecting: MenuItem[] = picked.length === 0 ? [] : [
+    "separator",
+    { label: `New Collection from selected Works (${picked.length})…`, run: run(() => newCollection([...picked], folderHere)) },
+    { label: "Clear the selection", run: () => { picked = []; showPicked(); } },
+  ];
   let items: MenuItem[];
   if (workEl) {
     const entry = entries.find((x) => x.id === workEl.dataset.id);
@@ -1150,6 +1219,10 @@ $("sidebar-vault").addEventListener("contextmenu", (e) => {
       entry.kind === "work" ? [
         { label: "Open", run: run(() => openWork(entry.id)) },
         ...(into ? [{ label: `Include in ${into.split("/").pop()}…`, run: run(() => includeIn(into, entry.id, at)) }] : []),
+        {
+          label: picked.includes(entry.id) ? "Deselect" : "Select for a Collection",
+          run: () => togglePicked(entry.id),
+        },
         { label: "Preamble…", run: run(() => editPreamble(entry.id)) },
         { label: "Mods…", run: run(() => editMods(entry.id)) },
         { label: "Name a Milestone…", run: run(() => nameMilestone(entry.id)) },
@@ -1179,7 +1252,7 @@ $("sidebar-vault").addEventListener("contextmenu", (e) => {
       { label: "New folder…", run: run(() => newFolder()) },
     ];
   }
-  showMenu(e.clientX, e.clientY, items);
+  showMenu(e.clientX, e.clientY, items.length > 0 ? [...items, ...collecting] : collecting.slice(1));
 });
 
 async function renameWork(id: string) {

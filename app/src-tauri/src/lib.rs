@@ -228,6 +228,20 @@ fn set_inclusion_styles(state: State<AppState>, id: String, at: usize, styles: V
     with_app(&state, |app| open_vault_of(app)?.set_inclusion_styles(&id, at, &styles, now_ms()))
 }
 
+/// Can the Work `work` be included in the open Work `id`? An error saying why not (it would
+/// make a Work include itself). Asked before the Inclusion is put in the text.
+#[tauri::command]
+fn check_inclusion(state: State<AppState>, id: String, work: String) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.check_inclusion(&id, &work))
+}
+
+/// "New Collection from selected Works…": makes a Work `id` holding Inclusions of `works`, in
+/// that order, and opens it.
+#[tauri::command]
+fn create_collection(state: State<AppState>, id: String, works: Vec<String>) -> Result<OpenedWork, String> {
+    with_app(&state, |app| open_vault_of(app)?.create_collection(&id, &works, now_ms()))
+}
+
 /// The Chapters of a Work (open or not), to pick one to include.
 #[tauri::command]
 fn chapters_of(state: State<AppState>, work: String) -> Result<Vec<vault::ChapterChoice>, String> {
@@ -1098,6 +1112,8 @@ pub fn run() {
             work_text,
             get_inclusions,
             chapters_of,
+            check_inclusion,
+            create_collection,
             missing_inclusions,
             comment_on_inclusion,
             comment_in,

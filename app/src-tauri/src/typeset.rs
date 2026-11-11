@@ -599,6 +599,29 @@ impl Typesetter {
     pub fn forget(&mut self, id: &str) {
         self.previews.remove(id);
     }
+
+    /// The text on each of the last pages that compiled, in the order it was laid out (for tests).
+    #[cfg(test)]
+    pub fn page_texts(&self, id: &str) -> Vec<String> {
+        fn walk(frame: &Frame, out: &mut String) {
+            for (_, item) in frame.items() {
+                match item {
+                    FrameItem::Group(group) => walk(&group.frame, out),
+                    FrameItem::Text(text) => {
+                        out.push_str(&text.text);
+                        out.push(' ');
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some(document) = self.previews.get(id).and_then(|p| p.last_good.as_ref()) else { return Vec::new() };
+        document.pages().iter().map(|page| {
+            let mut out = String::new();
+            walk(&page.frame, &mut out);
+            out
+        }).collect()
+    }
 }
 
 /// Where the text at `cursor` (a byte offset) ended up on the pages: the glyph written from

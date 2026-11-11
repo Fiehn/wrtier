@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EditorState, Text } from "@codemirror/state";
-import { INCLUSION, inclusions, inclusionsOf, placeInclusion, readerText, setInclusions, type InclusionView } from "./inclusions";
+import { INCLUSION, inclusions, inclusionsOf, placeInclusion, rawLine, readerText, setInclusions, type InclusionView } from "./inclusions";
 import { countsLine, countsOf } from "./counts";
 
 const doc = (s: string) => Text.of(s.split("\n"));
@@ -45,5 +45,21 @@ describe("Inclusions in the editor", () => {
   it("ignore what Rust said about a place that isn't an Inclusion any more", () => {
     const state = withInclusion("No inclusion here.", [rain(3)]);
     expect(inclusionsOf(state)).toEqual([]);
+  });
+});
+
+describe("an Inclusion in the Raw view", () => {
+  it("is one line naming what it includes, its Chapter and its own Styles", () => {
+    expect(rawLine({ ...rain(0), work: "Short stories/Rain" })).toBe('#inclusion("Rain")');
+    expect(rawLine({ ...rain(0), label: "Rain: The \"Long\" Night", chapter: 'The "Long" Night', whole: false }))
+      .toBe('#inclusion("Rain", chapter: "The \\"Long\\" Night")');
+    expect(rawLine({ ...rain(0), styles: ["Courier voice"] })).toBe('#inclusion("Rain", styles: ("Courier voice",))');
+    expect(rawLine({ ...rain(0), styles: ["A", "B"] })).toBe('#inclusion("Rain", styles: ("A", "B"))');
+  });
+
+  it("says why when it can't be shown", () => {
+    expect(rawLine({ ...rain(0), missing: "Rain is in the trash." })).toBe('#inclusion("Rain") // Rain is in the trash.');
+    expect(rawLine({ ...rain(0), work: null, label: "An Inclusion", missing: "Not in this Vault (yet)." }))
+      .toBe('#inclusion("An Inclusion") // Not in this Vault (yet).');
   });
 });
