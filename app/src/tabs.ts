@@ -308,6 +308,7 @@ class Tab {
       tabs.events.selectionMenu(this.id, e.clientX, e.clientY);
     });
     this.pane.addEventListener("wrtier-open-comments", (e) => tabs.events.openComments(this.id, (e as CustomEvent<string[]>).detail));
+    this.pane.addEventListener("wrtier-add-comment", () => tabs.events.addComment(this.id));
     this.pane.addEventListener("wrtier-add-element", (e) => tabs.events.addElement(this.id, (e as CustomEvent<string>).detail));
 
     // A click anywhere in the writing area (the margins beside the text, the space below it)

@@ -379,19 +379,28 @@ test("a Comment on included text is kept in the Work it comes from, and shown he
   await app.locator("#menu button", { hasText: "Chapter: The Navidson Record" }).click();
   const text = app.locator(".cm-inclusion-text p", { hasText: "quarter inch" });
   await expect(text).toBeVisible();
-  // Select "quarter inch" in the included text, and right-click it.
-  await text.evaluate((p) => {
+  // A double-click selects a word in it (the editor doesn't take the selection back).
+  const where = (words: string) => text.evaluate((p, words) => {
     const node = p.firstChild!;
-    const start = node.textContent!.indexOf("quarter inch");
+    const start = node.textContent!.indexOf(words);
     const range = document.createRange();
     range.setStart(node, start);
-    range.setEnd(node, start + "quarter inch".length);
-    getSelection()!.removeAllRanges();
-    getSelection()!.addRange(range);
-  });
-  // Right-click on the selected words (a real right-click there keeps the selection).
-  const box = await app.evaluate(() => JSON.parse(JSON.stringify(getSelection()!.getRangeAt(0).getBoundingClientRect())));
-  await app.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: "right" });
+    range.setEnd(node, start + words.length);
+    return JSON.parse(JSON.stringify(range.getBoundingClientRect()));
+  }, words);
+  const measured = await where("measured");
+  await app.mouse.dblclick(measured.x + measured.width / 2, measured.y + measured.height / 2);
+  await expect.poll(() => app.evaluate(() => getSelection()!.toString().trim())).toBe("measured");
+  // Drag across "quarter inch" to select it, the way the Author would, then right-click it.
+  const box = await where("quarter inch");
+  const y = box.y + box.height / 2;
+  await app.mouse.move(box.x + 1, y);
+  await app.mouse.down();
+  await app.mouse.move(box.x + box.width / 2, y, { steps: 5 });
+  await app.mouse.move(box.x + box.width + 1, y, { steps: 5 });
+  await app.mouse.up();
+  await expect.poll(() => app.evaluate(() => getSelection()!.toString())).toBe("quarter inch");
+  await app.mouse.click(box.x + box.width / 2, y, { button: "right" });
   await app.locator("#menu button", { hasText: "Add Comment" }).click({ timeout: 5000 });
   await expect(app.locator("#comments-new")).toContainText("kept in Zampanò");
   await app.locator("#comments-new textarea").fill("How much, exactly?");

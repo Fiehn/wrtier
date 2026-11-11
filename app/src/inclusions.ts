@@ -7,6 +7,7 @@ import { StateEffect, StateField, type EditorState, type Extension, type Text } 
 import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemirror/view";
 import { countsOf } from "./counts";
 import type { Mark } from "./sync";
+import { isCommand } from "./keys";
 
 /** The character that stands for an Inclusion (change.rs `INCLUSION`). */
 export const INCLUSION = "￼";
@@ -80,6 +81,16 @@ class IncludedText extends WidgetType {
     box.className = "cm-inclusion" + (v.missing ? " missing" : "") + (this.folded ? " folded" : "");
     box.contentEditable = "false";
     box.dataset.at = String(v.at);
+    // Focusable, so pressing the mouse in it moves the focus here rather than into the editor:
+    // the editor then leaves the selection alone, and the included text can be selected (to
+    // copy it, or comment on it).
+    box.tabIndex = -1;
+    // The editor's keys don't reach here (it isn't focused): Add Comment's does, on the selection.
+    box.addEventListener("keydown", (e) => {
+      if (!isCommand(e, "addComment")) return;
+      e.preventDefault();
+      box.dispatchEvent(new CustomEvent("wrtier-add-comment", { bubbles: true }));
+    });
     const bar = document.createElement("div");
     bar.className = "cm-inclusion-bar";
     const fold = document.createElement("button");

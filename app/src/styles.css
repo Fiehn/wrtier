@@ -2734,3 +2734,6 @@ body.phone #write-toolbar button:disabled {
 #chapters-list li.included .chapter-title {
   font-style: italic;
 }
+.cm-inclusion:focus {
+  outline: none;
+}
