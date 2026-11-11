@@ -2757,3 +2757,25 @@ body.phone #write-toolbar button:disabled {
   justify-content: space-between;
   gap: 8px;
 }
+/* The note about a new Chapter after an included one. */
+.cm-inclusion-split {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.6em;
+  margin-top: 0.3em;
+  padding: 0.3em 0.5em;
+  border-radius: 3px;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-family: system-ui, sans-serif;
+  font-size: 0.8em;
+}
+.cm-inclusion-split button {
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  padding: 0 0.2em;
+  cursor: pointer;
+}

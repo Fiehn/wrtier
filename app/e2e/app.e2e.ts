@@ -435,3 +435,21 @@ test("a whole included Work shows its own Chapters a level down in the Chapter l
   await expect(entry.locator("> .chapter-words")).toHaveText("15"); // its Chapters' 6 and 9: headings aren't counted
   await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/whole.png` : undefined });
 });
+
+test("a Chapter split in its own Work shows a note, and the new one can be included too", async ({ app }) => {
+  // In Zampanò, "Exploration A" now has a new Chapter after it ("Interlude", at 52).
+  await app.evaluate(() => ((window as any).__fake.splits = { "Zampanò": { after: 0, title: "Interlude", at: 52 } }));
+  await endOf(app, "She walked home.");
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "Chapter: Exploration A" }).click();
+  const note = app.locator(".cm-inclusion-split");
+  await expect(note).toContainText("Zampanò has a new Chapter after this one, not included: “Interlude”.");
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/split.png` : undefined });
+  await note.locator("button", { hasText: "Include it here too" }).click();
+  // A second Inclusion, of the new Chapter, right after the first; and the note goes.
+  await expect.poll(async () => (await ops(app)).filter((op) => op.op === "include").map((op: any) => op.chapter)).toEqual([0, 52]);
+  expect(await textOf(app)).toContain("She walked home.\n\uFFFC\n\uFFFC\n");
+  await expect(note).toHaveCount(0);
+  expect(await app.evaluate(() => (window as any).__fake.log.some((e: any) => e.cmd === "settle_split"))).toBe(true);
+});

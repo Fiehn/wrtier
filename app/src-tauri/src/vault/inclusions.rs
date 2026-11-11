@@ -36,6 +36,9 @@ pub struct Target {
     pub chapter: Option<CharId>,
     /// Styles for this Inclusion only, on top of the including Work's Look.
     pub styles: Vec<String>,
+    /// For a Chapter: the first character of the heading that came after it when it was
+    /// included (or the Author last looked): a new one between them shows a note on the bar.
+    pub next: Option<CharId>,
 }
 
 impl Target {
@@ -45,7 +48,8 @@ impl Target {
         let chapter = doc.field(&record, "chapter").and_then(|c| c.parse().ok());
         let styles = doc.field(&record, "styles").unwrap_or("").lines()
             .map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
-        Some(Target { work, chapter, styles })
+        let next = doc.field(&record, "next").and_then(|c| c.parse().ok());
+        Some(Target { work, chapter, styles, next })
     }
 
     /// The Changes recording this as what the Inclusion at `at` includes.
@@ -54,6 +58,9 @@ impl Target {
         let mut changes = vec![doc.set_field_local(&record, "work", &self.work, now_ms)];
         if let Some(chapter) = self.chapter {
             changes.push(doc.set_field_local(&record, "chapter", &chapter.to_string(), now_ms));
+        }
+        if let Some(next) = self.next {
+            changes.push(doc.set_field_local(&record, "next", &next.to_string(), now_ms));
         }
         if !self.styles.is_empty() {
             changes.push(doc.set_field_local(&record, "styles", &self.styles.join("\n"), now_ms));
@@ -114,6 +121,8 @@ pub struct Shown {
     pub comments: Vec<crate::work::Mark>,
     /// The included Work's author name, for its Author's Comments.
     pub author: String,
+    /// A new Chapter found right after the included one (see `Target::next`), if one.
+    pub split: Option<SplitNote>,
 }
 
 /// What working out Inclusions reads from.
@@ -192,7 +201,7 @@ pub(super) fn expand(ctx: &mut Ctx, doc: &Doc, stack: &mut Vec<String>) -> Vec<S
 fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut Vec<String>) -> Shown {
     let mut s = Shown {
         at, index, target: Target::of(including, at), name: None, label: "An Inclusion".into(),
-        missing: None, plain: String::new(), typst: String::new(), version: None, language: String::new(), elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), author: String::new(),
+        missing: None, plain: String::new(), typst: String::new(), version: None, language: String::new(), elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), author: String::new(), split: None,
     };
     let result = (|| {
         let target = s.target.clone().ok_or("This Inclusion has lost what it includes.")?;
@@ -227,6 +236,20 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
                 let heading: String = chars[range.0..].iter().take_while(|&&c| c != '\n').collect();
                 s.label = format!("{name}: {}", heading.trim_start_matches('=').trim());
                 s.starts = chars[..range.0].iter().map(|c| c.len_utf16()).sum();
+                // A new heading between this Chapter and the one that followed it when it was
+                // included: it was split, or a Chapter was put after it (live only).
+                if let (false, Some(was)) = (ctx.recorded, target.next) {
+                    let visible = doc.visible();
+                    let now = visible.get(range.1).map(|&(id, _)| id);
+                    let still_later = doc.index_of_char(was).is_some_and(|i| i > range.1);
+                    if now.is_some_and(|n| n != was) && still_later {
+                        let title: String = chars[range.1..].iter().take_while(|&&c| c != '\n').collect();
+                        s.split = Some(SplitNote {
+                            title: title.trim_start_matches('=').trim().to_string(),
+                            at: chars[..range.1].iter().map(|c| c.len_utf16()).sum(),
+                        });
+                    }
+                }
                 range
             }
         };
@@ -417,6 +440,23 @@ pub fn typst_body(text: &str, shown: &[Shown]) -> (String, Vec<(usize, usize)>) 
     (out, blocks)
 }
 
+/// The Inclusion whose character is at `at` (UTF-16) in `text` (the editor's text, which may
+/// hold the open burst), matched in order to `shown`.
+fn inclusion_at<'a>(text: &str, at: usize, shown: &'a [Shown]) -> Option<&'a Shown> {
+    let mut utf16 = 0;
+    let mut k = 0;
+    for c in text.chars() {
+        if c == INCLUSION {
+            if utf16 == at {
+                return shown.get(k);
+            }
+            k += 1;
+        }
+        utf16 += c.len_utf16();
+    }
+    None
+}
+
 /// What the Text file writes out for each Inclusion.
 pub fn expansions(shown: &[Shown]) -> storage::Expansions {
     shown.iter().map(|s| (s.at, inclusion_block(s.at, &s.label, &s.typst))).collect()
@@ -473,6 +513,18 @@ pub struct InclusionView {
     /// The included Work's Comments on its text here, ranges in `text` (UTF-16): they belong to that
     /// Work, and show in both.
     pub comments: Vec<crate::work::Mark>,
+    /// A new Chapter found right after the included one (see `Target::next`), if one.
+    pub split: Option<SplitNote>,
+}
+
+/// A new Chapter right after an included one, not included: the included Chapter was split, or
+/// a Chapter was put after it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitNote {
+    pub title: String,
+    /// Where its heading starts in its Work's text (UTF-16), to include it too.
+    pub at: usize,
 }
 
 /// A Chapter that can be included.
@@ -499,6 +551,7 @@ pub fn views(text: &str, shown: &[Shown]) -> Vec<InclusionView> {
                     whole: s.target.as_ref().is_some_and(|t| t.chapter.is_none()),
                     starts: s.starts,
                     comments: s.comments.clone(),
+                    split: s.split.clone(),
                 });
             }
         }
@@ -657,20 +710,7 @@ impl Vault {
     pub fn comment_on_inclusion(&mut self, id: &str, at: usize, from: usize, to: usize, sender: &str, body: &str, now_ms: u64) -> Result<(), String> {
         let shown = self.shown_in(id, false)?;
         let text = self.works.get(&self.current_id(id)).ok_or_else(|| format!("{id} isn't open."))?.text();
-        let mut utf16 = 0;
-        let mut k = 0;
-        let mut found = None;
-        for c in text.chars() {
-            if c == INCLUSION {
-                if utf16 == at {
-                    found = shown.get(k);
-                    break;
-                }
-                k += 1;
-            }
-            utf16 += c.len_utf16();
-        }
-        let s = found.ok_or("That Inclusion isn't there any more.")?;
+        let s = inclusion_at(&text, at, &shown).ok_or("That Inclusion isn't there any more.")?;
         let work = s.name.clone().ok_or("The Work it includes can't be found.")?;
         let chars = |p: usize| crate::positions::Positions::new(&s.plain).to_char(p).map_err(|e| e.to_string());
         let (from, to) = (chars(from)?, chars(to)?);
@@ -683,6 +723,40 @@ impl Vault {
         self.edit_other(&work, now_ms, |text| {
             let positions = crate::positions::Positions::new(text);
             vec![Op::Comment { from: positions.to_utf16(from), to: positions.to_utf16(to), sender: sender.into(), body: body.into(), sender_name: None }]
+        })
+    }
+
+    /// The Author saw the note about a new Chapter after the Inclusion whose character is at
+    /// `at` (UTF-16) in `id` (and included it too, or dismissed it): the Inclusion now remembers
+    /// the heading that follows its Chapter now, so the note goes.
+    pub fn settle_split(&mut self, id: &str, at: usize, now_ms: u64) -> Result<(), String> {
+        let shown = self.shown_in(id, false)?;
+        let key = self.current_id(id);
+        let work = self.works.get(&key).ok_or_else(|| format!("{id} isn't open."))?;
+        let found = inclusion_at(&work.text(), at, &shown).ok_or("That Inclusion isn't there any more.")?;
+        let Some(target) = &found.target else { return Ok(()) };
+        if found.split.is_none() {
+            return Ok(());
+        }
+        // The heading after the Chapter now, in the included Work as it is now.
+        let index = self.work_index();
+        let located = index.get(&target.work).cloned().ok_or("The Work it includes can't be found.")?;
+        let shelf = Shelf::read(&self.root);
+        let next = {
+            let mut ctx = Ctx { works: &self.works, index: &index, cache: &mut self.included_docs, shelf: &shelf, device: self.device, recorded: false };
+            let doc = ctx.doc(&located, None)?;
+            let chars: Vec<char> = doc.committed_text().chars().collect();
+            let start = target.chapter.and_then(|c| doc.index_of_char(c)).ok_or("The Chapter it includes is gone.")?;
+            let (_, end) = chapter_range(&chars, start).ok_or("The Chapter it includes is gone.")?;
+            doc.visible().get(end).map(|&(id, _)| id)
+        };
+        let Some(next) = next else { return Ok(()) };
+        let record = inclusion_record(found.at);
+        self.with_work(id, now_ms, |w, _| {
+            w.close_burst(now_ms);
+            w.record_fields(&[(record, "next".into(), next.to_string())], now_ms);
+            w.save();
+            Ok(())
         })
     }
 
@@ -754,17 +828,18 @@ impl Vault {
         let identity = doc.field(storage::WORK_RECORD, storage::WORK_ID_FIELD).map(str::to_string)
             .or_else(|| storage::identity(&db).ok().flatten())
             .ok_or_else(|| format!("{work} has no ID yet: open it once, then include it."))?;
-        let chapter = match chapter {
-            None => None,
+        let (chapter, next) = match chapter {
+            None => (None, None),
             Some(at) => {
                 let text = doc.committed_text();
                 let index = crate::positions::Positions::new(&text).to_char(at).map_err(|e| e.to_string())?;
                 let chars: Vec<char> = text.chars().collect();
-                chapter_range(&chars, index).ok_or("There's no Chapter heading there.")?;
-                Some(doc.visible()[index].0)
+                let (_, end) = chapter_range(&chars, index).ok_or("There's no Chapter heading there.")?;
+                let visible = doc.visible();
+                (Some(visible[index].0), visible.get(end).map(|&(id, _)| id))
             }
         };
-        Ok(Target { work: identity, chapter, styles: Vec::new() })
+        Ok(Target { work: identity, chapter, styles: Vec::new(), next })
     }
 }
 
@@ -1004,6 +1079,31 @@ mod tests {
     }
 
     #[test]
+    fn a_chapter_split_in_its_own_work_shows_a_note_until_it_is_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        include(&mut v, "Collected", 0, "Rain", Some(0), 12_000); // Chapter One
+        assert_eq!(v.inclusions("Collected").unwrap()[0].split, None);
+        // In "Rain", Chapter One is split: a new heading in the middle of it.
+        v.open_work("Rain", 13_000).unwrap();
+        let rain_at = RAIN.find("The rain").unwrap();
+        v.edit("Rain", vec![typing(rain_at, "= Interlude\n\n")], 13_100).unwrap();
+        v.tick(20_000);
+        let view = &v.inclusions("Collected").unwrap()[0];
+        assert_eq!(view.text, "= One\n\n", "only the part before the new heading is included now");
+        assert_eq!(view.split, Some(SplitNote { title: "Interlude".into(), at: rain_at }));
+        // The Page preview at recorded versions, the Text file and Exports never show it.
+        assert!(v.shown_in("Collected", true).unwrap().iter().all(|s| s.split.is_none()));
+        // Settled (included too, or dismissed): it goes, and stays gone.
+        v.settle_split("Collected", 0, 21_000).unwrap();
+        assert_eq!(v.inclusions("Collected").unwrap()[0].split, None);
+        // Joining Chapters back (deleting the new heading) brings no note either.
+        v.edit("Rain", vec![Op::Delete { from: rain_at, to: rain_at + 13, origin: Origin::Input }], 22_000).unwrap();
+        v.tick(30_000);
+        assert_eq!(v.inclusions("Collected").unwrap()[0].split, None);
+    }
+
+    #[test]
     fn places_in_the_preview_map_around_inclusions() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = collected(dir.path());
@@ -1039,7 +1139,7 @@ mod tests {
         let s = Shown {
             at, index: 2, target: None, name: None, label: "Rain".into(), missing: None,
             plain: "Rain.".into(), typst: "#[\nRain.\n]".into(), version: None, language: String::new(),
-            elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), author: String::new(),
+            elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), author: String::new(), split: None,
         };
         let (body, blocks) = typst_body(&format!("A\n{INCLUSION}\nB"), &[s]);
         assert!(body.starts_with("A\n// ---- Included by wrtier") && body.ends_with("\nB"), "{body}");

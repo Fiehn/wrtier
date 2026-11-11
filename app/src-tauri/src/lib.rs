@@ -215,6 +215,13 @@ fn comment_in(state: State<AppState>, work: String, ops: Vec<Op>) -> Result<(), 
     with_app(&state, |app| open_vault_of(app)?.comment_in(&work, ops, now_ms()))
 }
 
+/// The Author saw the note about a new Chapter after an Inclusion (its character at `at` in the
+/// Work `id`), and included it too or dismissed it: the note goes.
+#[tauri::command]
+fn settle_split(state: State<AppState>, id: String, at: usize) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.settle_split(&id, at, now_ms()))
+}
+
 /// The Chapters of a Work (open or not), to pick one to include.
 #[tauri::command]
 fn chapters_of(state: State<AppState>, work: String) -> Result<Vec<vault::ChapterChoice>, String> {
@@ -1078,6 +1085,7 @@ pub fn run() {
             missing_inclusions,
             comment_on_inclusion,
             comment_in,
+            settle_split,
             rename_work,
             trash_work,
             list_trash,

@@ -153,6 +153,11 @@
       return null;
     },
     export_pdf: () => null, // as if the save dialog was cancelled
+    settle_split: ({ id, at }) => {
+      const k = [...fake.texts[id].slice(0, at)].filter((c) => c === "￼").length;
+      fake.included[id][k].settled = true;
+      return null;
+    },
     compile_preview: () => ({ pages: [], stale: false, errors: [], warnings: [], deviceFonts: [], ms: 1 }),
     forget_preview: () => null,
     preview_locate: () => null,
@@ -196,7 +201,9 @@
           id: c.id, ranges: [[c.from, c.to]], sender: c.sender, name: "Author", colour: "author", body: c.body, resolved: false,
           quote: c.quote, timeMs: now, replies: c.replies, otherBody: null,
         }));
-        views.push({ at, work: target.work, label, text: shown.trimEnd(), missing: null, language: "en", whole: target.chapter === null, starts: target.chapter ?? 0, comments });
+        const found = fake.splits?.[target.work];
+        const split = found && found.after === target.chapter && !target.settled ? { title: found.title, at: found.at } : null;
+        views.push({ at, work: target.work, label, text: shown.trimEnd(), missing: null, language: "en", whole: target.chapter === null, starts: target.chapter ?? 0, comments, split });
       }
       return views;
     },

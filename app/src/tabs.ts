@@ -140,11 +140,11 @@ class Tab {
 
   /**
    * Puts an Inclusion of `work` (its ID in the Vault), or of its Chapter starting at `chapter`,
-   * on a line of its own at the cursor.
+   * on a line of its own at the cursor (or near `near`).
    */
-  include(work: string, chapter: number | null, events: TabEvents) {
+  include(work: string, chapter: number | null, events: TabEvents, near?: number) {
     const { state } = this.view;
-    const place = placeInclusion(state.doc, state.selection.main.head);
+    const place = placeInclusion(state.doc, near ?? state.selection.main.head);
     this.view.dispatch({
       changes: { from: place.from, insert: place.insert },
       selection: { anchor: place.at + 1 },
@@ -309,6 +309,20 @@ class Tab {
     });
     this.pane.addEventListener("wrtier-open-comments", (e) => tabs.events.openComments(this.id, (e as CustomEvent<string[]>).detail));
     this.pane.addEventListener("wrtier-add-comment", () => tabs.events.addComment(this.id));
+    // The note about a new Chapter after an Inclusion: include it too (just after), or dismiss.
+    this.pane.addEventListener("wrtier-split", (e) => {
+      const { at, work, chapter } = (e as CustomEvent<{ at: number; work: string | null; chapter: number | null }>).detail;
+      if (work && chapter !== null) this.include(work, chapter, tabs.events, at + 1);
+      void (async () => {
+        try {
+          await this.sync.idle();
+          await invoke("settle_split", { id: this.sync.id, at });
+          await this.refreshInclusions(tabs.events);
+        } catch (err) {
+          tabs.events.error(String(err));
+        }
+      })();
+    });
     this.pane.addEventListener("wrtier-add-element", (e) => tabs.events.addElement(this.id, (e as CustomEvent<string>).detail));
 
     // A click anywhere in the writing area (the margins beside the text, the space below it)

@@ -29,6 +29,9 @@ export type InclusionView = {
   starts: number;
   /** The included Work's Comments on this text (they belong to it, and show in both); ranges in `text`. */
   comments: Mark[];
+  /** A new Chapter right after the included one, not included (it was split, or one was put
+   *  after it), until the Author includes it too or dismisses this. */
+  split?: { title: string; at: number } | null;
 };
 
 /** A Chapter that can be included (vault/inclusions.rs `ChapterChoice`). */
@@ -72,7 +75,7 @@ class IncludedText extends WidgetType {
     const a = this.v;
     const b = other.v;
     return this.folded === other.folded && a.label === b.label && a.text === b.text && a.missing === b.missing && a.work === b.work && a.at === b.at
-      && JSON.stringify(a.comments) === JSON.stringify(b.comments);
+      && JSON.stringify(a.comments) === JSON.stringify(b.comments) && JSON.stringify(a.split) === JSON.stringify(b.split);
   }
 
   toDOM(view: EditorView) {
@@ -125,6 +128,7 @@ class IncludedText extends WidgetType {
       bar.append(go);
     }
     box.append(bar);
+    if (v.split) box.append(this.splitNote(v, v.split));
     if (v.missing) {
       const why = document.createElement("p");
       why.className = "cm-inclusion-missing";
@@ -146,6 +150,28 @@ class IncludedText extends WidgetType {
       box.append(text);
     }
     return box;
+  }
+
+  /** "Zampanò has a new Chapter after this one, not included", with what to do about it. */
+  private splitNote(v: InclusionView, split: { title: string; at: number }): HTMLElement {
+    const note = document.createElement("div");
+    note.className = "cm-inclusion-split";
+    const text = document.createElement("span");
+    text.textContent = `${v.label.split(": ")[0]} has a new Chapter after this one, not included: “${split.title}”.`;
+    note.append(text);
+    const act = (label: string, include: boolean) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.addEventListener("mousedown", (e) => e.preventDefault());
+      b.addEventListener("click", () => {
+        note.dispatchEvent(new CustomEvent("wrtier-split", { bubbles: true, detail: { at: v.at, work: v.work, chapter: include ? split.at : null } }));
+      });
+      note.append(b);
+    };
+    if (v.work) act("Include it here too", true);
+    act("Dismiss", false);
+    return note;
   }
 
   // Clicks inside it are its own (buttons, selecting text to copy), not the editor's.
