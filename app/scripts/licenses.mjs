@@ -7,6 +7,7 @@
 
 import { execSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const app = path.resolve(import.meta.dirname, "..");
@@ -45,14 +46,18 @@ function notices(dir) {
 
 // ---- Rust ----
 
+// Written to a file, not read from its output: under PowerShell (GitHub's Windows machines),
+// cargo-about refuses to have its output redirected.
 let about;
+const aboutFile = path.join(os.tmpdir(), `wrtier-licenses-${process.pid}.json`);
 try {
-  about = JSON.parse(
-    execSync("cargo about generate --format json --locked --fail", { cwd: tauri, maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] }).toString(),
-  );
+  execSync(`cargo about generate --format json --locked --fail -o "${aboutFile}"`, { cwd: tauri, stdio: ["ignore", "inherit", "inherit"] });
+  about = JSON.parse(fs.readFileSync(aboutFile, "utf8"));
 } catch (e) {
   console.error("\nCouldn't list the Rust crates' licenses. Is cargo-about installed?\n  cargo install cargo-about --locked --features cli\n");
   process.exit(1);
+} finally {
+  fs.rmSync(aboutFile, { force: true });
 }
 
 const crate = (c) => `${c.name} ${c.version}`;
