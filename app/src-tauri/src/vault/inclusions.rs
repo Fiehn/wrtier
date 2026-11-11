@@ -1158,6 +1158,28 @@ mod tests {
     }
 
     #[test]
+    fn an_export_from_a_milestone_is_the_book_as_it_was_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        v.make_milestone("Collected", "Sent", 12_000).unwrap();
+        let sent = v.milestones("Collected", 12_100).unwrap().remove(0);
+        v.open_work("Rain", 13_000).unwrap();
+        v.edit("Rain", vec![typing(RAIN.len(), " Changed later.")], 13_100).unwrap();
+        v.tick(20_000);
+        let then = v.export_input_at("Collected", &sent.id, None, 21_000).unwrap();
+        assert!(then.text.contains("She went home.") && !then.text.contains("Changed later."));
+        assert!(!then.docx_text.contains("Changed later.") && then.docx_text.contains("= Rain at Night"));
+        assert_eq!(then.date_ms, sent.time_ms, "dated when the Milestone was named");
+        // The same input, so the same PDF, on every Device and every day.
+        let again = v.export_input_at("Collected", &sent.id, None, 99_000).unwrap();
+        assert_eq!((then.text.clone(), then.header.text.clone()), (again.text, again.header.text));
+        let mut t = crate::typeset::Typesetter::new(false);
+        t.export_pdf(Path::new("none"), &then.header, then.text, then.date_ms, &then.ident).expect("it typesets");
+        // An Export of now has the later text.
+        assert!(v.export_input("Collected", None, 22_000).unwrap().text.contains("Changed later."));
+    }
+
+    #[test]
     fn places_in_the_preview_map_around_inclusions() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = collected(dir.path());

@@ -719,9 +719,10 @@ async function inclusionsReady(id: string): Promise<boolean> {
   return confirmAsk(`${what}: ${shown}${more} The Export would have a line saying so in ${missing.length === 1 ? "its" : "their"} place.`, "Export anyway");
 }
 
-async function exportPdf(id: string) {
+/** `milestone`: export the Work as it was then (what the Page preview shows), not as it is now. */
+async function exportPdf(id: string, milestone: { id: string; name: string } | null = null) {
   await tabs.settled(id);
-  if (!(await inclusionsReady(id))) return;
+  if (!milestone && !(await inclusionsReady(id))) return;
   const { preamble } = await invoke<{ preamble: Preamble }>("get_preamble", { id });
   let look: string | null = preamble.looks[0] ?? null;
   if (preamble.looks.length > 1) {
@@ -738,23 +739,24 @@ async function exportPdf(id: string) {
     look = select.value;
   }
   type Exported = { path: string; pages: number; deviceFonts: string[] };
-  const done = await invoke<Exported | null>("export_pdf", { id, look });
+  const done = await invoke<Exported | null>("export_pdf", { id, look, milestone: milestone?.id ?? null });
   if (!done) return; // cancelled
   const pages = done.pages === 1 ? "1 page" : `${done.pages} pages`;
   const fonts = done.deviceFonts.length
     ? ` ${done.deviceFonts.join(", ")} came from this Device, not the Vault, so a PDF from another Device would differ.`
     : "";
-  showInfo(`Exported ${pages} to ${done.path}.${fonts}`);
+  const what = milestone ? ` “${milestone.name}”` : "";
+  showInfo(`Exported${what} ${pages} to ${done.path}.${fonts}`);
 }
 
 $("preview-pdf").addEventListener("click", () => act(async () => {
-  if (preview.shown) await exportPdf(preview.shown);
+  if (preview.shown) await exportPdf(preview.shown, preview.shownMilestone);
 }));
 
 /** Exports a Work as a manuscript .docx, and says what it couldn't carry. */
-async function exportDocx(id: string) {
+async function exportDocx(id: string, milestone: { id: string; name: string } | null = null) {
   await tabs.settled(id);
-  if (!(await inclusionsReady(id))) return;
+  if (!milestone && !(await inclusionsReady(id))) return;
   $("ask-docx-heading").textContent = `Export ${id.split("/").pop()} as .docx`;
   const select = $<HTMLSelectElement>("ask-docx-font");
   try {
@@ -770,9 +772,9 @@ async function exportDocx(id: string) {
   }
   type LeftOut = { line: number; what: string };
   type Exported = { path: string; paragraphs: number; leftOut: LeftOut[] };
-  const done = await invoke<Exported | null>("export_docx", { id, font: select.value });
+  const done = await invoke<Exported | null>("export_docx", { id, font: select.value, milestone: milestone?.id ?? null });
   if (!done) return; // cancelled
-  let line = `Exported ${done.paragraphs} paragraphs to ${done.path}.`;
+  let line = `Exported${milestone ? ` “${milestone.name}”` : ""} ${done.paragraphs} paragraphs to ${done.path}.`;
   if (done.leftOut.length > 0) {
     const shown = done.leftOut.slice(0, 3).map((l) => `line ${l.line}: ${l.what}`).join("; ");
     const more = done.leftOut.length > 3 ? `, and ${done.leftOut.length - 3} more` : "";
@@ -782,7 +784,7 @@ async function exportDocx(id: string) {
 }
 
 $("preview-docx").addEventListener("click", () => act(async () => {
-  if (preview.shown) await exportDocx(preview.shown);
+  if (preview.shown) await exportDocx(preview.shown, preview.shownMilestone);
 }));
 
 /** Names the current point in a Work's History, to come back to or compare with later. */

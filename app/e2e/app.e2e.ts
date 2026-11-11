@@ -471,3 +471,22 @@ test("an Inclusion gets Styles of its own from the bar", async ({ app }) => {
   await app.locator("#menu button", { hasText: "No Styles of its own" }).click();
   await expect(styles).toHaveText("Styles");
 });
+
+test("the PDF of a Milestone shown in the Page preview is of that Milestone", async ({ app }) => {
+  await app.getByRole("button", { name: "Show panel" }).click();
+  await app.locator("#panel-tab-pages").click();
+  // Name a Milestone, as the Author would.
+  await app.locator("#works li.work-entry", { hasText: "Rain" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Name a Milestone…" }).click();
+  await app.locator("#ask-text-input").fill("Sent");
+  await app.locator("#ask-text-ok").click();
+  const version = app.locator("#preview-version");
+  await expect(version).toBeVisible();
+  await version.selectOption("00000001:90");
+  await app.locator("#preview-pdf").click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "export_pdf")?.args.milestone)).toBe("00000001:90");
+  // Back to now: an Export of now.
+  await version.selectOption({ index: 0 });
+  await app.locator("#preview-pdf").click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd === "export_pdf").map((e: any) => e.args.milestone))).toEqual(["00000001:90", null]);
+});

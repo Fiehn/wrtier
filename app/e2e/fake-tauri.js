@@ -122,7 +122,11 @@
     get_mods: ({ id }) => ({ work: fake.mods[id] ?? [], newWorks: [], hidden: [] }),
     get_reviewers: () => [],
     get_preamble: () => ({ preamble: { looks: ["Paperback"], styles: [], elements: [], title: "Rain", author: "", language: "en", raw: "" }, rawOther: null }),
-    get_milestones: () => [],
+    get_milestones: () => fake.milestones ?? [],
+    make_milestone: ({ name }) => {
+      (fake.milestones ??= []).push({ id: `00000001:${90 + fake.milestones.length}`, name, timeMs: now });
+      return null;
+    },
     list_themes: () => ({ themes: Object.entries(fake.themes).map(([file, t]) => ({ file, name: t.name, dark: t.dark })), problems: [] }),
     read_theme: ({ file }) => {
       if (!fake.themes[file]) throw new Error("No such theme");

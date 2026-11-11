@@ -949,6 +949,36 @@ impl Vault {
         Ok((body, preamble::header(&doc, uses, look), blocks))
     }
 
+    /// What an Export of a Work as it was at a Milestone needs: exactly what it showed then,
+    /// with the Styles and the versions of included Works it had recorded (ADR 0015). Nothing is
+    /// recorded. Its date is when the Milestone was named, the same on every Device.
+    pub fn export_input_at(&mut self, id: &str, milestone: &str, look: Option<&str>, now_ms: u64) -> Result<ExportInput, String> {
+        let doc = self.at_milestone(id, milestone, now_ms)?;
+        let named: ChangeId = milestone.parse().map_err(|_| format!("Not a Milestone: {milestone}"))?;
+        let date_ms = self.milestone_time(id, named, now_ms)?;
+        let header = preamble::header(&doc, preamble::uses(&doc, &Shelf::read(&self.root), Version::Recorded), look);
+        let shown = self.shown_in_doc(&doc);
+        let missing: Vec<String> = shown.iter().filter_map(|s| s.missing.as_ref().map(|m| format!("{}: {m}", s.label))).collect();
+        let committed = doc.committed_text();
+        let docx_text = inclusions::docx_body(&committed, &shown);
+        let (text, _) = inclusions::typst_body(&committed, &shown);
+        let (db, _) = self.paths(id)?;
+        let ident = storage::identity(&db).map_err(err)?.unwrap_or_else(|| id.to_string());
+        Ok(ExportInput { text, docx_text, header, preamble: Preamble::of(&doc), date_ms, ident, missing })
+    }
+
+    /// When a Milestone was named.
+    fn milestone_time(&mut self, id: &str, milestone: ChangeId, now_ms: u64) -> Result<u64, String> {
+        let find = |doc: &Doc| doc.milestones().into_iter().find(|m| m.id == milestone).map(|m| m.hlc.0);
+        let found = if self.works.contains_key(&self.current_id(id)) {
+            self.with_work(id, now_ms, |w, _| Ok(find(&w.doc)))?
+        } else {
+            let (db, _) = self.paths(id)?;
+            find(&storage::load(&db, self.device).map_err(err)?.1)
+        };
+        found.ok_or_else(|| "That Milestone isn't in this Work (deleted, or not here yet).".to_string())
+    }
+
     /// What a PDF Export of a Work needs, after recording changed Styles (so the Export is
     /// exactly a version in its History): its text, the header from its recorded copies in
     /// `look` (else its first), the time of its newest Change, and its ID.

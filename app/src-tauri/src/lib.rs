@@ -296,11 +296,15 @@ struct Exported {
 /// it's refused (before asking where to save) if the Work doesn't typeset. None if the Author
 /// cancelled the save dialog.
 #[tauri::command]
-async fn export_pdf(handle: AppHandle, id: String, look: Option<String>) -> Result<Option<Exported>, String> {
+async fn export_pdf(handle: AppHandle, id: String, look: Option<String>, milestone: Option<String>) -> Result<Option<Exported>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (input, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
             let vault = open_vault_of(app)?;
-            Ok((vault.export_input(&id, look.as_deref(), now_ms())?, vault.root.join("fonts")))
+            let input = match &milestone {
+                Some(m) => vault.export_input_at(&id, m, look.as_deref(), now_ms())?,
+                None => vault.export_input(&id, look.as_deref(), now_ms())?,
+            };
+            Ok((input, vault.root.join("fonts")))
         })?;
         let pdf = {
             let state = handle.state::<TypesetState>();
@@ -340,12 +344,18 @@ struct ExportedDocx {
 /// or "Courier New"). Changed Styles are recorded first, so its Story elements do what their
 /// recorded definitions say. None if the Author cancelled the save dialog.
 #[tauri::command]
-async fn export_docx(handle: AppHandle, id: String, font: String) -> Result<Option<ExportedDocx>, String> {
+async fn export_docx(handle: AppHandle, id: String, font: String, milestone: Option<String>) -> Result<Option<ExportedDocx>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         if !["Times New Roman", "Courier New"].contains(&font.as_str()) {
             return Err(format!("Not a manuscript font: {font}"));
         }
-        let input = with_app(&handle.state::<AppState>(), |app| open_vault_of(app)?.export_input(&id, None, now_ms()))?;
+        let input = with_app(&handle.state::<AppState>(), |app| {
+            let vault = open_vault_of(app)?;
+            match &milestone {
+                Some(m) => vault.export_input_at(&id, m, None, now_ms()),
+                None => vault.export_input(&id, None, now_ms()),
+            }
+        })?;
         let name = id.rsplit('/').next().unwrap_or(&id).to_string();
         let title = if input.preamble.title.trim().is_empty() { name.clone() } else { input.preamble.title.clone() };
         let manuscript = docx::Manuscript {
