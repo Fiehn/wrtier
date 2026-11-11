@@ -185,12 +185,17 @@ impl Recovery {
 
 /// The Works in `vault` with recovery files in `dir`.
 pub fn kept_for(dir: &Path, vault: &Path) -> Vec<String> {
+    kept_all(dir).into_iter().filter(|(v, _)| v == vault).map(|(_, work)| work).collect()
+}
+
+/// Every Work, in any Vault, with recovery files in `dir`: its Vault's folder and its ID,
+/// sorted. (Uninstalling names them, since their writing would be lost.)
+pub fn kept_all(dir: &Path) -> Vec<(PathBuf, String)> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut works: Vec<String> = entries.flatten()
+    let mut works: Vec<(PathBuf, String)> = entries.flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| serde_json::from_str::<Kept>(&std::fs::read_to_string(e.path()).ok()?).ok())
-        .filter(|kept| kept.vault == vault)
-        .map(|kept| kept.work)
+        .map(|kept| (kept.vault, kept.work))
         .collect();
     works.sort();
     works
@@ -220,6 +225,7 @@ mod tests {
         assert_eq!(again.text(), "The rain had eased.");
         assert_eq!(kept_for(dir.path(), Path::new("C:/Vault")), vec!["Rain".to_string()]);
         assert!(kept_for(dir.path(), Path::new("C:/Other")).is_empty());
+        assert_eq!(kept_all(dir.path()), vec![(PathBuf::from("C:/Vault"), "Rain".to_string())]);
     }
 
     #[test]

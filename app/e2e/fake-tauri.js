@@ -34,6 +34,8 @@
     problems: [],
     /** What "Check for updates" finds (update.rs's Checked). */
     update: { kind: "newest", current: "0.1.2" },
+    /** What "Uninstall…" finds before asking (lib.rs's UninstallCheck). */
+    uninstallCheck: { problem: null, unsaved: [] },
   };
   window.__fake = fake;
 
@@ -145,7 +147,9 @@
       };
     },
     app_hidden: () => [],
-    app_version: () => "0.1.2",
+    app_info: () => ({ version: "0.1.2", canUninstall: true }),
+    uninstall_check: () => fake.uninstallCheck,
+    uninstall: () => null,
     check_update: () => fake.update,
     install_update: () => ({ kind: "restarting" }),
     open_release_page: () => null,

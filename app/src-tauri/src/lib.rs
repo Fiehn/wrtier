@@ -13,6 +13,7 @@ pub mod recovery;
 pub mod syncthing;
 pub mod themes;
 pub mod typeset;
+pub mod uninstall;
 pub mod update;
 pub mod vault;
 pub mod work;
@@ -819,12 +820,75 @@ fn save_before_quit(handle: &AppHandle) {
     });
 }
 
-// ---- App updates (ADR 0014) ----
+// ---- App updates (ADR 0014) and uninstalling ----
 
-/// The installed App version, shown in Settings.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppInfo {
+    version: String,
+    /// The app removes itself here (Windows: the portable exe has no system uninstaller).
+    can_uninstall: bool,
+}
+
+/// The installed App version, shown in Settings, and whether Settings offers "Uninstall…".
 #[tauri::command]
-fn app_version(handle: AppHandle) -> String {
-    handle.package_info().version.to_string()
+fn app_info(handle: AppHandle) -> AppInfo {
+    AppInfo { version: handle.package_info().version.to_string(), can_uninstall: cfg!(windows) }
+}
+
+#[derive(Serialize)]
+struct UnsavedWork {
+    vault: String,
+    work: String,
+}
+
+#[derive(Serialize)]
+struct UninstallCheck {
+    /// Why the app can't remove itself, if it can't.
+    problem: Option<String>,
+    /// Works whose writing never reached their History (recovery files): uninstalling loses it.
+    unsaved: Vec<UnsavedWork>,
+}
+
+const UNINSTALL_ELSEWHERE: &str = "Uninstall the app the way this system does.";
+
+/// Before the confirmation: whether the app can delete itself, and which writing would be lost.
+/// The interface has already saved everything open.
+#[tauri::command]
+fn uninstall_check(state: State<AppState>) -> Result<UninstallCheck, String> {
+    if !cfg!(windows) {
+        return Err(UNINSTALL_ELSEWHERE.into());
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let problem = uninstall::ready(&exe).err();
+    let kept = with_app(&state, |app| Ok(recovery::kept_all(&app.recovery_dir)))?;
+    let unsaved = kept.into_iter().map(|(vault, work)| UnsavedWork { vault: vault.display().to_string(), work }).collect();
+    Ok(UninstallCheck { problem, unsaved })
+}
+
+/// "Uninstall": saves everything, starts the helper that deletes the app and this Device's data
+/// once the app has quit, and quits. The Vault is never touched.
+#[tauri::command]
+fn uninstall(handle: AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        uninstall::ready(&exe)?;
+        let path = handle.path();
+        let candidates = [path.app_local_data_dir(), path.app_data_dir(), path.app_config_dir(), path.app_cache_dir()];
+        let mut paths = uninstall::ours(candidates.into_iter().flatten(), &handle.config().identifier);
+        paths.push(exe.with_extension("update.exe")); // a download an update left behind
+        paths.push(exe);
+        save_before_quit(&handle);
+        uninstall::start(&paths)?;
+        handle.exit(0);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = handle;
+        Err(UNINSTALL_ELSEWHERE.into())
+    }
 }
 
 /// "Check for updates": asks GitHub for the newest stable App version.
@@ -1036,7 +1100,9 @@ pub fn run() {
             retitle_library,
             trash_library,
             forget_preview,
-            app_version,
+            app_info,
+            uninstall_check,
+            uninstall,
             check_update,
             install_update,
             open_release_page,

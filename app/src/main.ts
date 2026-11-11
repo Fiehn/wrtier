@@ -24,6 +24,7 @@ import { CountLine } from "./countline";
 import { ThemeApplier, themeChoices, VAULT_PREFIX } from "./themes";
 import { SyncPanel } from "./syncpanel";
 import { UpdateDialog } from "./updates";
+import { UninstallDialog } from "./uninstall";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -1473,7 +1474,15 @@ async function saveEverything() {
 
 const updates = new UpdateDialog(saveEverything);
 $("check-updates").addEventListener("click", () => act(() => updates.open()));
-invoke<string>("app_version").then((v) => ($("app-version").textContent = `Wrtier ${v}`), () => {});
+const uninstaller = new UninstallDialog(saveEverything);
+$("open-uninstall").addEventListener("click", () => act(() => uninstaller.open()));
+invoke<{ version: string; canUninstall: boolean }>("app_info").then(
+  (info) => {
+    $("app-version").textContent = `Wrtier ${info.version}`;
+    $("open-uninstall").hidden = !info.canUninstall;
+  },
+  () => {},
+);
 
 // ---- Start ----
 

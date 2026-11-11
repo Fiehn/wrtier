@@ -478,6 +478,7 @@
         <p class="row app-row">
           <span id="app-version" class="muted"></span>
           <button type="button" id="check-updates" title="Look for a newer version of the app on GitHub">Check for updates…</button>
+          <button type="button" id="open-uninstall" title="Remove the app from this PC. Your Vault stays." hidden>Uninstall…</button>
         </p>
         <menu>
           <button type="button" id="open-licenses" class="link licenses-link" title="The open-source libraries and fonts the app is built with">Licenses</button>
@@ -496,6 +497,24 @@
         <menu>
           <button type="button" id="update-install" hidden>Download and install</button>
           <button type="button" id="update-close" data-close="cancel">Close</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="uninstall">
+      <form method="dialog">
+        <h2>Uninstall Wrtier</h2>
+        <p>This deletes Wrtier from this PC, with what it keeps here for this device: its ID, open tabs, window position, Syncthing connection and the editor's cache.</p>
+        <p>Your Vault and everything in it stay as they are, here and on your other devices. If you install Wrtier again, this PC becomes a new device.</p>
+        <div id="uninstall-unsaved" class="dialog-error" hidden>
+          Some writing never reached its Work and would be lost:
+          <ul id="uninstall-unsaved-list"></ul>
+          Open these Works first to save it, or uninstall anyway.
+        </div>
+        <p id="uninstall-error" class="dialog-error" hidden></p>
+        <menu>
+          <button type="button" id="uninstall-go">Uninstall</button>
+          <button type="button" id="uninstall-cancel" data-close="cancel">Cancel</button>
         </menu>
       </form>
     </dialog>

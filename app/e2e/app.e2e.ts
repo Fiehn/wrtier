@@ -181,6 +181,40 @@ test("with no newer version, the dialog says so and offers nothing to install", 
   await expect(app.locator("#update")).toBeHidden();
 });
 
+test("Uninstall names writing that would be lost, saves first, and only goes on when confirmed", async ({ app }) => {
+  await app.evaluate(() => {
+    (window as any).__fake.uninstallCheck = { problem: null, unsaved: [{ vault: "C:/Fake Vault", work: "Rain" }] };
+  });
+  await app.locator("#open-settings").click();
+  await app.locator("#open-uninstall").click();
+  const dialog = app.locator("#uninstall");
+  await expect(app.locator("#uninstall-unsaved-list")).toHaveText("Rain (in C:/Fake Vault)");
+  await expect(app.locator("#uninstall-go")).toHaveText("Uninstall anyway");
+
+  // Cancel changes nothing.
+  await app.locator("#uninstall-cancel").click();
+  await expect(dialog).toBeHidden();
+  const cmds = () => app.evaluate(() => (window as any).__fake.log.map((e: any) => e.cmd) as string[]);
+  expect(await cmds()).not.toContain("uninstall");
+
+  await app.locator("#open-uninstall").click();
+  await app.locator("#uninstall-go").click();
+  await expect.poll(cmds).toContain("uninstall");
+  const log = await cmds();
+  expect(log.lastIndexOf("app_hidden")).toBeLessThan(log.lastIndexOf("uninstall"));
+});
+
+test("Uninstall says why when the app can't delete itself, and offers no button", async ({ app }) => {
+  await app.evaluate(() => {
+    (window as any).__fake.uninstallCheck = { problem: "The app can't change its own folder.", unsaved: [] };
+  });
+  await app.locator("#open-settings").click();
+  await app.locator("#open-uninstall").click();
+  await expect(app.locator("#uninstall-error")).toHaveText("The app can't change its own folder.");
+  await expect(app.locator("#uninstall-go")).toBeHidden();
+  await expect(app.locator("#uninstall-unsaved")).toBeHidden();
+});
+
 test("a Sync problem from a newer version of the app offers Check for updates", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
