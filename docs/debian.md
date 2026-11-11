@@ -52,7 +52,7 @@ sudo apt install ../target/release/bundle/deb/wrtier_0.1.0_amd64.deb
 
 `apt` (rather than `dpkg -i`) also installs the WebKitGTK runtime it depends on. wrtier then has an entry in the applications menu.
 
-**To update** later: `git pull`, then steps 2 and 3 again.
+**To update** later: Settings → "Check for updates…" installs the newest stable release from GitHub, asking for your password (this works for a copy built here too, once apt has installed it as above). Or by hand: install a release's `.deb` with `sudo apt install ./wrtier_0.2.0_amd64.deb`, or `git pull` and repeat steps 2 and 3.
 
 ## If the window is blank, flickers or draws wrongly
 

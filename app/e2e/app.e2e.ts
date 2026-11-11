@@ -147,6 +147,57 @@ test("a Vault theme wins over the built-in colours it starts from", async ({ pag
   expect(width).toBe(`${30 * 17}px`);
 });
 
+test("Settings shows the App version, and an update found is saved for, downloaded and installed", async ({ app }) => {
+  await app.evaluate(() => {
+    (window as any).__fake.update = { kind: "available", current: "0.1.2", version: "0.2.0" };
+  });
+  await app.locator("#open-settings").click();
+  await expect(app.locator("#app-version")).toHaveText("Wrtier 0.1.2");
+  await app.locator("#check-updates").click();
+
+  const dialog = app.locator("#update");
+  await expect(app.locator("#update-message")).toHaveText("Version 0.2.0 is available (you have 0.1.2).");
+  await expect(app.locator("#update-close")).toHaveText("Not now");
+  await app.locator("#update-whats-new").click();
+  await app.locator("#update-install").click();
+  await expect(app.locator("#update-message")).toHaveText("Starting the new version…");
+  await expect(dialog).toBeVisible();
+
+  // Everything typed is saved before the download, and the version asked for is the one shown.
+  const calls = await app.evaluate(() => (window as any).__fake.log.map((e: any) => e.cmd));
+  const asked = await app.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd !== "edit" && e.cmd.includes("_")).map((e: any) => [e.cmd, e.args]));
+  expect(asked).toContainEqual(["open_release_page", { version: "0.2.0" }]);
+  expect(asked).toContainEqual(["install_update", { version: "0.2.0" }]);
+  expect(calls.lastIndexOf("app_hidden")).toBeLessThan(calls.lastIndexOf("install_update"));
+});
+
+test("with no newer version, the dialog says so and offers nothing to install", async ({ app }) => {
+  await app.locator("#open-settings").click();
+  await app.locator("#check-updates").click();
+  await expect(app.locator("#update-message")).toHaveText("You have the newest version (0.1.2).");
+  await expect(app.locator("#update-install")).toBeHidden();
+  await expect(app.locator("#update-whats-new-row")).toBeHidden();
+  await app.locator("#update-close").click();
+  await expect(app.locator("#update")).toBeHidden();
+});
+
+test("a Sync problem from a newer version of the app offers Check for updates", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+  await page.addInitScript(() => {
+    (window as any).__fake.problems = [
+      { path: "Future.db", reason: "made by a newer version of the app", newer: true },
+    ];
+  });
+  await page.goto("/");
+  const problems = page.locator("#problems");
+  await expect(problems).toContainText("Future.db: made by a newer version of the app");
+  await problems.getByRole("button", { name: "Check for updates…" }).click();
+  await expect(page.locator("#update-message")).toHaveText("You have the newest version (0.1.2).");
+  expect(errors, "errors in the page").toEqual([]);
+});
+
 test("on Android, the Vault needs All files access and is chosen in the app's folder browser", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));

@@ -205,6 +205,10 @@ body {
   align-items: center;
 }
 
+.row[hidden] {
+  display: none;
+}
+
 kbd {
   font-size: 11px;
   color: var(--muted);
@@ -1193,6 +1197,14 @@ dialog#reviewers {
 .reviewers-form > p.muted {
   font-size: 13px;
   margin: 0 0 12px;
+}
+
+/* App updates: the download's progress in the Updates dialog. */
+.update-progress {
+  display: block;
+  width: 100%;
+  margin: 0 0 12px;
+  accent-color: var(--accent);
 }
 
 .dialog-error {

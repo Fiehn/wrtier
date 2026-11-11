@@ -39,6 +39,14 @@ typst-kit = { version = "0.15.1", default-features = false, features = ["embedde
 comemo = "0.5"           # Typst's cache, evicted after every compile
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }  # Syncthing's REST API, on this Device only
 roxmltree = "0.21"  # reading Syncthing's settings file; tests also check a .docx's XML (already built for Typst)
+tauri-plugin-opener = "2"  # "What's new": a release's page in the browser
+# App updates (ADR 0014)
+semver = "1"            # which App version is newer
+minisign-verify = "0.3" # a download is signed with the update signing key
+base64 = "0.22"         # the key and signatures are base64, as `tauri signer` writes them
+
+[target.'cfg(windows)'.dependencies]
+self-replace = "1.5"    # the portable exe puts a new version in its own place
 
 [dev-dependencies]
 tempfile = "3"

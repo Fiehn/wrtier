@@ -151,6 +151,18 @@
       </form>
     </dialog>
 
+    <dialog id="install-access">
+      <form method="dialog">
+        <h2>Allow installing updates</h2>
+        <p>To install an update, Wrtier hands it to Android's installer. Android lets it do that only once you allow it to <strong>install unknown apps</strong>.</p>
+        <p class="muted">Turn on “Allow from this source” for Wrtier, then come back here. Android still asks before installing anything.</p>
+        <p class="row"><button type="button" id="install-access-open">Open settings</button></p>
+        <menu>
+          <button type="button" data-close="cancel">Not now</button>
+        </menu>
+      </form>
+    </dialog>
+
     <dialog id="folders">
       <form method="dialog" class="folders-form">
         <h2>Choose your Vault</h2>
@@ -462,9 +474,28 @@
         <h3>Mods for new Works</h3>
         <ul id="new-work-mods" class="mod-list"></ul>
         <p class="muted">Settings are kept in the Vault, so every device that opens it uses them, unless it has its own.</p>
+        <h3>App</h3>
+        <p class="row app-row">
+          <span id="app-version" class="muted"></span>
+          <button type="button" id="check-updates" title="Look for a newer version of the app on GitHub">Check for updates…</button>
+        </p>
         <menu>
           <button type="button" id="open-licenses" class="link licenses-link" title="The open-source libraries and fonts the app is built with">Licenses</button>
           <button value="done">Done</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="update">
+      <form method="dialog">
+        <h2>Updates</h2>
+        <p id="update-message" aria-live="polite"></p>
+        <p class="row" id="update-whats-new-row" hidden><button type="button" id="update-whats-new" class="link">What's new</button></p>
+        <progress id="update-progress" class="update-progress" hidden></progress>
+        <p id="update-error" class="dialog-error" hidden></p>
+        <menu>
+          <button type="button" id="update-install" hidden>Download and install</button>
+          <button type="button" id="update-close" data-close="cancel">Close</button>
         </menu>
       </form>
     </dialog>

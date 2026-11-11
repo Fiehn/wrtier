@@ -8,6 +8,9 @@ interface Bridge {
   openAllFilesAccessSettings(): void;
   openAppInfo(): void;
   sharedStorage(): string;
+  canInstallApps(): boolean;
+  openInstallAppsSettings(): void;
+  installApk(path: string): void;
 }
 
 type Folder = { name: string; path: string; vault: boolean; syncthing: boolean };
@@ -30,29 +33,44 @@ function show(dialog: HTMLDialogElement): Promise<string> {
 }
 
 /**
- * True once the app has "All files access". Without it, a dialog explains and opens the
- * switch in Settings (Android never asks by itself); coming back with it on closes the dialog.
- * False if the Author closes the dialog without turning it on.
+ * A switch only Settings can turn on (Android never asks by itself): a dialog explains and
+ * opens it, and coming back with it on closes the dialog. False if the Author closes the
+ * dialog without turning it on.
  */
-export async function ensureFilesAccess(): Promise<boolean> {
-  if (!bridge || bridge.hasAllFilesAccess()) return true;
-  const dialog = $<HTMLDialogElement>("files-access");
+async function ensureSwitch(dialog: HTMLDialogElement, isOn: () => boolean): Promise<boolean> {
+  if (isOn()) return true;
   const check = () => {
-    if (document.visibilityState === "visible" && bridge.hasAllFilesAccess()) dialog.close("granted");
+    if (document.visibilityState === "visible" && isOn()) dialog.close("granted");
   };
   document.addEventListener("visibilitychange", check);
   window.addEventListener("focus", check);
   try {
     await show(dialog);
-    return bridge.hasAllFilesAccess();
+    return isOn();
   } finally {
     document.removeEventListener("visibilitychange", check);
     window.removeEventListener("focus", check);
   }
 }
 
+/** True once the app has "All files access". */
+export async function ensureFilesAccess(): Promise<boolean> {
+  return !bridge || ensureSwitch($("files-access"), () => bridge.hasAllFilesAccess());
+}
+
+/** True once the app may open Android's installer on an update ("Install unknown apps"). */
+export async function ensureInstallAccess(): Promise<boolean> {
+  return !bridge || ensureSwitch($("install-access"), () => bridge.canInstallApps());
+}
+
+/** Opens Android's installer on a downloaded update. */
+export function installApk(path: string) {
+  bridge?.installApk(path);
+}
+
 $("files-access-open").addEventListener("click", () => bridge?.openAllFilesAccessSettings());
 $("files-access-app-info").addEventListener("click", () => bridge?.openAppInfo());
+$("install-access-open").addEventListener("click", () => bridge?.openInstallAppsSettings());
 
 function row(label: string, tag: string, go: () => void): HTMLLIElement {
   const li = document.createElement("li");

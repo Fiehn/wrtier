@@ -30,6 +30,10 @@
     },
     vaults: ["/storage/emulated/0/Sync/Novels"],
     syncthingFolders: ["/storage/emulated/0/Sync"],
+    /** The Vault's Sync problems, as list_works reports them. */
+    problems: [],
+    /** What "Check for updates" finds (update.rs's Checked). */
+    update: { kind: "newest", current: "0.1.2" },
   };
   window.__fake = fake;
 
@@ -89,7 +93,7 @@
       settings[name] = name === "fontSize" ? Number(value) : value === "on" ? true : value === "off" ? false : value;
       return settings;
     },
-    list_works: () => ({ entries: Object.keys(fake.texts).map((id) => ({ id, name: id, kind: "work" })), problems: [], folders: [] }),
+    list_works: () => ({ entries: Object.keys(fake.texts).map((id) => ({ id, name: id, kind: "work" })), problems: fake.problems, folders: [] }),
     list_trash: () => [],
     get_library: () => ({ items: [], conflicts: [], builtIn: [] }),
     get_layout: () => ({ tabs: ["Rain"], active: "Rain", cursors: {} }),
@@ -140,6 +144,11 @@
         folders: fake.folders[path].map((name) => ({ name, path: `${path}/${name}`, ...marks(`${path}/${name}`) })),
       };
     },
+    app_hidden: () => [],
+    app_version: () => "0.1.2",
+    check_update: () => fake.update,
+    install_update: () => ({ kind: "restarting" }),
+    open_release_page: () => null,
     "plugin:event|listen": () => 0,
     "plugin:event|unlisten": () => null,
   };

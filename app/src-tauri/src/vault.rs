@@ -141,6 +141,9 @@ pub fn add_journal_ignore(folder: &Path) -> Result<(), String> {
 pub struct SyncProblem {
     pub path: String,
     pub reason: String,
+    /// Made by a newer version of the app: updating this Device is the fix.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub newer: bool,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -374,7 +377,7 @@ impl Vault {
     }
 
     fn problem(&self, path: &Path, reason: String) -> SyncProblem {
-        SyncProblem { path: self.relative(path), reason }
+        SyncProblem { path: self.relative(path), reason, newer: false }
     }
 
     /// A Work's `.db` and `.typ` from its ID. The ID comes from the interface, so it must stay
@@ -391,13 +394,13 @@ impl Vault {
     pub fn list(&mut self, now_ms: u64) -> Listing {
         let mut problems = Vec::new();
         if let Some(reason) = &self.ignore_problem {
-            problems.push(SyncProblem { path: ".stignore".into(), reason: format!("couldn't add *-journal to it: {reason}") });
+            problems.push(SyncProblem { path: ".stignore".into(), reason: format!("couldn't add *-journal to it: {reason}"), newer: false });
         }
         if let Some(reason) = &self.defaults_problem {
-            problems.push(SyncProblem { path: library::FOLDER.into(), reason: format!("couldn't write the default Styles: {reason}") });
+            problems.push(SyncProblem { path: library::FOLDER.into(), reason: format!("couldn't write the default Styles: {reason}"), newer: false });
         }
         for conflict in library::list(&self.root).conflicts {
-            problems.push(SyncProblem { path: conflict.copy, reason: format!("another version of {}: pick one in the Style library", conflict.path) });
+            problems.push(SyncProblem { path: conflict.copy, reason: format!("another version of {}: pick one in the Style library", conflict.path), newer: false });
         }
         // Writing kept from before the app closed unexpectedly goes back first.
         for id in recovery::kept_for(&self.recovery_dir, &self.root) {
@@ -439,7 +442,7 @@ impl Vault {
                     entries.push(Entry { id, name, kind: EntryKind::Work });
                 }
                 Probe::NewerHistory(version) => {
-                    problems.push(self.problem(db, "made by a newer version of the app".into()));
+                    problems.push(SyncProblem { newer: true, ..self.problem(db, "made by a newer version of the app".into()) });
                     entries.push(Entry { id, name, kind: EntryKind::Newer { version } });
                 }
                 Probe::NotHistory => {
@@ -607,6 +610,7 @@ impl Vault {
         let problem = |reason: String| SyncProblem {
             path: id.to_string(),
             reason: format!("writing that wasn't saved before the app closed couldn't be put back ({reason}). It's kept, and tried again."),
+            newer: false,
         };
         let kept = match files.read() {
             Ok(Some(kept)) => kept,
@@ -1438,6 +1442,7 @@ mod tests {
             ("The Long Night", &EntryKind::Work),
         ]);
         assert_eq!(listing.problems.len(), 1, "the newer History is a Sync problem: {:?}", listing.problems);
+        assert!(listing.problems[0].newer, "updating is the fix");
     }
 
     #[test]

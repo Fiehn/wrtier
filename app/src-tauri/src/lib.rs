@@ -13,6 +13,7 @@ pub mod recovery;
 pub mod syncthing;
 pub mod themes;
 pub mod typeset;
+pub mod update;
 pub mod vault;
 pub mod work;
 
@@ -40,6 +41,10 @@ struct AppState(Mutex<App>);
 /// a novel about half a second), and typing must never wait for it. Holding this lock for the
 /// whole compile also makes sure only one compile runs at a time (Phase 0b).
 struct TypesetState(Mutex<typeset::Typesetter>);
+
+/// The update "Check for updates" last found (its App version and this platform's build), kept
+/// for "Download and install".
+struct UpdateState(Mutex<Option<(String, update::Build)>>);
 
 /// The time, always from here and never from the interface.
 fn now_ms() -> u64 {
@@ -799,10 +804,133 @@ fn remember_window(window: &tauri::Window, device: &mut DeviceState) {
     let _ = device.save();
 }
 
+/// Quitting: close every open burst, save, write the Text files, and remember the window.
+fn save_before_quit(handle: &AppHandle) {
+    let state = handle.state::<AppState>();
+    let window = handle.get_webview_window("main").map(|w| w.as_ref().window());
+    let _ = with_app(&state, |app| {
+        if let Some(vault) = app.vault.as_mut() {
+            vault.close_all(now_ms());
+        }
+        if let Some(window) = &window {
+            remember_window(window, &mut app.device);
+        }
+        Ok(())
+    });
+}
+
+// ---- App updates (ADR 0014) ----
+
+/// The installed App version, shown in Settings.
+#[tauri::command]
+fn app_version(handle: AppHandle) -> String {
+    handle.package_info().version.to_string()
+}
+
+/// "Check for updates": asks GitHub for the newest stable App version.
+#[tauri::command]
+async fn check_update(handle: AppHandle) -> Result<update::Checked, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let current = handle.package_info().version.clone();
+        let found = update::check(&current);
+        let state = handle.state::<UpdateState>();
+        let mut kept = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *kept = None;
+        let current = current.to_string();
+        Ok(match found? {
+            update::Found::Newest => update::Checked::Newest { current },
+            update::Found::NoBuild { version } => update::Checked::NoBuild { current, version },
+            update::Found::Available { version, build } => {
+                *kept = Some((version.clone(), build));
+                update::Checked::Available { current, version }
+            }
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize, Clone)]
+struct DownloadProgress {
+    done: u64,
+    total: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum Installed {
+    /// Desktop: the new version is in place and the app is quitting to start it.
+    Restarting,
+    /// Android: the APK is downloaded, for the interface to hand to Android's installer.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    Apk { path: String },
+}
+
+/// "Download and install": downloads the update the last check found (reporting
+/// "update-progress" as it goes), checks its signature and installs it. On desktop the app then
+/// saves everything and starts the new version; the interface has already closed every burst.
+#[tauri::command]
+async fn install_update(handle: AppHandle, version: String) -> Result<Installed, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let build = {
+            let state = handle.state::<UpdateState>();
+            let kept = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            match &*kept {
+                Some((found, build)) if *found == version => build.clone(),
+                _ => return Err("Check for updates again first.".to_string()),
+            }
+        };
+        #[cfg(any(windows, target_os = "linux"))]
+        let exe = update::ready()?;
+        let mut shown = 0;
+        let bytes = update::download(&build, &version, |done, total| {
+            // About every 1%: a smooth bar without flooding the page.
+            let step = total.map_or(512 * 1024, |t| t / 100).max(64 * 1024);
+            if done - shown >= step || Some(done) == total {
+                shown = done;
+                let _ = handle.emit("update-progress", DownloadProgress { done, total });
+            }
+        })?;
+        #[cfg(any(windows, target_os = "linux"))]
+        {
+            update::install(&bytes, &version)?;
+            save_before_quit(&handle);
+            std::process::Command::new(&exe)
+                .spawn()
+                .map_err(|e| format!("The update is installed, but the app couldn't start again ({e}). Start it yourself."))?;
+            handle.exit(0);
+            Ok(Installed::Restarting)
+        }
+        #[cfg(target_os = "android")]
+        {
+            let cache = handle.path().app_cache_dir().map_err(|e| e.to_string())?;
+            let apk = update::save_apk(&bytes, &cache)?;
+            Ok(Installed::Apk { path: apk.display().to_string() })
+        }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+        {
+            let _ = bytes;
+            Err("The app can't update itself on this platform.".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// "What's new": the release's page on GitHub, in the browser.
+#[tauri::command]
+fn open_release_page(handle: AppHandle, version: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    // Only ever a version number's page on GitHub, whatever the interface sends.
+    let version = semver::Version::parse(&version).map_err(|e| e.to_string())?;
+    handle.opener().open_url(update::release_page(&version.to_string()), None::<&str>).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // Device state lives outside the Vault, in this Device's local app data.
             let local = app.path().app_local_data_dir()?;
@@ -819,20 +947,14 @@ pub fn run() {
             }
             app.manage(AppState(Mutex::new(App { device, vault: None, recovery_dir: local.join("recovery") })));
             app.manage(TypesetState(Mutex::new(typeset::Typesetter::default())));
+            app.manage(UpdateState(Mutex::new(None)));
             start_timer(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
             // Quitting: close every open burst, save, and write the Text files.
             if let WindowEvent::CloseRequested { .. } = event {
-                let state = window.state::<AppState>();
-                let _ = with_app(&state, |app| {
-                    if let Some(vault) = app.vault.as_mut() {
-                        vault.close_all(now_ms());
-                    }
-                    remember_window(window, &mut app.device);
-                    Ok(())
-                });
+                save_before_quit(window.app_handle());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -914,6 +1036,10 @@ pub fn run() {
             retitle_library,
             trash_library,
             forget_preview,
+            app_version,
+            check_update,
+            install_update,
+            open_release_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

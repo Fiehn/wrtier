@@ -9,6 +9,14 @@
 # The Android APK is signed with the release key from two repository secrets:
 #   ANDROID_KEY_BASE64    the .jks file, base64-encoded
 #   ANDROID_KEY_PASSWORD  its password
+#
+# Every build is also signed with the update signing key (ADR 0014), for the app's "Check for
+# updates", from two more:
+#   TAURI_SIGNING_PRIVATE_KEY           the key file's contents (wrtier-update.key)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
+# The last job writes latest.json, which lists each platform's file and signature. GitHub serves
+# it only from the newest published release that isn't a pre-release, so publishing the draft is
+# what makes an update available.
 
 name: Release
 
@@ -102,20 +110,30 @@ jobs:
         run: npm run tauri build -- ${{ matrix.args }}
         working-directory: app
 
-      - name: Upload it to the release
+      - name: Sign it and upload it to the release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.release.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             # The app's program is named after its crate (wrtier.exe beside it is the engine's own).
             file="$RUNNER_TEMP/wrtier_${VERSION}_windows-x64-portable.exe"
             cp target/release/wrtier_app.exe "$file"
           else
-            file=$(ls target/release/bundle/deb/*.deb | head -1)
+            deb=$(ls target/release/bundle/deb/*.deb | head -1)
+            file="$RUNNER_TEMP/$(basename "$deb")"
+            cp "$deb" "$file"
           fi
-          gh release upload "$GITHUB_REF_NAME" "$file" --clobber
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" || -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "::error::The TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD secrets aren't set."
+            exit 1
+          fi
+          # Writes $file.sig. The version goes into the signature, which the app checks.
+          (cd app && npx tauri signer sign --app-version "$VERSION" "$file")
+          gh release upload "$GITHUB_REF_NAME" "$file" "$file.sig" --clobber
 
   # Off until the app can open a Vault on Android (v1 plan, Phase 6). Turn it on with the
   # repository variable ANDROID_RELEASE = true (Settings → Secrets and variables → Actions → Variables).
@@ -178,11 +196,53 @@ jobs:
         run: npm run tauri android build -- --apk --target aarch64
         working-directory: app
 
-      - name: Upload it to the release
+      - name: Sign it and upload it to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.release.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           apk=$(find app/src-tauri/gen/android/app/build/outputs/apk -name "*-release.apk" | head -1)
-          name="wrtier_${{ needs.release.outputs.version }}_android-arm64.apk"
-          cp "$apk" "$RUNNER_TEMP/$name"
-          gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/$name" --clobber
+          file="$RUNNER_TEMP/wrtier_${VERSION}_android-arm64.apk"
+          cp "$apk" "$file"
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" || -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "::error::The TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD secrets aren't set."
+            exit 1
+          fi
+          (cd app && npx tauri signer sign --app-version "$VERSION" "$file")
+          gh release upload "$GITHUB_REF_NAME" "$file" "$file.sig" --clobber
+
+  # latest.json for "Check for updates" (app/src-tauri/src/update.rs): each platform's file and
+  # signature, from the .sig files the builds uploaded. Android's is left out when it isn't built.
+  manifest:
+    needs: [release, desktop, android]
+    if: ${{ !cancelled() && needs.desktop.result == 'success' && needs.android.result != 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write latest.json and upload it to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          mkdir sigs
+          gh release download "$tag" --repo "$REPO" --pattern "*.sig" --dir sigs
+          base="https://github.com/$REPO/releases/download/$tag"
+          # One platform's entry: its key in latest.json, and the end of its file's name.
+          entry() {
+            local sig
+            sig=$(ls sigs/*"$2".sig 2>/dev/null | head -1)
+            [[ -n "$sig" ]] || return 0
+            local file
+            file=$(basename "${sig%.sig}")
+            jq -n --arg key "$1" --arg url "$base/$file" --arg signature "$(cat "$sig")" '{($key): {url: $url, signature: $signature}}'
+          }
+          {
+            entry windows-x86_64 _windows-x64-portable.exe
+            entry linux-x86_64 _amd64.deb
+            entry android-aarch64 _android-arm64.apk
+          } | jq -s --arg version "$VERSION" '{version: $version, pub_date: (now | todate), platforms: add}' > latest.json
+          cat latest.json
+          gh release upload "$tag" latest.json --repo "$REPO" --clobber

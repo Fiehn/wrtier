@@ -6,9 +6,11 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import android.view.View
+import java.io.File
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
+import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 
@@ -78,5 +80,35 @@ class MainActivity : TauriActivity() {
     /** Where the folder browser starts: the phone's shared storage ("/storage/emulated/0"). */
     @JavascriptInterface
     fun sharedStorage(): String = Environment.getExternalStorageDirectory().absolutePath
+
+    /** App updates (ADR 0014): the app may hand an APK to Android's installer ("Install unknown apps"). */
+    @JavascriptInterface
+    fun canInstallApps(): Boolean = packageManager.canRequestPackageInstalls()
+
+    /** Opens the "Install unknown apps" switch for this app. */
+    @JavascriptInterface
+    fun openInstallAppsSettings() {
+      runOnUiThread {
+        startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+      }
+    }
+
+    /**
+     * Opens Android's installer on a downloaded update (an APK in the app's cache), where the
+     * Author taps Install. Android refuses it unless it's signed with the app's own release key.
+     */
+    @JavascriptInterface
+    fun installApk(path: String) {
+      val apk = File(path)
+      if (!apk.canonicalPath.startsWith(cacheDir.canonicalPath + File.separator)) return
+      val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", apk)
+      runOnUiThread {
+        startActivity(
+          Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+      }
+    }
   }
 }

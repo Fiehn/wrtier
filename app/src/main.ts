@@ -23,6 +23,7 @@ import { ChapterList } from "./chapterlist";
 import { CountLine } from "./countline";
 import { ThemeApplier, themeChoices, VAULT_PREFIX } from "./themes";
 import { SyncPanel } from "./syncpanel";
+import { UpdateDialog } from "./updates";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -38,7 +39,8 @@ type EntryKind =
   | { kind: "blocked"; reason: string };
 
 type Entry = { id: string; name: string } & EntryKind;
-type SyncProblem = { path: string; reason: string };
+/** `newer`: made by a newer version of the app, so updating this Device is the fix. */
+type SyncProblem = { path: string; reason: string; newer?: boolean };
 type Listing = { entries: Entry[]; problems: SyncProblem[]; folders: string[] };
 type TrashedWork = { id: string; name: string };
 type Settings = {
@@ -67,7 +69,20 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 function showError(e: unknown) {
   const el = $("error");
   el.textContent = String(e);
+  // A Vault or Work set up by a newer version of the app (vault.rs): updating is the fix, and
+  // with the Vault shut, Settings can't be reached.
+  if (String(e).includes("newer version of the app")) el.append(" ", updateButton());
   el.hidden = false;
+}
+
+/** "Check for updates…", for a problem only a newer version of the app can fix. */
+function updateButton() {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "link";
+  b.textContent = "Check for updates…";
+  b.addEventListener("click", () => act(() => updates.open()));
+  return b;
 }
 
 function clearError() {
@@ -115,6 +130,11 @@ function showProblems(problems: SyncProblem[]) {
     list.append(item);
   }
   el.append(title, list);
+  if (problems.some((p) => p.newer)) {
+    const line = document.createElement("p");
+    line.append("Another device has a newer version of the app. ", updateButton());
+    el.append(line);
+  }
 }
 
 // Cancel buttons are plain buttons, not submit buttons: pressing Enter in a dialog submits with
@@ -1441,6 +1461,19 @@ $("open-shortcuts").addEventListener("click", () => act(async () => {
 }));
 
 $("open-licenses").addEventListener("click", () => act(openLicenses));
+
+// ---- App updates (ADR 0014) ----
+
+/** Everything typed goes to disk before an update replaces the app. */
+async function saveEverything() {
+  await tabs.idle();
+  if (!vaultOpen) return;
+  for (const { id, state } of await invoke<{ id: string; state: WorkState }[]>("app_hidden")) tabs.status(id, state);
+}
+
+const updates = new UpdateDialog(saveEverything);
+$("check-updates").addEventListener("click", () => act(() => updates.open()));
+invoke<string>("app_version").then((v) => ($("app-version").textContent = `Wrtier ${v}`), () => {});
 
 // ---- Start ----
 
