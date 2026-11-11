@@ -83,3 +83,17 @@ describe("moving a Chapter", () => {
     expect(neighbourDest(items, 1, 1, text.length)).toBeNull(); // a Part doesn't move
   });
 });
+
+describe("Inclusions in the Chapter list", () => {
+  it("are entries of their own, with their words and what's written after them", () => {
+    const text = "= One\nMine.\n￼\nA note of mine.\n= Two\nEnd.";
+    const items = chaptersIn(text, [{ at: 12, title: "The Navidson Record", words: 9 }]);
+    expect(items.map(({ title, words, included, from, to }) => [title, words, !!included, from, to])).toEqual([
+      ["One", 1, false, 0, 12],
+      ["The Navidson Record", 9 + 4, true, 12, 30],
+      ["Two", 1, false, 30, text.length],
+    ]);
+    // A character Rust said nothing about (yet) is just a line.
+    expect(chaptersIn(text).map((i) => i.title)).toEqual(["One", "Two"]);
+  });
+});

@@ -17,9 +17,11 @@ import { completions } from "./completion";
 import { commentClasses, commentHighlights, pendingRange, rangesOf, setMarks, setPending, type CommentOptions } from "./comments";
 import type { CommentOp, HistoryOp, Mark } from "./sync";
 import { bindings, COMMANDS, withKey, type CommandId } from "./keys";
-import { type MoveOp } from "./chapters";
+import { type IncludedEntry, type MoveOp } from "./chapters";
 import { sessionTints, setTints } from "./sessiontints";
 import { modExtensions, type Mod } from "./mods";
+import { INCLUSION, inclusions, inclusionsOf, placeInclusion, readerText, setInclusions, type InclusionView } from "./inclusions";
+import { wordsIn } from "./counts";
 
 export type OpenedWork = { id: string; name: string; text: string; problems: { path: string; reason: string }[]; notice: string | null };
 
@@ -59,6 +61,8 @@ export type TabEvents = {
   textHistory(id: string): void;
   /** How many Merge notices the Work in front has (0 if it isn't a Work): "History (n)". */
   notices(count: number): void;
+  /** "Go to" on an Inclusion: open the Work it includes (its ID). */
+  openWork(id: string, at: number): void;
   /** A Mod's command's key, while writing in a Work: it runs it, or offers to add the Mod. */
   modCommand(id: string, command: CommandId): boolean;
 };
@@ -102,6 +106,50 @@ class Tab {
   marks: Mark[] = [];
   /** The Mods in use in it on this Device (their IDs), as last set. */
   mods: string[] = [];
+  /** Does it (maybe) have Inclusions? Then they're asked for again now and then, to stay live. */
+  hasInclusions = false;
+  private fetchingInclusions = false;
+
+  /**
+   * Asks Rust for the Inclusions as they are now (the included Works may have changed in other
+   * tabs, or on other Devices), once everything typed has reached it, so positions fit.
+   */
+  async refreshInclusions(events: TabEvents) {
+    if (!this.isWork || !this.hasInclusions || this.fetchingInclusions) return;
+    this.fetchingInclusions = true;
+    try {
+      await this.sync.idle();
+      const views = await invoke<InclusionView[]>("get_inclusions", { id: this.sync.id });
+      this.hasInclusions = views.length > 0 || this.view.state.doc.toString().includes(INCLUSION);
+      // Typed meanwhile: they're asked for again next time rather than put in the wrong place.
+      if (this.sync.isIdle()) {
+        this.view.dispatch({ effects: setInclusions.of(views) });
+        events.edited(this.sync.id); // the counts include them
+      }
+    } catch (e) {
+      events.error(String(e));
+    } finally {
+      this.fetchingInclusions = false;
+    }
+  }
+
+  /**
+   * Puts an Inclusion of `work` (its ID in the Vault), or of its Chapter starting at `chapter`,
+   * on a line of its own at the cursor.
+   */
+  include(work: string, chapter: number | null, events: TabEvents) {
+    const { state } = this.view;
+    const place = placeInclusion(state.doc, state.selection.main.head);
+    this.view.dispatch({
+      changes: { from: place.from, insert: place.insert },
+      selection: { anchor: place.at + 1 },
+      userEvent: "input.paste",
+      scrollIntoView: true,
+    });
+    this.sync.include(place.at, work, chapter);
+    this.hasInclusions = true;
+    void this.refreshInclusions(events);
+  }
 
   /** A Work's sync (only Work tabs have one). */
   get sync(): WorkSync {
@@ -194,6 +242,7 @@ class Tab {
           commentHighlights(() => tabs.commentOptions, (ids) => tabs.events.openComments(this.id, ids)),
           commentsCompartment.of(commentClasses(tabs.commentOptions)),
           sessionTints(),
+          inclusions(),
           modsCompartment.of([]),
           EditorView.updateListener.of((update) => {
             for (const tr of update.transactions) this.sync.track(tr);
@@ -220,8 +269,17 @@ class Tab {
         tabs.events.marks(this.id, marks);
       },
       tints: (tints) => this.view.dispatch({ effects: setTints.of(tints) }),
-      grew: () => tabs.events.historyGrew(this.id),
+      grew: () => {
+        tabs.events.historyGrew(this.id);
+        void this.refreshInclusions(tabs.events);
+      },
       error: (message) => tabs.events.error(message),
+    });
+    this.hasInclusions = work.text.includes(INCLUSION);
+    void this.refreshInclusions(tabs.events);
+    this.pane.addEventListener("wrtier-open-work", (e) => {
+      const { work, at } = (e as CustomEvent<{ work: string; at: number }>).detail;
+      tabs.events.openWork(work, at);
     });
     this.rename(work.id, work.name);
     this.sync.requestMarks();
@@ -449,6 +507,43 @@ export class Tabs {
     if (!tab?.isWork) return null;
     const { from, to } = tab.view.state.selection.main;
     return tab.view.state.sliceDoc(from, to);
+  }
+
+  /**
+   * A Work's text (or its selection) as a reader sees it, with its Inclusions' text in their
+   * place, and the included part on its own: what the counts count. Null if it isn't open.
+   */
+  readerTextOf(id: string, selection = false): { text: string; included: string } | null {
+    const tab = this.find(id);
+    if (!tab?.isWork) return null;
+    const { state } = tab.view;
+    const { from, to } = selection ? state.selection.main : { from: 0, to: state.doc.length };
+    return readerText(state, from, to);
+  }
+
+  /**
+   * A Work's Inclusions as the Chapter list shows them: an included Chapter under its own title
+   * (its words not counting its heading), a whole Work under its name.
+   */
+  includedOf(id: string): IncludedEntry[] {
+    const tab = this.find(id);
+    if (!tab?.isWork) return [];
+    return inclusionsOf(tab.view.state).filter((v) => !v.missing).map((v) => {
+      const body = v.whole ? v.text : v.text.slice(v.text.indexOf("\n") + 1 || v.text.length);
+      const title = v.whole ? v.label : v.label.slice(v.label.indexOf(": ") + 2);
+      return { at: v.at, title, words: wordsIn(body) };
+    });
+  }
+
+  /** Puts an Inclusion of `work` (or its Chapter at `chapter`) at the cursor in the Work `id`. */
+  include(id: string, work: string, chapter: number | null) {
+    const tab = this.find(id);
+    if (tab?.isWork) tab.include(work, chapter, this.events);
+  }
+
+  /** The Work in front asks for its Inclusions again, so they follow the Works they include. */
+  refreshInclusions() {
+    if (this.front?.isWork) void this.front.refreshInclusions(this.events);
   }
 
   /** A Work's text as its editor has it now (null if it isn't open). */

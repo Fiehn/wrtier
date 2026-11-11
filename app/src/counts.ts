@@ -43,9 +43,13 @@ export function countsOf(text: string): Counts {
 
 const n = (x: number) => x.toLocaleString();
 
-/** "12,340 words · 68,201 characters", or with a selection "120 of 12,340 words · …". */
-export function countsLine(all: Counts, selected: Counts | null): string {
+/**
+ * "12,340 words · 68,201 characters", or with a selection "120 of 12,340 words · …". With
+ * Inclusions, how many of the words are included: "48,200 words (42,100 included) · …".
+ */
+export function countsLine(all: Counts, selected: Counts | null, included = 0): string {
   const part = (key: "words" | "characters", unit: string) =>
     selected ? `${n(selected[key])} of ${n(all[key])} ${unit}` : `${n(all[key])} ${unit}`;
-  return `${part("words", all.words === 1 && !selected ? "word" : "words")} · ${part("characters", all.characters === 1 && !selected ? "character" : "characters")}`;
+  const words = part("words", all.words === 1 && !selected ? "word" : "words") + (included > 0 ? ` (${n(included)} included)` : "");
+  return `${words} · ${part("characters", all.characters === 1 && !selected ? "character" : "characters")}`;
 }

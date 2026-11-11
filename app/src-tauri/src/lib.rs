@@ -194,6 +194,25 @@ fn work_text(state: State<AppState>, id: String) -> Result<WorkText, String> {
     })
 }
 
+/// The Inclusions of a Work (open or not) that can't be shown now, each as "label: why": an
+/// Export asks before going ahead without them.
+#[tauri::command]
+fn missing_inclusions(state: State<AppState>, id: String) -> Result<Vec<String>, String> {
+    with_app(&state, |app| open_vault_of(app)?.missing_inclusions(&id))
+}
+
+/// The Chapters of a Work (open or not), to pick one to include.
+#[tauri::command]
+fn chapters_of(state: State<AppState>, work: String) -> Result<Vec<vault::ChapterChoice>, String> {
+    with_app(&state, |app| open_vault_of(app)?.chapters_of(&work))
+}
+
+/// An open Work's Inclusions (ADR 0015), with the included text as it is now, for the editor.
+#[tauri::command]
+fn get_inclusions(state: State<AppState>, id: String) -> Result<Vec<vault::InclusionView>, String> {
+    with_app(&state, |app| open_vault_of(app)?.inclusions(&id))
+}
+
 /// Typesets a Work's text as it is now, the open burst included, for the Page preview. It runs
 /// off the main thread, and takes the app's lock only to read the text.
 /// `look`: the Look to render (picked in the preview, remembered on this Device), else the Work's first.
@@ -202,13 +221,13 @@ fn work_text(state: State<AppState>, id: String) -> Result<WorkText, String> {
 #[tauri::command]
 async fn compile_preview(handle: AppHandle, id: String, look: Option<String>, milestone: Option<String>) -> Result<typeset::Compiled, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let (text, header, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
+        let (text, header, blocks, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
             let vault = open_vault_of(app)?;
-            let (text, header) = match &milestone {
+            let (text, header, blocks) = match &milestone {
                 Some(m) => vault.typeset_input_at(&id, m, look.as_deref(), now_ms())?,
                 None => vault.typeset_input(&id, look.as_deref(), now_ms())?,
             };
-            Ok((text, header, vault.root.join("fonts")))
+            Ok((text, header, blocks, vault.root.join("fonts")))
         })?;
         let key = match &milestone {
             Some(m) => format!("{id}@{m}"),
@@ -216,7 +235,7 @@ async fn compile_preview(handle: AppHandle, id: String, look: Option<String>, mi
         };
         let state = handle.state::<TypesetState>();
         let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(typesetter.compile_with(&key, &fonts_dir, &header, text))
+        Ok(typesetter.compile_body(&key, &fonts_dir, &header, text, blocks))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -242,6 +261,8 @@ struct Exported {
     pages: usize,
     /// Fonts that came from this Device: another Device's PDF of it would differ.
     device_fonts: Vec<String>,
+    /// Inclusions that couldn't be shown (each with why): the PDF has a line saying so in their place.
+    missing: Vec<String>,
 }
 
 /// Exports a Work as a PDF in `look` (else its first). Changed Styles are recorded first, and
@@ -270,7 +291,7 @@ async fn export_pdf(handle: AppHandle, id: String, look: Option<String>) -> Resu
             return Ok(None);
         };
         std::fs::write(&path, &pdf.bytes).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
-        Ok(Some(Exported { path: path.display().to_string(), pages: pdf.pages, device_fonts: pdf.device_fonts }))
+        Ok(Some(Exported { path: path.display().to_string(), pages: pdf.pages, device_fonts: pdf.device_fonts, missing: input.missing }))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -284,6 +305,8 @@ struct ExportedDocx {
     paragraphs: usize,
     /// What the `.docx` couldn't carry, with its line in the text.
     left_out: Vec<docx::LeftOut>,
+    /// Inclusions that couldn't be shown (each with why).
+    missing: Vec<String>,
 }
 
 /// Exports a Work as a plain `.docx` in standard manuscript format (`font`: "Times New Roman"
@@ -302,14 +325,14 @@ async fn export_docx(handle: AppHandle, id: String, font: String) -> Result<Opti
             title: &title, author: &input.preamble.author, language: &input.preamble.language,
             font: &font, date_ms: input.date_ms,
         };
-        let made = docx::docx(&input.text, &input.header.elements, &manuscript)?;
+        let made = docx::docx(&input.docx_text, &input.header.elements, &manuscript)?;
         let Some(path) = handle.dialog().file().set_title("Export as .docx").set_file_name(format!("{name}.docx"))
             .add_filter("Word document", &["docx"]).blocking_save_file().and_then(|p| p.into_path().ok())
         else {
             return Ok(None);
         };
         std::fs::write(&path, &made.bytes).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
-        Ok(Some(ExportedDocx { path: path.display().to_string(), paragraphs: made.paragraphs, left_out: made.left_out }))
+        Ok(Some(ExportedDocx { path: path.display().to_string(), paragraphs: made.paragraphs, left_out: made.left_out, missing: input.missing }))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -549,14 +572,14 @@ fn resolve_library(state: State<AppState>, copy: String, keep: library::Keep) ->
 #[tauri::command]
 async fn complete_at(handle: AppHandle, id: String, at: usize, explicit: bool, look: Option<String>) -> Result<Option<typeset::Completions>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let (text, header, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
+        let (text, header, blocks, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
             let vault = open_vault_of(app)?;
-            let (text, header) = vault.typeset_input(&id, look.as_deref(), now_ms())?;
-            Ok((text, header, vault.root.join("fonts")))
+            let (text, header, blocks) = vault.typeset_input(&id, look.as_deref(), now_ms())?;
+            Ok((text, header, blocks, vault.root.join("fonts")))
         })?;
         let state = handle.state::<TypesetState>();
         let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(typesetter.complete(&id, &fonts_dir, &header, &text, at, explicit))
+        Ok(typesetter.complete(&id, &fonts_dir, &header, &text, &blocks, at, explicit))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1036,6 +1059,9 @@ pub fn run() {
             edit,
             leave_work,
             work_text,
+            get_inclusions,
+            chapters_of,
+            missing_inclusions,
             rename_work,
             trash_work,
             list_trash,

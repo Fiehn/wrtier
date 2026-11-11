@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 use similar::{capture_diff_slices_deadline, Algorithm, DiffOp};
-use crate::ids::{ChangeId, DeviceId};
+use crate::ids::{ChangeId, CharId, DeviceId};
 
 /// The last line of every Text file the app writes says which version the text above it was
 /// written from: the highest Change counter it held from each Device. Another Device that gets
@@ -67,7 +67,76 @@ pub fn split_header(text: &str) -> (Option<String>, String) {
     (None, text.to_string())
 }
 
-fn parse_version(s: &str) -> Option<Vec<(DeviceId, u32)>> {
+/// Each Inclusion is written out in full in the Text file, so the file compiles on its own
+/// (ADR 0011, ADR 0015), between these two lines; reading the file back turns the block into
+/// the Inclusion's one character again, so edits inside it are dropped. The start line names
+/// the Inclusion's character, so a block moved in another editor is still the same Inclusion.
+const INCLUSION_START_CHECK: &str = "// ---- Included by wrtier";
+/// The last line of an Inclusion's block.
+pub const INCLUSION_END: &str = "// ---- End of the inclusion ----";
+
+/// An Inclusion's block: `label` says what it includes ("Zampanò, The Navidson Record"), `body`
+/// is its Typst. It replaces the Inclusion's character, which is on a line of its own, so it
+/// ends without a line break.
+pub fn inclusion_block(at: CharId, label: &str, body: &str) -> String {
+    let label = label.replace(['\n', '\r'], " ");
+    let body = body.strip_suffix('\n').unwrap_or(body);
+    format!("{INCLUSION_START_CHECK} ({at}): {label}. Change it in that Work: edits here are dropped. ----\n{body}\n{INCLUSION_END}")
+}
+
+/// A Text file's text (after `split_header`) with every Inclusion's block turned back into the
+/// Inclusion's character, and the character each block's start line named, in order (None if
+/// that part of the line was edited). A block whose end line is gone is left as text.
+pub fn collapse_inclusions(text: &str) -> (String, Vec<Option<CharId>>) {
+    let mut out = String::with_capacity(text.len());
+    let mut named = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let line_len = rest.find('\n').map_or(rest.len(), |i| i + 1);
+        let line = &rest[..line_len];
+        if line.starts_with(INCLUSION_START_CHECK) {
+            if let Some(len) = block_len(rest) {
+                out.push(crate::change::INCLUSION);
+                named.push(line[INCLUSION_START_CHECK.len()..].trim_start()
+                    .strip_prefix('(').and_then(|r| r.split_once(')')).and_then(|(id, _)| id.parse().ok()));
+                rest = &rest[len..];
+                continue;
+            }
+        }
+        out.push_str(line);
+        rest = &rest[line_len..];
+    }
+    (out, named)
+}
+
+/// The length of the block starting `text` (up to its end line, without the line break after
+/// it), counting blocks nested inside it; None if it never ends.
+fn block_len(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let bare = line.trim_end();
+        if bare.starts_with(INCLUSION_START_CHECK) {
+            depth += 1;
+        } else if bare == INCLUSION_END {
+            depth -= 1;
+            if depth == 0 {
+                return Some(at + bare.len());
+            }
+        }
+        at += line.len();
+    }
+    None
+}
+
+/// A version as `ChangeId`s joined by commas ("0000002a:12,0000002b:3"), as an `included/`
+/// record keeps it.
+pub fn version_text(version: &[(DeviceId, u32)]) -> String {
+    version.iter().map(|&(device, counter)| ChangeId { device, counter }.to_string()).collect::<Vec<_>>().join(",")
+}
+
+/// A version written by `version_text` (or a Text file's marker line); None if it's damaged.
+pub fn parse_version(s: &str) -> Option<Vec<(DeviceId, u32)>> {
     s.split(',').map(str::trim).filter(|p| !p.is_empty())
         .map(|p| p.parse::<ChangeId>().ok().map(|id| (id.device, id.counter)))
         .collect()

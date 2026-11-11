@@ -26,6 +26,7 @@ type Op =
   | { op: "tints" }
   | { op: "find"; first: string; last: string | null }
   | { op: "stretch"; from: number; to: number }
+  | { op: "include"; at: number; work: string; chapter: number | null }
   | CommentOp
   | HistoryOp;
 
@@ -134,7 +135,8 @@ type Item =
   | { kind: "comment"; op: CommentOp }
   | { kind: "history"; op: HistoryOp }
   | { kind: "find"; first: string; last: string | null; answer: (range: [number, number] | null) => void }
-  | { kind: "stretch"; from: number; to: number; answer: (quote: string | null) => void };
+  | { kind: "stretch"; from: number; to: number; answer: (quote: string | null) => void }
+  | { kind: "include"; at: number; work: string; chapter: number | null };
 
 const EVENTS = ["move.drop", "input.paste", "input.drop", "delete.cut"];
 
@@ -160,6 +162,8 @@ function toOps(item: Item): Op[] {
       return [{ op: "find", first: item.first, last: item.last }];
     case "stretch":
       return [{ op: "stretch", from: item.from, to: item.to }];
+    case "include":
+      return [{ op: "include", at: item.at, work: item.work, chapter: item.chapter }];
   }
   const parts: { from: number; to: number; text: string }[] = [];
   item.changes.iterChanges((from, to, _fromB, _toB, inserted) => parts.push({ from, to, text: inserted.toString() }));
@@ -279,6 +283,11 @@ export class WorkSync {
     void this.flush();
   }
 
+  /** Has everything typed so far reached Rust? */
+  isIdle(): boolean {
+    return !this.inFlight && this.queue.length === 0;
+  }
+
   /** Waits until everything typed so far has reached Rust. */
   async idle() {
     while (this.inFlight || this.queue.length > 0) {
@@ -324,6 +333,15 @@ export class WorkSync {
       this.queue.push({ kind: "stretch", from, to, answer });
       void this.flush();
     });
+  }
+
+  /**
+   * Says what the Inclusion character just put at `at` includes: the Work `work` (its ID in the
+   * Vault), or its Chapter starting at `chapter`. Sent right after the edit that put it there.
+   */
+  include(at: number, work: string, chapter: number | null) {
+    this.queue.push({ kind: "include", at, work, chapter });
+    void this.flush();
   }
 
   /** Reverts, restores or returns to a Milestone, in order with the typing. */
@@ -432,6 +450,8 @@ export class WorkSync {
           patch = patch.map(mine, true);
         } else if (item.kind === "cursor") {
           item.pos = patch.mapPos(item.pos);
+        } else if (item.kind === "include") {
+          item.at = patch.mapPos(item.at, 1);
         } else if (item.kind === "stretch") {
           item.from = patch.mapPos(item.from, 1);
           item.to = patch.mapPos(item.to, -1);

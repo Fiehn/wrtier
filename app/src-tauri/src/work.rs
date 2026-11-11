@@ -85,6 +85,10 @@ pub enum Op {
     /// "History of this text": the History tab narrows to `from..to` (or, empty, the paragraph
     /// the cursor is in). The open burst closes first. Answered in `WorkState::stretch`.
     Stretch { from: usize, to: usize },
+    /// The Inclusion character the editor just pasted at `at` includes `work` (its ID in the
+    /// Vault), or the Chapter starting at `chapter` in its text (UTF-16) (ADR 0015). The Vault
+    /// fills in `target`, the record it gets, since only it can find the Work.
+    Include { at: usize, work: String, chapter: Option<usize>, #[serde(skip)] target: Option<crate::vault::Target> },
 }
 
 impl Op {
@@ -305,6 +309,9 @@ pub struct OpenWork {
     /// The Vault's folder: the Text file's header falls back to its Style library for anything
     /// the Work hasn't recorded yet.
     pub vault_root: PathBuf,
+    /// What the Text file writes out for each Inclusion (ADR 0015), kept up to date by the Vault,
+    /// which can find the included Works.
+    pub inclusions: storage::Expansions,
     /// The text "History of this text" is about, held by identity (see `Op::Stretch`).
     pub stretch: Option<Stretch>,
     /// The answer to an `Op::Stretch` in the batch being applied.
@@ -353,6 +360,7 @@ impl OpenWork {
             styles_checked: None,
             style_notice: None,
             vault_root: PathBuf::new(),
+            inclusions: storage::Expansions::new(),
             stretch: None,
             stretch_answer: None,
             notice_count: Cell::new(None),
@@ -627,6 +635,20 @@ impl OpenWork {
         self.save();
         self.keep_recovery(false);
         Ok(self.state(Vec::new()))
+    }
+
+    /// Records what the app keeps up to date on its own (record, field, value), such as the
+    /// versions of the Works it includes (ADR 0015). Only while no burst is open: nothing else
+    /// may be recorded then. Returns whether it recorded them; saved with the next save.
+    pub fn record_fields(&mut self, fields: &[(String, String, String)], now_ms: u64) -> bool {
+        if self.doc.burst().is_some() || self.cut.is_some() {
+            return false;
+        }
+        for (record, field, value) in fields {
+            let change = self.doc.set_field_local(record, field, value, now_ms);
+            self.unsaved.push(change);
+        }
+        true
     }
 
     /// Does this Work need to record the Style library as of `generation` before an edit?
@@ -936,6 +958,16 @@ impl OpenWork {
                 }
                 self.stretch_answer = Some(answer);
             }
+            Op::Include { at, target, .. } => {
+                let target = target.ok_or("that Work couldn't be found to include")?;
+                let (f, _) = self.chars(at, at)?;
+                self.close_burst(now_ms);
+                let chars = self.doc.visible();
+                let found = (self.doc.text().chars().nth(f) == Some(wrtier::change::INCLUSION)).then(|| chars.get(f)).flatten();
+                let (id, _) = found.ok_or("there's no Inclusion there to record what it includes")?;
+                let changes = target.record(&mut self.doc, *id, now_ms);
+                self.unsaved.extend(changes);
+            }
             op @ (Op::Comment { .. } | Op::Reply { .. } | Op::EditComment { .. } | Op::SetCommentSender { .. }
                 | Op::Resolve { .. } | Op::DeleteComment { .. }) => self.apply_comment_op(op, now_ms)?,
             op @ (Op::Revert { .. } | Op::Restore { .. } | Op::ReturnTo { .. }) => self.apply_history_op(op, now_ms)?,
@@ -1177,7 +1209,7 @@ impl OpenWork {
         if !self.text_file_behind || !self.unsaved.is_empty() || self.typ_newer || stamp(&self.typ) != self.typ_stamp || self.is_lost() {
             return;
         }
-        match storage::write_text_file(&self.db, &self.typ, &self.doc, &self.text_file_header(), now_ms) {
+        match storage::write_text_file_with(&self.db, &self.typ, &self.doc, &self.text_file_header(), &self.inclusions, now_ms) {
             Ok(()) => {
                 self.text_file_behind = false;
                 self.text_file_written_ms = now_ms;

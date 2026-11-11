@@ -142,6 +142,8 @@ pub struct FieldView {
     pub before: Option<String>,
     pub taken_back: bool,
     pub library: bool,
+    /// For the version of an included Work it recorded (ADR 0015): that Work's name, if found.
+    pub included: Option<String>,
     /// The Change it comes from is still in effect: it can be reverted (otherwise restored).
     pub in_effect: bool,
 }
@@ -245,6 +247,7 @@ pub fn snippets_view(shown: Snippets, doc: &Doc, name: &Namer) -> SnippetsView {
             before: f.before,
             taken_back: f.taken_back,
             library: f.library,
+            included: None,
             in_effect: f.in_effect,
         }).collect(),
     }
@@ -330,7 +333,11 @@ fn notice_view(n: MergeNotice, doc: &Doc, name: &Namer) -> NoticeView {
 
 /// The name of a library file from its record ("style/Book text" → "Book text").
 fn library_name(record: &str) -> String {
-    record.split_once('/').map_or(record, |(_, name)| name).to_string()
+    match record {
+        "included/story-elements" => "the Story elements its Inclusions use".into(),
+        _ if record.starts_with("included/") => "an included Work's version".into(),
+        _ => record.split_once('/').map_or(record, |(_, name)| name).to_string(),
+    }
 }
 
 /// Change IDs from the interface.
@@ -421,6 +428,23 @@ impl Vault {
             };
             Ok(snippets_view(shown, &w.doc, &name))
         })
+        .map(|mut view| {
+            self.name_included(&mut view);
+            view
+        })
+    }
+
+    /// Names the included Works whose recorded versions some field lines are about.
+    fn name_included(&mut self, view: &mut SnippetsView) {
+        if !view.fields.iter().any(|f| f.record.starts_with("included/")) {
+            return;
+        }
+        let index = self.work_index();
+        for f in &mut view.fields {
+            if let Some(work) = f.record.strip_prefix("included/") {
+                f.included = index.get(work).map(|l| l.id.rsplit('/').next().unwrap_or(&l.id).to_string());
+            }
+        }
     }
 
     /// What changed in an open Work from one version to another (None: the Work as it is now).

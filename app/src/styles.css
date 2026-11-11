@@ -2648,3 +2648,87 @@ body.phone #write-toolbar button:disabled {
 #chapters-sheet #chapters > summary::-webkit-details-marker {
   display: none;
 }
+
+/* An Inclusion (ADR 0015): another Work's text, shown read-only under a bar that names it. */
+.cm-inclusion {
+  border-left: 3px solid var(--accent);
+  background: var(--panel);
+  border-radius: 0 4px 4px 0;
+  margin: 0.4em 0;
+  padding: 0.2em 0.8em 0.4em;
+  cursor: default;
+}
+.cm-inclusion-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  font-family: system-ui, sans-serif;
+  font-size: 0.75em;
+  color: var(--muted);
+}
+.cm-inclusion-label {
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cm-inclusion-words {
+  margin-right: auto;
+}
+.cm-inclusion-fold,
+.cm-inclusion-go {
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.cm-inclusion-fold {
+  color: var(--muted);
+  width: 1.4em;
+}
+.cm-inclusion-fold:hover,
+.cm-inclusion-go:hover {
+  background: var(--chip-hover);
+}
+.cm-inclusion-text {
+  white-space: pre-wrap;
+  color: var(--muted);
+  user-select: text;
+  padding-top: 0.3em;
+}
+.cm-inclusion.missing {
+  border-left-color: var(--warn-text);
+  background: var(--warn-bg);
+}
+.cm-inclusion-missing {
+  margin: 0.3em 0 0;
+  color: var(--warn-text);
+  font-family: system-ui, sans-serif;
+  font-size: 0.85em;
+}
+.cm-inclusion-text p {
+  margin: 0.5em 0;
+}
+.cm-inclusion-heading {
+  font-weight: bold;
+  margin: 0.6em 0 0.3em;
+}
+.cm-inclusion-heading.level-1 {
+  font-size: 1.4em;
+}
+.cm-inclusion-heading.level-2 {
+  font-size: 1.15em;
+}
+/* An Inclusion in the Chapter list (ADR 0015). */
+.chapter-included {
+  font-size: 0.75em;
+  color: var(--muted);
+  margin-left: 0.4em;
+}
+#chapters-list li.included .chapter-title {
+  font-style: italic;
+}

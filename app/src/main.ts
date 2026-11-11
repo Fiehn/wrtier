@@ -21,6 +21,7 @@ import { fillNewWorkMods, openMods } from "./modsdialog";
 import { inUse, modNamed, type ModsState } from "./mods";
 import { ChapterList } from "./chapterlist";
 import { CountLine } from "./countline";
+import type { ChapterChoice } from "./inclusions";
 import { ThemeApplier, themeChoices, VAULT_PREFIX } from "./themes";
 import { SyncPanel } from "./syncpanel";
 import { UpdateDialog } from "./updates";
@@ -236,6 +237,10 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     $("panel-tab-history").textContent = count > 0 ? `History (${count})` : "History";
   },
   modCommand: (id, command) => modCommand(id, command),
+  openWork: (id, at) => act(async () => {
+    await openWork(id, at);
+    await tabs.reveal(id, at, at); // also when it was open already
+  }),
 });
 
 // ---- The side panel (Ctrl+Shift+P): the Page preview and the Comments ----
@@ -585,6 +590,7 @@ function modCommand(id: string, command: CommandId): boolean {
 const chapterList = new ChapterList($("chapters"), $("chapters-list"), $("chapters-none"), {
   textOf: (id) => tabs.textOf(id),
   cursorOf: (id) => tabs.cursorOf(id),
+  includedOf: (id) => tabs.includedOf(id),
   goTo: (id, at) => {
     phone.toWrite();
     void tabs.reveal(id, at, at);
@@ -595,8 +601,8 @@ const chapterList = new ChapterList($("chapters"), $("chapters-list"), $("chapte
 // ---- The word and character count (a Mod) ----
 
 const countLine = new CountLine($("counts"), {
-  textOf: (id) => tabs.textOf(id),
-  selectedText: (id) => tabs.selectedText(id),
+  textOf: (id) => tabs.readerTextOf(id),
+  selectedText: (id) => tabs.readerTextOf(id, true),
 });
 
 /** The Mods that show the Work in front (the Chapter list, the counts) follow it. */
@@ -605,6 +611,29 @@ function showModViews() {
   chapterList.show(id && modInUse(id, "chapters") ? id : null);
   countLine.show(id && modInUse(id, "counts") ? id : null);
 }
+
+// ---- Inclusions (ADR 0015) ----
+
+/**
+ * Includes the Work `work` at the cursor in the Work `into`: the whole of it, or (asked with a
+ * menu at `at` if it has Chapters) one of its Chapters.
+ */
+async function includeIn(into: string, work: string, at: { x: number; y: number }) {
+  const chapters = await invoke<ChapterChoice[]>("chapters_of", { work });
+  if (chapters.length === 0) {
+    tabs.include(into, work, null);
+    return;
+  }
+  showMenu(at.x, at.y, [
+    { label: "The whole Work", run: () => tabs.include(into, work, null) },
+    "separator",
+    ...chapters.map((c): MenuItem => ({ label: `Chapter: ${c.title}`, run: () => tabs.include(into, work, c.at) })),
+  ]);
+}
+
+// The Work in front follows the Works it includes as they're written (in other tabs, or arriving
+// from other Devices).
+window.setInterval(() => tabs.refreshInclusions(), 2000);
 
 // ---- A Work's Preamble ----
 
@@ -620,8 +649,23 @@ async function editPreamble(id: string) {
 }
 
 /** Exports a Work as a PDF, in a Look picked here if it has more than one. */
+/**
+ * Before an Export: if some of the Work's Inclusions can't be shown (the Work they include is in
+ * the trash, not synced yet…), says which and asks. True to go ahead (they become a line
+ * saying so in the Export).
+ */
+async function inclusionsReady(id: string): Promise<boolean> {
+  const missing = await invoke<string[]>("missing_inclusions", { id });
+  if (missing.length === 0) return true;
+  const shown = missing.slice(0, 3).join(" ");
+  const more = missing.length > 3 ? ` And ${missing.length - 3} more.` : "";
+  const what = missing.length === 1 ? "One Inclusion can't be shown" : `${missing.length} Inclusions can't be shown`;
+  return confirmAsk(`${what}: ${shown}${more} The Export would have a line saying so in ${missing.length === 1 ? "its" : "their"} place.`, "Export anyway");
+}
+
 async function exportPdf(id: string) {
   await tabs.settled(id);
+  if (!(await inclusionsReady(id))) return;
   const { preamble } = await invoke<{ preamble: Preamble }>("get_preamble", { id });
   let look: string | null = preamble.looks[0] ?? null;
   if (preamble.looks.length > 1) {
@@ -654,6 +698,7 @@ $("preview-pdf").addEventListener("click", () => act(async () => {
 /** Exports a Work as a manuscript .docx, and says what it couldn't carry. */
 async function exportDocx(id: string) {
   await tabs.settled(id);
+  if (!(await inclusionsReady(id))) return;
   $("ask-docx-heading").textContent = `Export ${id.split("/").pop()} as .docx`;
   const select = $<HTMLSelectElement>("ask-docx-font");
   try {
@@ -1040,9 +1085,13 @@ $("sidebar-vault").addEventListener("contextmenu", (e) => {
     const entry = entries.find((x) => x.id === workEl.dataset.id);
     if (!entry) return;
     const folder = foldersOf(entry.id).pop();
+    // Included at the cursor in the Work in front (not in itself).
+    const into = tabs.activeIsWork && tabs.active !== entry.id ? tabs.active : null;
+    const at = { x: e.clientX, y: e.clientY };
     items =
       entry.kind === "work" ? [
         { label: "Open", run: run(() => openWork(entry.id)) },
+        ...(into ? [{ label: `Include in ${into.split("/").pop()}…`, run: run(() => includeIn(into, entry.id, at)) }] : []),
         { label: "Preamble…", run: run(() => editPreamble(entry.id)) },
         { label: "Mods…", run: run(() => editMods(entry.id)) },
         { label: "Name a Milestone…", run: run(() => nameMilestone(entry.id)) },

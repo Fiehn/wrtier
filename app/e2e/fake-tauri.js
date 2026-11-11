@@ -13,11 +13,15 @@
     unknown: [],
     texts: {
       Rain: "= One\n\nThe rain had stopped. The street was wet.\n\nShe walked home.\n\n= Two\n\nMorning came slowly.\n\n= Three\n\nThe end.\n",
+      // Another Work, to include in Rain.
+      "Zampanò": "= Exploration A\n\nThe hallway was not there before.\n\n= The Navidson Record\n\nIt measured a quarter inch more inside than out.\n",
     },
     comments: [],
+    /** What each Work's Inclusions include, in reading order (vault/inclusions.rs). */
+    included: {},
     changes: 1,
     /** Mods each Work has (the Chapter list is on Rain). */
-    mods: { Rain: ["chapters"] },
+    mods: { Rain: ["chapters", "counts"] },
     /** Vault themes: file → { name, dark, css }. A test adds some before the page loads. */
     themes: {},
     settings: null,
@@ -72,6 +76,13 @@
           body: op.body, resolved: false, quote: t.slice(op.from, op.to), timeMs: now, replies: [], otherBody: null,
         });
         break;
+      case "include": {
+        // The Inclusion character the paste just put at `at`: the k-th one in the text.
+        const k = [...t.slice(0, op.at)].filter((c) => c === "￼").length;
+        const list = (fake.included[id] ??= []);
+        list.splice(k, 0, { work: op.work, chapter: op.chapter });
+        return false;
+      }
       default:
         return false; // cursor, sync, marks, tints: nothing changes
     }
@@ -124,6 +135,8 @@
       return found;
     },
     complete_at: () => null,
+    missing_inclusions: () => fake.missingInclusions ?? [],
+    export_pdf: () => null, // as if the save dialog was cancelled
     compile_preview: () => ({ pages: [], stale: false, errors: [], warnings: [], deviceFonts: [], ms: 1 }),
     forget_preview: () => null,
     preview_locate: () => null,
@@ -136,6 +149,37 @@
       return workState(id, wantsMarks ? { marks: fake.comments } : {});
     },
     work_text: ({ id }) => ({ text: fake.texts[id], state: workState(id) }),
+    // Inclusions (vault/inclusions.rs): a Work's Chapters, and what its Inclusions show.
+    chapters_of: ({ work }) => {
+      const found = [];
+      let at = 0;
+      for (const line of fake.texts[work].split("\n")) {
+        if (line.startsWith("= ")) found.push({ title: line.slice(2), at });
+        at += line.length + 1;
+      }
+      return found;
+    },
+    get_inclusions: ({ id }) => {
+      const text = fake.texts[id];
+      const list = fake.included[id] ?? [];
+      const views = [];
+      let k = 0;
+      for (let at = 0; at < text.length; at++) {
+        if (text[at] !== "￼") continue;
+        const target = list[k++];
+        if (!target) continue;
+        const source = fake.texts[target.work];
+        let shown = source;
+        let label = target.work;
+        if (target.chapter !== null) {
+          const next = source.indexOf("\n= ", target.chapter + 1);
+          shown = source.slice(target.chapter, next === -1 ? source.length : next + 1);
+          label = `${target.work}: ${shown.split("\n")[0].slice(2)}`;
+        }
+        views.push({ at, work: target.work, label, text: shown.trimEnd(), missing: null, language: "en", whole: target.chapter === null });
+      }
+      return views;
+    },
     list_folders: ({ path }) => {
       if (!fake.folders[path]) throw new Error(`Couldn't open ${path}`);
       const marks = (p) => ({ vault: fake.vaults.includes(p), syncthing: fake.syncthingFolders.includes(p) });

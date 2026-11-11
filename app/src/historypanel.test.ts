@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dayOf, entries, fieldLine, leftOutLine, moveLine, noticeLine, showMeLabel, wordCounts, type HistoryView, type NoticeView, type SessionRow } from "./historypanel";
+import { dayOf, entries, fieldLine, leftOutLine, libraryLines, moveLine, noticeLine, showMeLabel, wordCounts, type HistoryView, type NoticeView, type SessionRow } from "./historypanel";
 
 const session = (key: string, endMs: number): SessionRow => ({
   key,
@@ -86,5 +86,21 @@ describe("the History tab", () => {
     expect(showMeLabel(3, undefined)).toBe("Show me (3 places)");
     expect(showMeLabel(3, 1)).toBe("Next place (2 of 3)");
     expect(showMeLabel(3, 0)).toBe("Next place (1 of 3)"); // round again
+  });
+});
+
+describe("what a Session recorded on its own", () => {
+  const field = (record: string, included: string | null = null) => ({
+    by: "1", change: "1", record, field: "content", value: null, before: null, takenBack: false, library: true, included, inEffect: true,
+  });
+
+  it("names library files, included Works and their Story elements in plain words", () => {
+    expect(libraryLines([
+      field("style/Book text"), field("included/0a1b", "Zampanò"), field("included/9f8e"), field("included/story-elements"),
+    ])).toEqual([
+      "Recorded library changes: Book text",
+      "Recorded the versions it shows of the included Zampanò, a Work no longer in the Vault",
+      "Recorded the Story elements its Inclusions use",
+    ]);
   });
 });

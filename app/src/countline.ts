@@ -1,14 +1,18 @@
 // The word and character count Mod: a line under the editor with the Work's words and
 // characters, and the selection's while text is selected. It catches up after a short pause, so
-// a novel isn't counted again on every key.
+// a novel isn't counted again on every key. Included text (ADR 0015) counts as if it were
+// written there, and the line says how many of the words are included.
 
-import { countsLine, countsOf, type Counts } from "./counts";
+import { countsLine, countsOf, wordsIn, type Counts } from "./counts";
+
+/** Text as a reader sees it (Inclusions written out), and the included part on its own. */
+export type ReaderText = { text: string; included: string };
 
 export type CountHooks = {
   /** The Work's text as its editor has it now (null if it isn't open). */
-  textOf(id: string): string | null;
-  /** The selected text ("" if nothing is selected). */
-  selectedText(id: string): string | null;
+  textOf(id: string): ReaderText | null;
+  /** The selected text (empty if nothing is selected). */
+  selectedText(id: string): ReaderText | null;
 };
 
 const SETTLE_MS = 300;
@@ -17,6 +21,8 @@ export class CountLine {
   /** The Work counted (in front, with the Mod in use here), or null: hidden. */
   private work: string | null = null;
   private all: Counts | null = null;
+  /** Words in its Inclusions. */
+  private included = 0;
   private timer: number | undefined;
   private selectionTimer: number | undefined;
 
@@ -44,8 +50,9 @@ export class CountLine {
 
   private recount() {
     clearTimeout(this.timer);
-    const text = this.work ? this.hooks.textOf(this.work) : null;
-    this.all = text === null ? null : countsOf(text);
+    const read = this.work ? this.hooks.textOf(this.work) : null;
+    this.all = read === null ? null : countsOf(read.text);
+    this.included = read === null ? 0 : wordsIn(read.included);
     this.draw();
   }
 
@@ -55,9 +62,10 @@ export class CountLine {
       return;
     }
     const selection = this.hooks.selectedText(this.work);
-    const selected = selection ? countsOf(selection) : null;
-    this.el.textContent = countsLine(this.all, selected);
+    const selected = selection && selection.text ? countsOf(selection.text) : null;
+    this.el.textContent = countsLine(this.all, selected, selected ? 0 : this.included);
     const without = (selected ?? this.all).charactersNoSpaces.toLocaleString();
-    this.el.title = `Characters with spaces; ${without} without. Markup, comments and line breaks aren't counted.`;
+    const included = this.included > 0 ? " Included text counts as if it were written here." : "";
+    this.el.title = `Characters with spaces; ${without} without. Markup, comments and line breaks aren't counted.${included}`;
   }
 }
