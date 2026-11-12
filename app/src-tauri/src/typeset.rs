@@ -167,18 +167,84 @@ struct Preview {
     header: Header,
     header_utf16: usize,
     header_lines: usize,
+    /// The Inclusions written out in place of their characters, in order.
+    blocks: Vec<Block>,
+}
+
+/// An Inclusion written out in the compiled source in place of its one character (ADR 0015).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Block {
+    /// Where its character is in the Work's text (UTF-16).
+    pub at: usize,
+    /// How long its Typst is (UTF-16).
+    pub len: usize,
+    /// How many line breaks its Typst holds.
+    pub lines: usize,
+}
+
+impl Block {
+    /// The blocks of a body made by writing out Inclusions: (where, UTF-16 length) for each,
+    /// with the body to count their line breaks in.
+    pub fn all(body: &str, places: &[(usize, usize)]) -> Vec<Block> {
+        let mut blocks = Vec::with_capacity(places.len());
+        let mut shift = 0;
+        for &(at, len) in places {
+            let start = byte_at_utf16(body, at + shift);
+            let end = byte_at_utf16(body, at + shift + len);
+            blocks.push(Block { at, len, lines: body[start..end].matches('\n').count() });
+            shift += len.saturating_sub(1);
+        }
+        blocks
+    }
+}
+
+/// The byte index in `text` of UTF-16 position `utf16` (or the end).
+fn byte_at_utf16(text: &str, utf16: usize) -> usize {
+    crate::positions::byte_at_utf16(text, utf16)
 }
 
 impl Preview {
     /// A place in the Work's text (UTF-16), as a byte offset in the compiled source.
     fn to_source(&self, at: usize) -> Option<usize> {
-        self.world.main.lines().utf16_to_byte(at + self.header_utf16)
+        let shift: usize = self.blocks.iter().take_while(|b| b.at < at).map(|b| b.len.saturating_sub(1)).sum();
+        self.world.main.lines().utf16_to_byte(at + shift + self.header_utf16)
+    }
+
+    /// A byte offset in the compiled source, as a place in the Work's text (UTF-16), and the
+    /// Inclusion it's inside, if one (the place is then its character); None if it's in the
+    /// Preamble.
+    fn locate_text(&self, byte: usize) -> Option<(usize, Option<usize>)> {
+        let at = self.world.main.lines().byte_to_utf16(byte)?.checked_sub(self.header_utf16)?;
+        let mut shift = 0;
+        for (i, b) in self.blocks.iter().enumerate() {
+            let start = b.at + shift;
+            if at < start {
+                break;
+            }
+            if at < start + b.len {
+                return Some((b.at, Some(i)));
+            }
+            shift += b.len.saturating_sub(1);
+        }
+        Some((at - shift, None))
     }
 
     /// A byte offset in the compiled source, as a place in the Work's text (UTF-16); None if
-    /// it's in the Preamble.
+    /// it's in the Preamble. A place inside an Inclusion is its character.
     fn to_text(&self, byte: usize) -> Option<usize> {
-        self.world.main.lines().byte_to_utf16(byte)?.checked_sub(self.header_utf16)
+        self.locate_text(byte).map(|(at, _)| at)
+    }
+
+    /// The line (from 1) of the Work's text a byte offset in the compiled source is on.
+    fn line_of(&self, byte: usize) -> Option<usize> {
+        let lines = self.world.main.lines();
+        let (_, inside) = self.locate_text(byte)?;
+        let (byte, before) = match inside {
+            Some(i) => (self.to_source(self.blocks[i].at)?, i),
+            None => (byte, self.blocks.iter().take_while(|b| self.to_source(b.at).is_some_and(|s| s < byte)).count()),
+        };
+        let skipped: usize = self.blocks[..before].iter().map(|b| b.lines).sum();
+        Some(lines.byte_to_line(byte)? + 1 - self.header_lines - skipped)
     }
 }
 
@@ -344,7 +410,7 @@ impl Typesetter {
     }
 
     /// A Work's preview, made if it has none yet, with its Preamble and its text as they are now.
-    fn preview(&mut self, id: &str, fonts_dir: &Path, header: &Header, text: &str) -> &mut Preview {
+    fn preview(&mut self, id: &str, fonts_dir: &Path, header: &Header, text: &str, blocks: &[Block]) -> &mut Preview {
         let fonts = self.fonts(fonts_dir);
         let preview = self.previews.entry(id.to_string()).or_insert_with(|| Preview {
             world: WorkWorld {
@@ -356,8 +422,10 @@ impl Typesetter {
             header: Header::default(),
             header_utf16: 0,
             header_lines: 0,
+            blocks: Vec::new(),
         });
         preview.world.main.replace(&format!("{}{text}", header.text));
+        preview.blocks = blocks.to_vec();
         if preview.header != *header {
             preview.header = header.clone();
             preview.header_utf16 = header.text.encode_utf16().count();
@@ -369,8 +437,8 @@ impl Typesetter {
     /// What can go at `at` (UTF-16) in a Work's text as it is now: after a `#`, every Story
     /// element and Typst function in scope there. `explicit`: asked for (Ctrl+Space), not just
     /// typed, so it may also offer completions where nothing was started yet.
-    pub fn complete(&mut self, id: &str, fonts_dir: &Path, header: &Header, text: &str, at: usize, explicit: bool) -> Option<Completions> {
-        let preview = self.preview(id, fonts_dir, header, text);
+    pub fn complete(&mut self, id: &str, fonts_dir: &Path, header: &Header, text: &str, blocks: &[Block], at: usize, explicit: bool) -> Option<Completions> {
+        let preview = self.preview(id, fonts_dir, header, text, blocks);
         let cursor = preview.to_source(at)?;
         let source = &preview.world.main;
         let found = catch_unwind(AssertUnwindSafe(|| {
@@ -419,9 +487,14 @@ impl Typesetter {
     /// Compiles a Work's text as it is now, after its Preamble. `fonts_dir`: its Vault's
     /// `fonts/` folder.
     pub fn compile_with(&mut self, id: &str, fonts_dir: &Path, header: &Header, text: String) -> Compiled {
+        self.compile_body(id, fonts_dir, header, text, Vec::new())
+    }
+
+    /// `compile_with`, for a text with Inclusions written out in it (`blocks` says where).
+    pub fn compile_body(&mut self, id: &str, fonts_dir: &Path, header: &Header, text: String, blocks: Vec<Block>) -> Compiled {
         let start = Instant::now();
         let fonts = self.fonts(fonts_dir);
-        let preview = self.preview(id, fonts_dir, header, &text);
+        let preview = self.preview(id, fonts_dir, header, &text, &blocks);
         let outcome = catch_unwind(AssertUnwindSafe(|| typst::compile::<PagedDocument>(&preview.world)));
         // Forget cached work this compile didn't use, or memory grows with every edit (Phase 0b).
         comemo::evict(1);
@@ -526,6 +599,29 @@ impl Typesetter {
     pub fn forget(&mut self, id: &str) {
         self.previews.remove(id);
     }
+
+    /// The text on each of the last pages that compiled, in the order it was laid out (for tests).
+    #[cfg(test)]
+    pub fn page_texts(&self, id: &str) -> Vec<String> {
+        fn walk(frame: &Frame, out: &mut String) {
+            for (_, item) in frame.items() {
+                match item {
+                    FrameItem::Group(group) => walk(&group.frame, out),
+                    FrameItem::Text(text) => {
+                        out.push_str(&text.text);
+                        out.push(' ');
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some(document) = self.previews.get(id).and_then(|p| p.last_good.as_ref()) else { return Vec::new() };
+        document.pages().iter().map(|page| {
+            let mut out = String::new();
+            walk(&page.frame, &mut out);
+            out
+        }).collect()
+    }
 }
 
 /// Where the text at `cursor` (a byte offset) ended up on the pages: the glyph written from
@@ -600,7 +696,6 @@ fn find_glyph(frame: &Frame, span: Span, within: u16) -> Option<(u16, Point)> {
 /// file of the Style library it's in (and its line there), since it can't be shown in the text.
 fn problems(preview: &Preview, diagnostics: &[SourceDiagnostic]) -> Vec<Problem> {
     let world = &preview.world;
-    let lines = world.main.lines();
     let header_bytes = preview.header.text.len();
     diagnostics.iter().map(|d| {
         let range = (d.span.id() == Some(world.main.id())).then(|| world.range(d.span)).flatten();
@@ -612,7 +707,7 @@ fn problems(preview: &Preview, diagnostics: &[SourceDiagnostic]) -> Vec<Problem>
             Some(r) if r.start >= header_bytes => (
                 preview.to_text(r.start),
                 preview.to_text(r.end),
-                lines.byte_to_line(r.start).map(|l| l + 1 - preview.header_lines),
+                preview.line_of(r.start),
             ),
             Some(r) => {
                 let place = match preview.header.segments.iter().find(|s| (s.start..s.end).contains(&r.start)) {
@@ -820,7 +915,7 @@ mod tests {
     fn complete(t: &mut Typesetter, text: &str) -> Completions {
         let at = text.find('|').unwrap();
         let text = text.replace('|', "");
-        t.complete("Rain", Path::new("no-fonts-here"), &Header::default(), &text, at, false).expect("completions")
+        t.complete("Rain", Path::new("no-fonts-here"), &Header::default(), &text, &[], at, false).expect("completions")
     }
 
     #[test]
@@ -844,7 +939,7 @@ mod tests {
         assert!(c.items.iter().any(|i| i.label == "dream"));
         // Plain prose offers nothing.
         let mut t = Typesetter::new(false);
-        assert!(t.complete("Rain", Path::new("x"), &Header::default(), "The rain had", 12, false).is_none_or(|c| c.items.is_empty()));
+        assert!(t.complete("Rain", Path::new("x"), &Header::default(), "The rain had", &[], 12, false).is_none_or(|c| c.items.is_empty()));
     }
 
     /// A header like a Work's Preamble makes: a Story element, a Style that can go wrong.
@@ -878,7 +973,7 @@ mod tests {
         t.compile_with("Rain", Path::new("x"), &h, good.to_string());
         round_trip(&t, good, "falling");
         // The Preamble's Story elements come first among the completions.
-        let c = t.complete("Rain", Path::new("x"), &h, "Awake. #dr", 10, false).unwrap();
+        let c = t.complete("Rain", Path::new("x"), &h, "Awake. #dr", &[], 10, false).unwrap();
         assert_eq!(c.from, 8);
         assert!(!c.items.iter().any(|i| i.label.starts_with("wrtier-look")));
         // Picking one types it with its brackets, the cursor inside a body.
@@ -886,10 +981,10 @@ mod tests {
         assert!(dream.story_element);
         assert_eq!(dream.apply, "dream[${}]");
         assert_eq!(dream.detail.as_deref(), Some("Dream: A dream."));
-        let c = t.complete("Rain", Path::new("x"), &h, "Awake. #pa", 10, false).unwrap();
+        let c = t.complete("Rain", Path::new("x"), &h, "Awake. #pa", &[], 10, false).unwrap();
         assert_eq!(c.items.iter().find(|i| i.label == "pause").unwrap().apply, "pause()");
         // With a bracket already there, none is added.
-        let c = t.complete("Rain", Path::new("x"), &h, "Awake. #dr[falling]", 10, false).unwrap();
+        let c = t.complete("Rain", Path::new("x"), &h, "Awake. #dr[falling]", &[], 10, false).unwrap();
         assert_eq!(c.items.iter().find(|i| i.label == "dream").unwrap().apply, "dream");
     }
 

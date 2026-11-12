@@ -277,6 +277,11 @@ impl Doc {
         self.burst.as_ref()
     }
 
+    /// Where the open burst's draft shows in `text()` (in characters); 0 without one.
+    pub fn burst_at(&self) -> usize {
+        self.burst.as_ref().map_or(0, |b| b.at)
+    }
+
     /// The History's visible characters in reading order, with the piece each is drawn in.
     /// (Without the open burst's draft, which has no characters in the History yet.)
     pub fn visible(&self) -> Vec<(CharId, Option<Piece>)> {
@@ -367,6 +372,21 @@ impl Doc {
     /// The History's text, without the open burst's draft: what the Text file holds.
     pub fn committed_text(&self) -> String {
         self.visible.iter().filter_map(|&node| self.tree.char_at(node)).collect()
+    }
+
+    /// The Inclusions in the History's text (without the open burst's draft), in reading
+    /// order: each one's character, and where it is in `committed_text` (in characters).
+    pub fn inclusions(&self) -> Vec<(CharId, usize)> {
+        self.visible.iter().enumerate()
+            .filter(|&(_, &node)| self.tree.char_at(node) == Some(crate::change::INCLUSION))
+            .map(|(i, &node)| (self.tree.id_of(node), i))
+            .collect()
+    }
+
+    /// Where a character is in `committed_text` (in characters), if it's visible.
+    pub fn index_of_char(&self, id: CharId) -> Option<usize> {
+        let node = self.tree.index_of(id)?;
+        self.visible.iter().position(|&n| n == node)
     }
 
     /// The current value of a record's field: the latest in the fixed Change order among the

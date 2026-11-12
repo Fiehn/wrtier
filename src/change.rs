@@ -94,10 +94,30 @@ pub fn is_meta_record(record: &str) -> bool {
 pub const PREAMBLE_RECORD: &str = "preamble";
 
 /// A Work's recorded copy of a Style (`style/<name>`), Look (`look/<name>`) or Story element
-/// (`element/<name>`) from the Style library. The app records these on its own, to mirror the
-/// library, so reverting a Session leaves them alone.
+/// (`element/<name>`) from the Style library, or the version of another Work it includes
+/// (`included/<Work ID>`, ADR 0015). The app records these on its own, to mirror the library
+/// and the included Works, so reverting a Session leaves them alone.
 pub fn is_library_copy(record: &str) -> bool {
-    ["style/", "look/", "element/"].iter().any(|prefix| record.starts_with(prefix))
+    ["style/", "look/", "element/", "included/"].iter().any(|prefix| record.starts_with(prefix))
+}
+
+/// The character that stands for an Inclusion in a Work's text: another Work, or one Chapter
+/// of it, shown there live. It's always on a line of its own, and being one character, it's
+/// added, deleted, moved and reverted whole. What it includes is in its `inclusion_record`.
+pub const INCLUSION: char = '\u{FFFC}';
+
+/// The record saying what an Inclusion includes, named by its character: the included Work's
+/// ID (`work`), the character starting the included Chapter's heading line (`chapter`, absent
+/// for the whole Work) and Styles for this Inclusion only (`styles`, one name per line).
+pub fn inclusion_record(at: CharId) -> String {
+    format!("inclusion/{at}")
+}
+
+/// The record holding the version of an included Work this Work last showed (ADR 0015): its
+/// `version` field is the highest Change counter it had from each Device, as `ChangeId`s
+/// joined by commas. Named by the included Work's ID.
+pub fn included_record(work: &str) -> String {
+    format!("included/{work}")
 }
 
 /// Fields holding free text the Author writes (in v1 a single value, not a text sequence): two

@@ -21,6 +21,7 @@ import { fillNewWorkMods, openMods } from "./modsdialog";
 import { inUse, modNamed, type ModsState } from "./mods";
 import { ChapterList } from "./chapterlist";
 import { CountLine } from "./countline";
+import { endWorkDrag, startWorkDrag, type ChapterChoice } from "./inclusions";
 import { ThemeApplier, themeChoices, VAULT_PREFIX } from "./themes";
 import { SyncPanel } from "./syncpanel";
 import { UpdateDialog } from "./updates";
@@ -236,6 +237,30 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     $("panel-tab-history").textContent = count > 0 ? `History (${count})` : "History";
   },
   modCommand: (id, command) => modCommand(id, command),
+  dropWork: (id, work, pos) => act(() => includeChecked(id, work, null, pos)),
+  inclusionStyles: (id, at, styles, x, y) => {
+    const all = library.items.filter((i) => i.kind === "style");
+    if (all.length === 0) {
+      showError("The Style library has no Styles yet.");
+      return;
+    }
+    const set = (next: string[]) => act(async () => {
+      await tabs.settled(id);
+      await invoke("set_inclusion_styles", { id, at, styles: next });
+      tabs.refreshInclusionsOf(id);
+    });
+    showMenu(x, y, [
+      ...all.map((s): MenuItem => {
+        const on = styles.includes(s.name);
+        return { label: `${on ? "✓ " : "    "}${s.title}`, run: () => set(on ? styles.filter((n) => n !== s.name) : [...styles, s.name]) };
+      }),
+      ...(styles.length > 0 ? ["separator" as const, { label: "No Styles of its own", run: () => set([]) }] : []),
+    ]);
+  },
+  openWork: (id, at) => act(async () => {
+    await openWork(id, at);
+    await tabs.reveal(id, at, at); // also when it was open already
+  }),
 });
 
 // ---- The side panel (Ctrl+Shift+P): the Page preview and the Comments ----
@@ -362,10 +387,32 @@ showResolved.addEventListener("change", () => {
 const commentsPanel = new CommentsPanel($("comments-list"), $("comments-new"), {
   work: () => (tabs.activeIsWork ? tabs.active : null),
   marks: (work) => tabs.marksOf(work),
-  act: (work, op) => tabs.comment(work, op),
+  includedMarks: (work) => tabs.includedMarksOf(work),
+  // A Comment may belong to a Work that isn't open (one shown on an Inclusion): then it's
+  // changed without opening a tab, and the Inclusions in front follow.
+  act: (work, op) => {
+    if (tabs.has(work)) {
+      tabs.comment(work, op);
+      return;
+    }
+    act(async () => {
+      await invoke("comment_in", { work, ops: [op] });
+      if (tabs.active) tabs.refreshInclusionsOf(tabs.active);
+    });
+  },
+  addIncluded: async (work, target, sender, body) => {
+    await invoke("comment_on_inclusion", { id: work, at: target.at, from: target.from, to: target.to, sender, body });
+    tabs.refreshInclusionsOf(work);
+  },
   show: (work, comment, part) => {
     phone.toWrite();
-    return tabs.showComment(work, comment, part);
+    if (tabs.has(work)) return tabs.showComment(work, comment, part);
+    // One on an Inclusion: its own Work opens, at it.
+    act(async () => {
+      await openWork(work);
+      tabs.showComment(work, comment, part);
+    });
+    return 1;
   },
   setPending: (work, range) => tabs.setPending(work, range),
   pendingRange: (work) => tabs.pendingRange(work),
@@ -391,7 +438,13 @@ const commentsPanel = new CommentsPanel($("comments-list"), $("comments-new"), {
 });
 
 /** Its key (Ctrl+Shift+M at first) or "Add Comment": a new Comment on the selection, or the word at the cursor. */
-function startComment(id: string) {
+function startComment(id: string, included = tabs.includedSelectionOf(id)) {
+  // Text selected in an Inclusion: the Comment goes to the Work it includes (ADR 0015).
+  if (included) {
+    openTab("comments");
+    act(() => commentsPanel.startAddingIncluded(id, included));
+    return;
+  }
   const target = tabs.commentTarget(id);
   if (!target) {
     showError("Select some text to comment on, or put the cursor in a word.");
@@ -405,6 +458,15 @@ function startComment(id: string) {
 function selectionMenu(id: string): MenuItem[] {
   const view = tabs.viewOf(id);
   if (!view) return [];
+  // In an Inclusion's text, which can't be changed here: Add Comment and Copy. (Read now: the
+  // selection may not survive clicking the menu.)
+  const included = tabs.includedSelectionOf(id);
+  if (included) {
+    return [
+      { label: withKey("Add Comment", "addComment"), run: () => startComment(id, included) },
+      { label: "Copy", run: () => act(() => navigator.clipboard.writeText(included.quote)) },
+    ];
+  }
   // Cut and Copy go through the editor, so a cut pasted back is still a Move.
   const command = (name: "cut" | "copy") => () => {
     view.focus();
@@ -585,6 +647,7 @@ function modCommand(id: string, command: CommandId): boolean {
 const chapterList = new ChapterList($("chapters"), $("chapters-list"), $("chapters-none"), {
   textOf: (id) => tabs.textOf(id),
   cursorOf: (id) => tabs.cursorOf(id),
+  includedOf: (id) => tabs.includedOf(id),
   goTo: (id, at) => {
     phone.toWrite();
     void tabs.reveal(id, at, at);
@@ -595,8 +658,8 @@ const chapterList = new ChapterList($("chapters"), $("chapters-list"), $("chapte
 // ---- The word and character count (a Mod) ----
 
 const countLine = new CountLine($("counts"), {
-  textOf: (id) => tabs.textOf(id),
-  selectedText: (id) => tabs.selectedText(id),
+  textOf: (id) => tabs.readerTextOf(id),
+  selectedText: (id) => tabs.readerTextOf(id, true),
 });
 
 /** The Mods that show the Work in front (the Chapter list, the counts) follow it. */
@@ -605,6 +668,79 @@ function showModViews() {
   chapterList.show(id && modInUse(id, "chapters") ? id : null);
   countLine.show(id && modInUse(id, "counts") ? id : null);
 }
+
+// ---- Inclusions (ADR 0015) ----
+
+/**
+ * Includes the Work `work` at the cursor in the Work `into`: the whole of it, or (asked with a
+ * menu at `at` if it has Chapters) one of its Chapters.
+ */
+async function includeIn(into: string, work: string, at: { x: number; y: number }) {
+  // Refused before the menu, if it would make a Work include itself.
+  await invoke("check_inclusion", { id: into, work });
+  const chapters = await invoke<ChapterChoice[]>("chapters_of", { work });
+  if (chapters.length === 0) {
+    tabs.include(into, work, null);
+    return;
+  }
+  showMenu(at.x, at.y, [
+    { label: "The whole Work", run: () => tabs.include(into, work, null) },
+    "separator",
+    ...chapters.map((c): MenuItem => ({ label: `Chapter: ${c.title}`, run: () => tabs.include(into, work, c.at) })),
+  ]);
+}
+
+/**
+ * Includes `work` (or its Chapter at `chapter`) in the Work `into`, at the cursor or near `near`,
+ * once Rust has said it can be: not if that would make a Work include itself.
+ */
+async function includeChecked(into: string, work: string, chapter: number | null, near?: number) {
+  await invoke("check_inclusion", { id: into, work });
+  tabs.include(into, work, chapter, near);
+}
+
+// ---- Collections: Works selected in the Vault browser (Ctrl+click, or "Select" in its menu) ----
+
+/** The Works selected for a new Collection, in the order they were picked. */
+let picked: string[] = [];
+
+function togglePicked(id: string) {
+  picked = picked.includes(id) ? picked.filter((p) => p !== id) : [...picked, id];
+  showPicked();
+}
+
+/** Marks the selected Works in the Vault browser, numbered in the order they'll be in. */
+function showPicked() {
+  picked = picked.filter((id) => entries.some((e) => e.id === id && e.kind === "work"));
+  for (const item of $("works").querySelectorAll<HTMLElement>("li.work-entry")) {
+    const n = picked.indexOf(item.dataset.id ?? "");
+    item.classList.toggle("picked", n !== -1);
+    item.querySelector(".entry-pick")?.remove();
+    if (n !== -1) {
+      const badge = document.createElement("span");
+      badge.className = "entry-pick";
+      badge.textContent = String(n + 1);
+      badge.title = "Selected for a new Collection, in this place";
+      item.querySelector(".entry")?.prepend(badge);
+    }
+  }
+}
+
+/** "New Collection from selected Works…": a new Work holding an Inclusion of each, in that order. */
+async function newCollection(works: string[], folder?: string) {
+  const id = await askText(`A new Collection of ${works.length === 1 ? "1 Work" : `${works.length} Works`}. What's it called?`, folder ? `${folder}/` : "", "Create",
+    `It includes ${works.map((w) => w.split("/").pop()).join(", ")}, in that order. ${FOLDER_HINT}`);
+  if (id === null) return;
+  const created = await invoke<OpenedWork>("create_collection", { id, works });
+  picked = [];
+  await tabs.add(created);
+  await refreshElements(created.id);
+  await refreshList();
+}
+
+// The Work in front follows the Works it includes as they're written (in other tabs, or arriving
+// from other Devices).
+window.setInterval(() => tabs.refreshInclusions(), 2000);
 
 // ---- A Work's Preamble ----
 
@@ -620,8 +756,24 @@ async function editPreamble(id: string) {
 }
 
 /** Exports a Work as a PDF, in a Look picked here if it has more than one. */
-async function exportPdf(id: string) {
+/**
+ * Before an Export: if some of the Work's Inclusions can't be shown (the Work they include is in
+ * the trash, not synced yet…), says which and asks. True to go ahead (they become a line
+ * saying so in the Export).
+ */
+async function inclusionsReady(id: string): Promise<boolean> {
+  const missing = await invoke<string[]>("missing_inclusions", { id });
+  if (missing.length === 0) return true;
+  const shown = missing.slice(0, 3).join(" ");
+  const more = missing.length > 3 ? ` And ${missing.length - 3} more.` : "";
+  const what = missing.length === 1 ? "One Inclusion can't be shown" : `${missing.length} Inclusions can't be shown`;
+  return confirmAsk(`${what}: ${shown}${more} The Export would have a line saying so in ${missing.length === 1 ? "its" : "their"} place.`, "Export anyway");
+}
+
+/** `milestone`: export the Work as it was then (what the Page preview shows), not as it is now. */
+async function exportPdf(id: string, milestone: { id: string; name: string } | null = null) {
   await tabs.settled(id);
+  if (!milestone && !(await inclusionsReady(id))) return;
   const { preamble } = await invoke<{ preamble: Preamble }>("get_preamble", { id });
   let look: string | null = preamble.looks[0] ?? null;
   if (preamble.looks.length > 1) {
@@ -638,22 +790,24 @@ async function exportPdf(id: string) {
     look = select.value;
   }
   type Exported = { path: string; pages: number; deviceFonts: string[] };
-  const done = await invoke<Exported | null>("export_pdf", { id, look });
+  const done = await invoke<Exported | null>("export_pdf", { id, look, milestone: milestone?.id ?? null });
   if (!done) return; // cancelled
   const pages = done.pages === 1 ? "1 page" : `${done.pages} pages`;
   const fonts = done.deviceFonts.length
     ? ` ${done.deviceFonts.join(", ")} came from this Device, not the Vault, so a PDF from another Device would differ.`
     : "";
-  showInfo(`Exported ${pages} to ${done.path}.${fonts}`);
+  const what = milestone ? ` “${milestone.name}”` : "";
+  showInfo(`Exported${what} ${pages} to ${done.path}.${fonts}`);
 }
 
 $("preview-pdf").addEventListener("click", () => act(async () => {
-  if (preview.shown) await exportPdf(preview.shown);
+  if (preview.shown) await exportPdf(preview.shown, preview.shownMilestone);
 }));
 
 /** Exports a Work as a manuscript .docx, and says what it couldn't carry. */
-async function exportDocx(id: string) {
+async function exportDocx(id: string, milestone: { id: string; name: string } | null = null) {
   await tabs.settled(id);
+  if (!milestone && !(await inclusionsReady(id))) return;
   $("ask-docx-heading").textContent = `Export ${id.split("/").pop()} as .docx`;
   const select = $<HTMLSelectElement>("ask-docx-font");
   try {
@@ -669,9 +823,9 @@ async function exportDocx(id: string) {
   }
   type LeftOut = { line: number; what: string };
   type Exported = { path: string; paragraphs: number; leftOut: LeftOut[] };
-  const done = await invoke<Exported | null>("export_docx", { id, font: select.value });
+  const done = await invoke<Exported | null>("export_docx", { id, font: select.value, milestone: milestone?.id ?? null });
   if (!done) return; // cancelled
-  let line = `Exported ${done.paragraphs} paragraphs to ${done.path}.`;
+  let line = `Exported${milestone ? ` “${milestone.name}”` : ""} ${done.paragraphs} paragraphs to ${done.path}.`;
   if (done.leftOut.length > 0) {
     const shown = done.leftOut.slice(0, 3).map((l) => `line ${l.line}: ${l.what}`).join("; ");
     const more = done.leftOut.length > 3 ? `, and ${done.leftOut.length - 3} more` : "";
@@ -681,7 +835,7 @@ async function exportDocx(id: string) {
 }
 
 $("preview-docx").addEventListener("click", () => act(async () => {
-  if (preview.shown) await exportDocx(preview.shown);
+  if (preview.shown) await exportDocx(preview.shown, preview.shownMilestone);
 }));
 
 /** Names the current point in a Work's History, to come back to or compare with later. */
@@ -888,8 +1042,18 @@ function workItem(entry: Entry): HTMLElement {
   name.textContent = entry.name;
   name.title = entry.id;
   name.disabled = disabled(entry);
-  name.addEventListener("click", () => act(() => openWork(entry.id)));
+  name.addEventListener("click", (e) => {
+    // Ctrl+click (⌘ on a Mac) picks it for a new Collection instead.
+    if ((e.ctrlKey || e.metaKey) && entry.kind === "work") togglePicked(entry.id);
+    else act(() => openWork(entry.id));
+  });
   pill.append(name);
+  if (entry.kind === "work") {
+    // Dragged into a Work's text, it's included there.
+    pill.draggable = true;
+    pill.addEventListener("dragstart", (e) => startWorkDrag(e, entry.id));
+    pill.addEventListener("dragend", endWorkDrag);
+  }
   const actions = document.createElement("span");
   actions.className = "entry-actions";
   if (entry.kind === "work") {
@@ -960,6 +1124,7 @@ async function refreshList() {
   const list = $("works");
   list.replaceChildren();
   fillList(list, buildTree(entries, folders));
+  showPicked();
   highlightOpen();
   await refreshTrash();
 }
@@ -1035,14 +1200,29 @@ $("sidebar-vault").addEventListener("contextmenu", (e) => {
   const workEl = target.closest<HTMLElement>("li.work-entry");
   const folderEl = target.closest<HTMLElement>("li.folder");
   const run = (f: () => Promise<unknown>) => () => act(f);
+  const folderHere = workEl ? foldersOf(workEl.dataset.id ?? "").pop() : folderEl?.dataset.path;
+  // With Works selected (Ctrl+click, or "Select" here): a Collection of them.
+  const collecting: MenuItem[] = picked.length === 0 ? [] : [
+    "separator",
+    { label: `New Collection from selected Works (${picked.length})…`, run: run(() => newCollection([...picked], folderHere)) },
+    { label: "Clear the selection", run: () => { picked = []; showPicked(); } },
+  ];
   let items: MenuItem[];
   if (workEl) {
     const entry = entries.find((x) => x.id === workEl.dataset.id);
     if (!entry) return;
     const folder = foldersOf(entry.id).pop();
+    // Included at the cursor in the Work in front (not in itself).
+    const into = tabs.activeIsWork && tabs.active !== entry.id ? tabs.active : null;
+    const at = { x: e.clientX, y: e.clientY };
     items =
       entry.kind === "work" ? [
         { label: "Open", run: run(() => openWork(entry.id)) },
+        ...(into ? [{ label: `Include in ${into.split("/").pop()}…`, run: run(() => includeIn(into, entry.id, at)) }] : []),
+        {
+          label: picked.includes(entry.id) ? "Deselect" : "Select for a Collection",
+          run: () => togglePicked(entry.id),
+        },
         { label: "Preamble…", run: run(() => editPreamble(entry.id)) },
         { label: "Mods…", run: run(() => editMods(entry.id)) },
         { label: "Name a Milestone…", run: run(() => nameMilestone(entry.id)) },
@@ -1072,7 +1252,7 @@ $("sidebar-vault").addEventListener("contextmenu", (e) => {
       { label: "New folder…", run: run(() => newFolder()) },
     ];
   }
-  showMenu(e.clientX, e.clientY, items);
+  showMenu(e.clientX, e.clientY, items.length > 0 ? [...items, ...collecting] : collecting.slice(1));
 });
 
 async function renameWork(id: string) {

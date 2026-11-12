@@ -12,7 +12,12 @@ export type CommentsHooks = {
   /** The Work in front, if it's a Work. */
   work(): string | null;
   marks(work: string): Mark[];
+  /** The Comments shown on the Work's Inclusions (ADR 0015), by the Work they belong to. */
+  includedMarks(work: string): IncludedMarks[];
+  /** `work` may be one that isn't open: a Comment shown on an Inclusion belongs to its own Work. */
   act(work: string, op: CommentOp): void;
+  /** Adds a Comment on text selected in an Inclusion of `work`: kept in the Work it includes. */
+  addIncluded(work: string, target: IncludedTarget, sender: string, body: string): Promise<void>;
   /** Selects part `part` of a Comment's text; returns how many parts there are. */
   show(work: string, comment: string, part: number): number;
   setPending(work: string, range: { from: number; to: number } | null): void;
@@ -27,6 +32,12 @@ export type CommentsHooks = {
   counted(open: number): void;
   error(message: string): void;
 };
+
+/** An included Work's Comments shown on one of a Work's Inclusions. */
+export type IncludedMarks = { work: string; label: string; marks: Mark[] };
+
+/** Text selected in an Inclusion: its character, the selection in its text, what it includes. */
+export type IncludedTarget = { at: number; from: number; to: number; quote: string; label: string };
 
 const AUTHOR = "author";
 const NEW_REVIEWER = "new";
@@ -215,6 +226,32 @@ export class CommentsPanel {
     this.newArea.hidden = false;
   }
 
+  /**
+   * Starts a new Comment on text selected in one of the Work's Inclusions. It's kept in the
+   * Work the Inclusion shows (ADR 0015), so the form says which.
+   */
+  async startAddingIncluded(work: string, target: IncludedTarget) {
+    this.cancelAdding();
+    const picker = await this.senderPicker(work, lastSender());
+    const element = this.textForm({
+      initial: "",
+      placeholder: "Write the Comment…",
+      saveLabel: "Save",
+      picker,
+      save: (body, sender) => {
+        rememberSender(sender!);
+        this.cancelAdding();
+        this.hooks.addIncluded(work, target, sender!, body).catch((e) => this.hooks.error(String(e)));
+      },
+      cancel: () => this.cancelAdding(),
+    });
+    const heading = el("p", "comment-new-heading", `New Comment on “${shorten(target.quote, 60)}”, kept in ${target.label.split(": ")[0]}`);
+    element.prepend(heading);
+    this.adding = { work, element };
+    this.newArea.replaceChildren(element);
+    this.newArea.hidden = false;
+  }
+
   private cancelAdding() {
     if (!this.adding) return;
     this.hooks.setPending(this.adding.work, null);
@@ -237,15 +274,21 @@ export class CommentsPanel {
     const work = this.hooks.work();
     if (this.adding && this.adding.work !== work) this.cancelAdding();
     const marks = work ? this.hooks.marks(work) : [];
-    if (this.form && !marks.some((m) => m.id === this.form!.comment)) this.form = null;
-    this.hooks.counted(marks.filter((m) => !m.resolved).length);
+    const included = work ? this.hooks.includedMarks(work) : [];
+    const everyMark = [...marks, ...included.flatMap((g) => g.marks)];
+    if (this.form && !everyMark.some((m) => m.id === this.form!.comment)) this.form = null;
+    this.hooks.counted(everyMark.filter((m) => !m.resolved).length);
     const shown = marks.filter((m) => this.hooks.showResolved() || !m.resolved);
     const attached = shown.filter((m) => m.ranges.length > 0);
     const detached = shown.filter((m) => m.ranges.length === 0);
     const children: HTMLElement[] = [];
+    // Comments on included text belong to the Work it comes from; acting on one acts there.
+    const includedShown = included
+      .map((g) => ({ ...g, marks: g.marks.filter((m) => this.hooks.showResolved() || !m.resolved) }))
+      .filter((g) => g.marks.length > 0);
     if (!work) {
       children.push(el("p", "muted", "Open a Work to see its Comments."));
-    } else if (shown.length === 0) {
+    } else if (shown.length === 0 && includedShown.length === 0) {
       const resolved = marks.length - shown.length;
       children.push(el("p", "muted", resolved > 0
         ? `No open Comments (${resolved} resolved).`
@@ -255,6 +298,11 @@ export class CommentsPanel {
     }
     if (work) {
       children.push(...attached.map((m) => this.card(work, m)));
+      for (const group of includedShown) {
+        children.push(el("h3", "comments-included-heading", `In ${group.label}`));
+        children.push(el("p", "muted comments-included-note", `Kept in ${group.work.split("/").pop()}, and shown there too.`));
+        children.push(...group.marks.map((m) => this.card(group.work, m)));
+      }
       if (detached.length > 0) {
         children.push(el("h3", "comments-detached-heading", "Detached"));
         children.push(el("p", "muted comments-detached-note", "All of their text has been deleted. They're attached again if any of it comes back."));

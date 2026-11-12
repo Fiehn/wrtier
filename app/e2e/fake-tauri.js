@@ -13,11 +13,17 @@
     unknown: [],
     texts: {
       Rain: "= One\n\nThe rain had stopped. The street was wet.\n\nShe walked home.\n\n= Two\n\nMorning came slowly.\n\n= Three\n\nThe end.\n",
+      // Another Work, to include in Rain.
+      "Zampanò": "= Exploration A\n\nThe hallway was not there before.\n\n= The Navidson Record\n\nIt measured a quarter inch more inside than out.\n",
     },
     comments: [],
+    /** What each Work's Inclusions include, in reading order (vault/inclusions.rs). */
+    included: {},
+    /** Comments made on included text, by the Work they're kept in (positions in the shown text). */
+    includedComments: {},
     changes: 1,
     /** Mods each Work has (the Chapter list is on Rain). */
-    mods: { Rain: ["chapters"] },
+    mods: { Rain: ["chapters", "counts"] },
     /** Vault themes: file → { name, dark, css }. A test adds some before the page loads. */
     themes: {},
     settings: null,
@@ -72,6 +78,13 @@
           body: op.body, resolved: false, quote: t.slice(op.from, op.to), timeMs: now, replies: [], otherBody: null,
         });
         break;
+      case "include": {
+        // The Inclusion character the paste just put at `at`: the k-th one in the text.
+        const k = [...t.slice(0, op.at)].filter((c) => c === "￼").length;
+        const list = (fake.included[id] ??= []);
+        list.splice(k, 0, { work: op.work, chapter: op.chapter });
+        return false;
+      }
       default:
         return false; // cursor, sync, marks, tints: nothing changes
     }
@@ -97,7 +110,10 @@
     },
     list_works: () => ({ entries: Object.keys(fake.texts).map((id) => ({ id, name: id, kind: "work" })), problems: fake.problems, folders: [] }),
     list_trash: () => [],
-    get_library: () => ({ items: [], conflicts: [], builtIn: [] }),
+    get_library: () => ({
+      items: [{ kind: "style", name: "Courier voice", title: "Courier voice", path: "styles/Courier voice.typ", description: "", problems: [], writtenAs: null, shownAs: null, docx: null, styles: [] }],
+      conflicts: [], builtIn: [],
+    }),
     get_layout: () => ({ tabs: ["Rain"], active: "Rain", cursors: {} }),
     save_layout: () => null,
     open_work: ({ id }) => ({ id, name: id, text: fake.texts[id], problems: [], notice: null }),
@@ -106,7 +122,11 @@
     get_mods: ({ id }) => ({ work: fake.mods[id] ?? [], newWorks: [], hidden: [] }),
     get_reviewers: () => [],
     get_preamble: () => ({ preamble: { looks: ["Paperback"], styles: [], elements: [], title: "Rain", author: "", language: "en", raw: "" }, rawOther: null }),
-    get_milestones: () => [],
+    get_milestones: () => fake.milestones ?? [],
+    make_milestone: ({ name }) => {
+      (fake.milestones ??= []).push({ id: `00000001:${90 + fake.milestones.length}`, name, timeMs: now });
+      return null;
+    },
     list_themes: () => ({ themes: Object.entries(fake.themes).map(([file, t]) => ({ file, name: t.name, dark: t.dark })), problems: [] }),
     read_theme: ({ file }) => {
       if (!fake.themes[file]) throw new Error("No such theme");
@@ -124,6 +144,32 @@
       return found;
     },
     complete_at: () => null,
+    missing_inclusions: () => fake.missingInclusions ?? [],
+    comment_on_inclusion: ({ id, at, from, to, sender, body }) => {
+      const target = fake.included[id][[...fake.texts[id].slice(0, at)].filter((c) => c === "￼").length];
+      const list = (fake.includedComments[target.work] ??= []);
+      const quote = handlers.get_inclusions({ id }).find((v) => v.at === at).text.slice(from, to);
+      list.push({ id: `ic${list.length + 1}`, from, to, sender, body, quote, replies: [] });
+      return null;
+    },
+    comment_in: ({ work, ops }) => {
+      for (const op of ops) {
+        const c = (fake.includedComments[work] ?? []).find((x) => x.id === op.comment);
+        if (op.op === "reply" && c) c.replies.push({ id: `r${c.replies.length + 1}`, sender: op.sender, name: "Author", colour: "author", body: op.body, timeMs: now, otherBody: null });
+      }
+      return null;
+    },
+    export_pdf: () => null, // as if the save dialog was cancelled
+    set_inclusion_styles: ({ id, at, styles }) => {
+      const k = [...fake.texts[id].slice(0, at)].filter((c) => c === "￼").length;
+      fake.included[id][k].styles = styles;
+      return null;
+    },
+    settle_split: ({ id, at }) => {
+      const k = [...fake.texts[id].slice(0, at)].filter((c) => c === "￼").length;
+      fake.included[id][k].settled = true;
+      return null;
+    },
     compile_preview: () => ({ pages: [], stale: false, errors: [], warnings: [], deviceFonts: [], ms: 1 }),
     forget_preview: () => null,
     preview_locate: () => null,
@@ -136,6 +182,55 @@
       return workState(id, wantsMarks ? { marks: fake.comments } : {});
     },
     work_text: ({ id }) => ({ text: fake.texts[id], state: workState(id) }),
+    // Inclusions (vault/inclusions.rs): a Work's Chapters, and what its Inclusions show.
+    chapters_of: ({ work }) => {
+      const found = [];
+      let at = 0;
+      for (const line of fake.texts[work].split("\n")) {
+        if (line.startsWith("= ")) found.push({ title: line.slice(2), at });
+        at += line.length + 1;
+      }
+      return found;
+    },
+    // A Work can't include itself (the fake knows no deeper loops).
+    check_inclusion: ({ id, work }) => {
+      if (id === work) throw "A Work can't include itself.";
+      return null;
+    },
+    create_collection: ({ id, works }) => {
+      fake.texts[id] = works.map(() => "￼").join("\n\n");
+      fake.included[id] = works.map((work) => ({ work, chapter: null }));
+      return { id, name: id.split("/").pop(), text: fake.texts[id], problems: [], notice: null };
+    },
+    get_inclusions: ({ id }) => {
+      const text = fake.texts[id];
+      const list = fake.included[id] ?? [];
+      const views = [];
+      let k = 0;
+      for (let at = 0; at < text.length; at++) {
+        if (text[at] !== "￼") continue;
+        const target = list[k++];
+        if (!target) continue;
+        const source = fake.texts[target.work];
+        let shown = source;
+        let label = target.work;
+        let chapter = null;
+        if (target.chapter !== null) {
+          const next = source.indexOf("\n= ", target.chapter + 1);
+          shown = source.slice(target.chapter, next === -1 ? source.length : next + 1);
+          chapter = shown.split("\n")[0].slice(2);
+          label = `${target.work}: ${chapter}`;
+        }
+        const comments = (fake.includedComments[target.work] ?? []).map((c) => ({
+          id: c.id, ranges: [[c.from, c.to]], sender: c.sender, name: "Author", colour: "author", body: c.body, resolved: false,
+          quote: c.quote, timeMs: now, replies: c.replies, otherBody: null,
+        }));
+        const found = fake.splits?.[target.work];
+        const split = found && found.after === target.chapter && !target.settled ? { title: found.title, at: found.at } : null;
+        views.push({ at, work: target.work, label, chapter, text: shown.trimEnd(), missing: null, language: "en", whole: target.chapter === null, starts: target.chapter ?? 0, comments, split, styles: target.styles ?? [] });
+      }
+      return views;
+    },
     list_folders: ({ path }) => {
       if (!fake.folders[path]) throw new Error(`Couldn't open ${path}`);
       const marks = (p) => ({ vault: fake.vaults.includes(p), syncthing: fake.syncthingFolders.includes(p) });

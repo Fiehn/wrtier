@@ -281,6 +281,37 @@ test("on Android, the Vault needs All files access and is chosen in the app's fo
   expect(await page.evaluate(() => (window as any).__fake.unknown), "commands the fake doesn't know").toEqual([]);
 });
 
+test("a Chapter of another Work is included, read-only, and counted", async ({ app }) => {
+  await endOf(app, "She walked home.");
+  // Right-click the other Work in the Vault: include it in the Work in front, one Chapter.
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "Chapter: The Navidson Record" }).click();
+  // The editor sent the character as a paste, then what it includes.
+  await expect.poll(async () => (await ops(app)).find((op) => op.op === "include")).toMatchObject({ work: "Zampanò", chapter: 52 });
+  expect(await textOf(app)).toContain("She walked home.\n\uFFFC\n");
+  // It shows as a block with the included text, under a bar naming it.
+  const block = app.locator(".cm-inclusion");
+  await expect(block.locator(".cm-inclusion-label")).toHaveText("Zampanò: The Navidson Record");
+  await expect(block.locator(".cm-inclusion-text")).toContainText("a quarter inch more inside than out");
+  await expect(app.locator("#counts")).toContainText("(12 included)");
+  // In the Chapter list it's a Chapter of its own, between One and Two, marked as included.
+  await expect(app.locator("#chapters-list li.included")).toContainText("The Navidson Record");
+  await expect(app.locator("#chapters-list li[data-index] .chapter-title")).toHaveText(["One", "The Navidson Record", "Two", "Three"]);
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/inclusion.png` : undefined });
+  // Typing before it moves it along; it's still there and still one character.
+  await endOf(app, "The rain had stopped.");
+  await app.keyboard.type(" Still.");
+  await expect(block.locator(".cm-inclusion-label")).toBeVisible();
+  // Folded, only the bar shows.
+  await block.locator(".cm-inclusion-fold").click();
+  await expect(block.locator(".cm-inclusion-text")).toHaveCount(0);
+  // "Go to" opens the Work it includes.
+  await block.locator(".cm-inclusion-go").click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.log.some((e: any) => e.cmd === "open_work" && e.args.id === "Zampanò"))).toBe(true);
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/goto.png` : undefined });
+});
+
 test.describe("at phone width", () => {
   test.use({ viewport: { width: 412, height: 860 } });
 
@@ -323,4 +354,195 @@ test.describe("at phone width", () => {
     await expect(bar).toBeHidden();
     await expect(app.locator("#write-toolbar")).toBeVisible();
   });
+});
+
+test("an Export with an Inclusion that can't be shown asks first", async ({ app }) => {
+  await app.evaluate(() => ((window as any).__fake.missingInclusions = ["Zampanò: Zampanò is in the trash."]));
+  const exported = () => app.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd === "export_pdf").length);
+  const exportRain = async () => {
+    await app.locator("#works li.work-entry", { hasText: "Rain" }).click({ button: "right" });
+    await app.locator("#menu button", { hasText: "Export PDF…" }).click();
+  };
+  await exportRain();
+  await expect(app.locator("#ask-confirm-text")).toContainText("One Inclusion can't be shown: Zampanò: Zampanò is in the trash.");
+  await app.locator("#ask-confirm button", { hasText: "Cancel" }).click();
+  expect(await exported()).toBe(0);
+  await exportRain();
+  await app.locator("#ask-confirm-yes", { hasText: "Export anyway" }).click();
+  await expect.poll(exported).toBe(1);
+});
+
+test("a Comment on included text is kept in the Work it comes from, and shown here", async ({ app }) => {
+  await endOf(app, "She walked home.");
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "Chapter: The Navidson Record" }).click();
+  const text = app.locator(".cm-inclusion-text p", { hasText: "quarter inch" });
+  await expect(text).toBeVisible();
+  // A double-click selects a word in it (the editor doesn't take the selection back).
+  const where = (words: string) => text.evaluate((p, words) => {
+    const node = p.firstChild!;
+    const start = node.textContent!.indexOf(words);
+    const range = document.createRange();
+    range.setStart(node, start);
+    range.setEnd(node, start + words.length);
+    return JSON.parse(JSON.stringify(range.getBoundingClientRect()));
+  }, words);
+  const measured = await where("measured");
+  await app.mouse.dblclick(measured.x + measured.width / 2, measured.y + measured.height / 2);
+  await expect.poll(() => app.evaluate(() => getSelection()!.toString().trim())).toBe("measured");
+  // Drag across "quarter inch" to select it, the way the Author would, then right-click it.
+  const box = await where("quarter inch");
+  const y = box.y + box.height / 2;
+  await app.mouse.move(box.x + 1, y);
+  await app.mouse.down();
+  await app.mouse.move(box.x + box.width / 2, y, { steps: 5 });
+  await app.mouse.move(box.x + box.width + 1, y, { steps: 5 });
+  await app.mouse.up();
+  await expect.poll(() => app.evaluate(() => getSelection()!.toString())).toBe("quarter inch");
+  await app.mouse.click(box.x + box.width / 2, y, { button: "right" });
+  await app.locator("#menu button", { hasText: "Add Comment" }).click({ timeout: 5000 });
+  await expect(app.locator("#comments-new")).toContainText("kept in Zampanò");
+  await app.locator("#comments-new textarea").fill("How much, exactly?");
+  await app.locator("#comments-new button", { hasText: "Save" }).click();
+  // It went to the included Work, at the selection in the shown text ("= The Navidson Record\n\n" is 23).
+  const sent = await app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "comment_on_inclusion")?.args);
+  expect(sent).toMatchObject({ id: "Rain", from: 23 + "It measured a ".length, to: 23 + "It measured a quarter inch".length, body: "How much, exactly?" });
+  // Shown on the Inclusion, and in the Comments panel under the Inclusion.
+  await expect(app.locator(".cm-inclusion .cm-comment")).toHaveText("quarter inch");
+  await expect(app.locator(".comments-included-heading")).toHaveText("In Zampanò: The Navidson Record");
+  const card = app.locator(".comment-card", { hasText: "How much, exactly?" });
+  await expect(card).toBeVisible();
+  await expect(app.locator("#counts")).toContainText("(12 included)");
+  await expect(app.locator("#chapters-list li.included")).toBeVisible();
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/comment.png` : undefined });
+  // A Reply from here goes to Zampanò too.
+  await card.locator("button", { hasText: "Reply" }).click();
+  await card.locator("textarea").fill("A quarter inch.");
+  await card.locator("button", { hasText: "Reply" }).last().click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "comment_in")?.args.work)).toBe("Zampanò");
+  await expect(card).toContainText("A quarter inch.");
+});
+
+test("a whole included Work shows its own Chapters a level down in the Chapter list", async ({ app }) => {
+  await endOf(app, "The end.");
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "The whole Work" }).click();
+  const entry = app.locator("#chapters-list li.included");
+  await expect(entry.locator(".chapter-sub li .chapter-title")).toHaveText(["Exploration A", "The Navidson Record"]);
+  await expect(entry.locator("> .chapter-title")).toHaveText("Zampanò");
+  await expect(entry.locator("> .chapter-words")).toHaveText("15"); // its Chapters' 6 and 9: headings aren't counted
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/whole.png` : undefined });
+});
+
+test("a Chapter split in its own Work shows a note, and the new one can be included too", async ({ app }) => {
+  // In Zampanò, "Exploration A" now has a new Chapter after it ("Interlude", at 52).
+  await app.evaluate(() => ((window as any).__fake.splits = { "Zampanò": { after: 0, title: "Interlude", at: 52 } }));
+  await endOf(app, "She walked home.");
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "Chapter: Exploration A" }).click();
+  const note = app.locator(".cm-inclusion-split");
+  await expect(note).toContainText("Zampanò has a new Chapter after this one, not included: “Interlude”.");
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/split.png` : undefined });
+  await note.locator("button", { hasText: "Include it here too" }).click();
+  // A second Inclusion, of the new Chapter, right after the first; and the note goes.
+  await expect.poll(async () => (await ops(app)).filter((op) => op.op === "include").map((op: any) => op.chapter)).toEqual([0, 52]);
+  expect(await textOf(app)).toContain("She walked home.\n\uFFFC\n\uFFFC\n");
+  await expect(note).toHaveCount(0);
+  expect(await app.evaluate(() => (window as any).__fake.log.some((e: any) => e.cmd === "settle_split"))).toBe(true);
+});
+
+test("an Inclusion gets Styles of its own from the bar", async ({ app }) => {
+  await endOf(app, "She walked home.");
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "The whole Work" }).click();
+  const styles = app.locator(".cm-inclusion .cm-inclusion-styles");
+  await expect(styles).toHaveText("Styles");
+  await styles.click();
+  await app.locator("#menu button", { hasText: "Courier voice" }).click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "set_inclusion_styles")?.args.styles)).toEqual(["Courier voice"]);
+  await expect(styles).toHaveText("Styles (1)");
+  // Picked again: taken off.
+  await styles.click();
+  await expect(app.locator("#menu button", { hasText: "✓ Courier voice" })).toBeVisible();
+  await app.locator("#menu button", { hasText: "No Styles of its own" }).click();
+  await expect(styles).toHaveText("Styles");
+});
+
+test("the PDF of a Milestone shown in the Page preview is of that Milestone", async ({ app }) => {
+  await app.getByRole("button", { name: "Show panel" }).click();
+  await app.locator("#panel-tab-pages").click();
+  // Name a Milestone, as the Author would.
+  await app.locator("#works li.work-entry", { hasText: "Rain" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Name a Milestone…" }).click();
+  await app.locator("#ask-text-input").fill("Sent");
+  await app.locator("#ask-text-ok").click();
+  const version = app.locator("#preview-version");
+  await expect(version).toBeVisible();
+  await version.selectOption("00000001:90");
+  await app.locator("#preview-pdf").click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "export_pdf")?.args.milestone)).toBe("00000001:90");
+  // Back to now: an Export of now.
+  await version.selectOption({ index: 0 });
+  await app.locator("#preview-pdf").click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd === "export_pdf").map((e: any) => e.args.milestone))).toEqual(["00000001:90", null]);
+});
+
+test("a Work dragged from the Vault into the text is included where it's dropped", async ({ app }) => {
+  const zampano = app.locator("#works li.work-entry", { hasText: "Zampanò" }).locator(".entry");
+  await zampano.dragTo(line(app, "She walked home."));
+  // Dropped on a line with text: on a line of its own after it.
+  await expect.poll(async () => (await ops(app)).find((op) => op.op === "include")).toMatchObject({ work: "Zampanò", chapter: null });
+  expect(await textOf(app)).toContain("She walked home.\n\uFFFC\n");
+  await expect(app.locator(".cm-inclusion .cm-inclusion-label")).toHaveText("Zampanò");
+  // A Work dragged into itself is refused, and nothing changes.
+  await app.locator("#works li.work-entry", { hasText: "Rain" }).locator(".entry").dragTo(line(app, "The end."));
+  await expect(app.locator("#error")).toContainText("can't include itself");
+  expect((await ops(app)).filter((op) => op.op === "include")).toHaveLength(1);
+  expect((await textOf(app)).match(/\uFFFC/g)).toHaveLength(1);
+});
+
+test("Works picked in the Vault become a new Collection, in the order they were picked", async ({ app }) => {
+  const entry = (name: string) => app.locator("#works li.work-entry", { hasText: name });
+  await entry("Zampanò").locator(".entry-name").click({ modifiers: ["ControlOrMeta"] });
+  await entry("Rain").locator(".entry-name").click({ modifiers: ["ControlOrMeta"] });
+  // Each is marked with its place in the Collection (Rain is listed first, picked second).
+  await expect(app.locator("#works li.picked .entry-pick")).toHaveText(["2", "1"]);
+  expect(await app.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd === "open_work").length)).toBe(1); // only Rain, at the start
+  await entry("Rain").click({ button: "right" });
+  await app.locator("#menu button", { hasText: "New Collection from selected Works (2)…" }).click();
+  await expect(app.locator("#ask-text")).toContainText("It includes Zampanò, Rain, in that order.");
+  await app.locator("#ask-text-input").fill("Both");
+  await app.locator("#ask-text-ok").click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "create_collection")?.args))
+    .toEqual({ id: "Both", works: ["Zampanò", "Rain"] });
+  // It opens, showing both, and the selection is cleared.
+  await expect(app.locator(".pane:not([hidden]) .cm-inclusion-label")).toHaveText(["Zampanò", "Rain"]);
+  await expect(app.locator("#works li.picked")).toHaveCount(0);
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/collection.png` : undefined });
+});
+
+test("in the Raw view an Inclusion is one line saying what it includes", async ({ app }) => {
+  await endOf(app, "She walked home.");
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "Chapter: The Navidson Record" }).click();
+  await expect(app.locator(".cm-inclusion")).toBeVisible();
+  await app.locator("#view-mode").click();
+  const raw = app.locator(".cm-inclusion-raw");
+  await expect(raw).toHaveText('#inclusion("Zampanò", chapter: "The Navidson Record")');
+  await expect(app.locator(".cm-inclusion")).toHaveCount(0);
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/raw.png` : undefined });
+  // Typing after it goes after it; the line itself can't be typed in.
+  await line(app, "She walked home.").click();
+  await app.keyboard.press("ArrowDown");
+  await app.keyboard.press("End");
+  await app.keyboard.type(" After.");
+  await expect.poll(() => textOf(app)).toContain("\uFFFC After.");
+  // Back in the Formatted view: the block again.
+  await app.locator("#view-mode").click();
+  await expect(app.locator(".cm-inclusion .cm-inclusion-label")).toHaveText("Zampanò: The Navidson Record");
 });

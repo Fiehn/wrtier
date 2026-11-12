@@ -17,9 +17,11 @@ import { completions } from "./completion";
 import { commentClasses, commentHighlights, pendingRange, rangesOf, setMarks, setPending, type CommentOptions } from "./comments";
 import type { CommentOp, HistoryOp, Mark } from "./sync";
 import { bindings, COMMANDS, withKey, type CommandId } from "./keys";
-import { type MoveOp } from "./chapters";
+import { chaptersIn, type IncludedEntry, type MoveOp } from "./chapters";
 import { sessionTints, setTints } from "./sessiontints";
 import { modExtensions, type Mod } from "./mods";
+import { INCLUSION, includedSelection, inclusions, inclusionsOf, placeInclusion, rawInclusions, readerText, setInclusions, workDrops, type InclusionView } from "./inclusions";
+import { wordsIn } from "./counts";
 
 export type OpenedWork = { id: string; name: string; text: string; problems: { path: string; reason: string }[]; notice: string | null };
 
@@ -59,6 +61,12 @@ export type TabEvents = {
   textHistory(id: string): void;
   /** How many Merge notices the Work in front has (0 if it isn't a Work): "History (n)". */
   notices(count: number): void;
+  /** "Go to" on an Inclusion: open the Work it includes (its ID). */
+  openWork(id: string, at: number): void;
+  /** A Work (its ID) dragged from the Vault browser was dropped at `pos` in the text of the Work `id`. */
+  dropWork(id: string, work: string, pos: number): void;
+  /** "Styles" on an Inclusion's bar: pick Styles for it only (it has `styles`), with a menu at (x, y). */
+  inclusionStyles(id: string, at: number, styles: string[], x: number, y: number): void;
   /** A Mod's command's key, while writing in a Work: it runs it, or offers to add the Mod. */
   modCommand(id: string, command: CommandId): boolean;
 };
@@ -66,6 +74,8 @@ export type TabEvents = {
 const historyCompartment = new Compartment();
 /** The Formatted view, or the Raw view's Typst colouring. */
 const viewCompartment = new Compartment();
+/** What goes in it: in the Raw view, Inclusions are their one `#inclusion(…)` line too. */
+const viewExtension = (formatted: boolean) => (formatted ? formattedView() : [typstColouring(false), rawInclusions.of(true)]);
 /** Line numbers and the shaded cursor line (settings). */
 const linesCompartment = new Compartment();
 /** The Story elements the Work has (from its Preamble and the Style library). */
@@ -102,6 +112,59 @@ class Tab {
   marks: Mark[] = [];
   /** The Mods in use in it on this Device (their IDs), as last set. */
   mods: string[] = [];
+  /** Does it (maybe) have Inclusions? Then they're asked for again now and then, to stay live. */
+  hasInclusions = false;
+  private fetchingInclusions = false;
+
+  /**
+   * Asks Rust for the Inclusions as they are now (the included Works may have changed in other
+   * tabs, or on other Devices), once everything typed has reached it, so positions fit.
+   */
+  async refreshInclusions(events: TabEvents) {
+    if (!this.isWork || !this.hasInclusions || this.fetchingInclusions) return;
+    this.fetchingInclusions = true;
+    try {
+      await this.sync.idle();
+      const views = await invoke<InclusionView[]>("get_inclusions", { id: this.sync.id });
+      this.hasInclusions = views.length > 0 || this.view.state.doc.toString().includes(INCLUSION);
+      // Typed meanwhile: they're asked for again next time rather than put in the wrong place.
+      if (this.sync.isIdle()) {
+        const before = inclusionsOf(this.view.state);
+        const comments = (list: InclusionView[]) => JSON.stringify(list.map((v) => v.comments));
+        const commentsChanged = comments(before) !== comments(views);
+        const changed = JSON.stringify(before) !== JSON.stringify(views);
+        this.view.dispatch({ effects: setInclusions.of(views) });
+        // Only when something changed (this is asked every 2 s): the counts, Chapter list and
+        // Page preview follow.
+        if (changed) events.edited(this.sync.id);
+        // The Comments panel lists their Comments (redrawn only when they change: a redraw
+        // would take the focus from a Reply being written).
+        if (commentsChanged) events.marks(this.sync.id, this.marks);
+      }
+    } catch (e) {
+      events.error(String(e));
+    } finally {
+      this.fetchingInclusions = false;
+    }
+  }
+
+  /**
+   * Puts an Inclusion of `work` (its ID in the Vault), or of its Chapter starting at `chapter`,
+   * on a line of its own at the cursor (or near `near`).
+   */
+  include(work: string, chapter: number | null, events: TabEvents, near?: number) {
+    const { state } = this.view;
+    const place = placeInclusion(state.doc, near ?? state.selection.main.head);
+    this.view.dispatch({
+      changes: { from: place.from, insert: place.insert },
+      selection: { anchor: place.at + 1 },
+      userEvent: "input.paste",
+      scrollIntoView: true,
+    });
+    this.sync.include(place.at, work, chapter);
+    this.hasInclusions = true;
+    void this.refreshInclusions(events);
+  }
 
   /** A Work's sync (only Work tabs have one). */
   get sync(): WorkSync {
@@ -186,14 +249,17 @@ class Tab {
           // Only the basics: no shortcuts that move lines, which would bypass Moves.
           keymap.of(standardKeymap),
           dropCursor(),
+          // A Work dragged in from the Vault browser is included where it's dropped.
+          workDrops((work, pos) => tabs.events.dropWork(this.id, work, pos)),
           dragToMove(),
           completions({ work: () => this.sync.id, settled: () => this.sync.idle() }),
           elementsCompartment.of(storyElements([])),
-          viewCompartment.of(tabs.formatted ? formattedView() : typstColouring(false)),
+          viewCompartment.of(viewExtension(tabs.formatted)),
           linesCompartment.of(lineExtensions(tabs.options)),
           commentHighlights(() => tabs.commentOptions, (ids) => tabs.events.openComments(this.id, ids)),
           commentsCompartment.of(commentClasses(tabs.commentOptions)),
           sessionTints(),
+          inclusions(),
           modsCompartment.of([]),
           EditorView.updateListener.of((update) => {
             for (const tr of update.transactions) this.sync.track(tr);
@@ -220,8 +286,17 @@ class Tab {
         tabs.events.marks(this.id, marks);
       },
       tints: (tints) => this.view.dispatch({ effects: setTints.of(tints) }),
-      grew: () => tabs.events.historyGrew(this.id),
+      grew: () => {
+        tabs.events.historyGrew(this.id);
+        void this.refreshInclusions(tabs.events);
+      },
       error: (message) => tabs.events.error(message),
+    });
+    this.hasInclusions = work.text.includes(INCLUSION);
+    void this.refreshInclusions(tabs.events);
+    this.pane.addEventListener("wrtier-open-work", (e) => {
+      const { work, at } = (e as CustomEvent<{ work: string; at: number }>).detail;
+      tabs.events.openWork(work, at);
     });
     this.rename(work.id, work.name);
     this.sync.requestMarks();
@@ -230,11 +305,39 @@ class Tab {
     // Right-click inside a selection: the app's menu (Add Comment, Cut, Copy, Paste). Anywhere
     // else the system's own, which has the spelling suggestions.
     this.view.contentDOM.addEventListener("contextmenu", (e) => {
+      // Text selected in an Inclusion's text (ADR 0015): the app's menu too, to comment on it.
+      const inIncluded = (e.target as Element).closest(".cm-inclusion") !== null;
+      if (inIncluded) {
+        if (!includedSelection(this.view)) return;
+        e.preventDefault();
+        tabs.events.selectionMenu(this.id, e.clientX, e.clientY);
+        return;
+      }
       const selection = this.view.state.selection.main;
       const pos = this.view.posAtCoords({ x: e.clientX, y: e.clientY });
       if (selection.empty || pos === null || pos < selection.from || pos > selection.to) return;
       e.preventDefault();
       tabs.events.selectionMenu(this.id, e.clientX, e.clientY);
+    });
+    this.pane.addEventListener("wrtier-open-comments", (e) => tabs.events.openComments(this.id, (e as CustomEvent<string[]>).detail));
+    this.pane.addEventListener("wrtier-add-comment", () => tabs.events.addComment(this.id));
+    this.pane.addEventListener("wrtier-inclusion-styles", (e) => {
+      const { at, styles, x, y } = (e as CustomEvent<{ at: number; styles: string[]; x: number; y: number }>).detail;
+      tabs.events.inclusionStyles(this.id, at, styles, x, y);
+    });
+    // The note about a new Chapter after an Inclusion: include it too (just after), or dismiss.
+    this.pane.addEventListener("wrtier-split", (e) => {
+      const { at, work, chapter } = (e as CustomEvent<{ at: number; work: string | null; chapter: number | null }>).detail;
+      if (work && chapter !== null) this.include(work, chapter, tabs.events, at + 1);
+      void (async () => {
+        try {
+          await this.sync.idle();
+          await invoke("settle_split", { id: this.sync.id, at });
+          await this.refreshInclusions(tabs.events);
+        } catch (err) {
+          tabs.events.error(String(err));
+        }
+      })();
     });
     this.pane.addEventListener("wrtier-add-element", (e) => tabs.events.addElement(this.id, (e as CustomEvent<string>).detail));
 
@@ -451,6 +554,75 @@ export class Tabs {
     return tab.view.state.sliceDoc(from, to);
   }
 
+  /**
+   * A Work's text (or its selection) as a reader sees it, with its Inclusions' text in their
+   * place, and the included part on its own: what the counts count. Null if it isn't open.
+   */
+  readerTextOf(id: string, selection = false): { text: string; included: string } | null {
+    const tab = this.find(id);
+    if (!tab?.isWork) return null;
+    const { state } = tab.view;
+    const { from, to } = selection ? state.selection.main : { from: 0, to: state.doc.length };
+    return readerText(state, from, to);
+  }
+
+  /**
+   * A Work's Inclusions as the Chapter list shows them: an included Chapter under its own title
+   * (its words not counting its heading), a whole Work under its name.
+   */
+  includedOf(id: string): IncludedEntry[] {
+    const tab = this.find(id);
+    if (!tab?.isWork) return [];
+    return inclusionsOf(tab.view.state).filter((v) => !v.missing).map((v) => {
+      // Heading lines aren't counted, as for the Chapters around it.
+      const body = v.text.split("\n").filter((line) => !/^=+\s/.test(line)).join("\n");
+      const title = v.whole ? v.label : v.label.slice(v.label.indexOf(": ") + 2);
+      // A whole Work's own Chapters go under it, a level down.
+      const chapters = v.whole ? chaptersIn(v.text).filter((i) => i.kind === "chapter").map((i) => ({ title: i.title, words: i.words })) : undefined;
+      return { at: v.at, title, words: wordsIn(body), ...(chapters?.length ? { chapters } : {}) };
+    });
+  }
+
+  /**
+   * Text selected inside one of a Work's Inclusions, if that's where the selection is: the
+   * Inclusion's character, the selection in its text, and what it includes.
+   */
+  includedSelectionOf(id: string): { at: number; from: number; to: number; quote: string; label: string } | null {
+    const tab = this.find(id);
+    if (!tab?.isWork) return null;
+    const picked = includedSelection(tab.view);
+    const v = picked && inclusionsOf(tab.view.state).find((i) => i.at === picked.at);
+    return picked && v ? { ...picked, label: v.label } : null;
+  }
+
+  /** The Comments shown on a Work's Inclusions, by the Work they belong to. */
+  includedMarksOf(id: string): { work: string; label: string; marks: Mark[] }[] {
+    const tab = this.find(id);
+    if (!tab?.isWork) return [];
+    return inclusionsOf(tab.view.state)
+      .filter((v) => v.work && v.comments.length > 0)
+      .map((v) => ({ work: v.work!, label: v.label, marks: v.comments }));
+  }
+
+  /** Asks the Work in front for its Inclusions again now (a Comment on one changed). */
+  refreshInclusionsOf(id: string) {
+    const tab = this.find(id);
+    if (tab?.isWork) void tab.refreshInclusions(this.events);
+  }
+
+  /** Puts an Inclusion of `work` (or its Chapter at `chapter`) at the cursor in the Work `id`, or near `near`. */
+  include(id: string, work: string, chapter: number | null, near?: number) {
+    const tab = this.find(id);
+    if (!tab?.isWork) return;
+    tab.include(work, chapter, this.events, near);
+    if (near !== undefined) tab.view.focus(); // dropped in: the writing goes on there
+  }
+
+  /** The Work in front asks for its Inclusions again, so they follow the Works they include. */
+  refreshInclusions() {
+    if (this.front?.isWork) void this.front.refreshInclusions(this.events);
+  }
+
   /** A Work's text as its editor has it now (null if it isn't open). */
   textOf(id: string): string | null {
     const tab = this.find(id);
@@ -492,7 +664,7 @@ export class Tabs {
   setFormatted(on: boolean) {
     this.formatted = on;
     for (const tab of this.open) {
-      if (tab.isWork) tab.view.dispatch({ effects: viewCompartment.reconfigure(on ? formattedView() : typstColouring(false)) });
+      if (tab.isWork) tab.view.dispatch({ effects: viewCompartment.reconfigure(viewExtension(on)) });
     }
   }
 

@@ -65,6 +65,8 @@ export type FieldView = {
   before: string | null;
   takenBack: boolean;
   library: boolean;
+  /** For the version of an included Work it recorded: that Work's name, if found. */
+  included?: string | null;
   inEffect: boolean;
 };
 export type SnippetsView = { snippets: SnippetView[]; fields: FieldView[] };
@@ -177,6 +179,23 @@ export function moveLine(m: MoveView, preview = false): string {
   const after = m.after ? `, after “${m.after}”` : "";
   if (preview) return `${m.back ? "Moves to" : "Moves back to"} ${where}${after}`;
   return `${m.back ? "Moved back from" : "Moved here from"} ${where}${after}`;
+}
+
+/**
+ * What a Session recorded on its own, as quiet lines: changed library files ("Recorded library
+ * changes: Book text"), and for Inclusions (ADR 0015) the versions of the Works it includes and
+ * the Story elements they use.
+ */
+export function libraryLines(fields: FieldView[]): string[] {
+  const library = fields.filter((f) => f.library);
+  const included = library.filter((f) => f.record.startsWith("included/"));
+  const files = [...new Set(library.filter((f) => !included.includes(f)).map((f) => f.record.slice(f.record.indexOf("/") + 1)))];
+  const works = [...new Set(included.filter((f) => f.record !== "included/story-elements").map((f) => f.included ?? "a Work no longer in the Vault"))];
+  const lines: string[] = [];
+  if (files.length > 0) lines.push(`Recorded library changes: ${files.join(", ")}`);
+  if (works.length > 0) lines.push(`Recorded the versions it shows of the included ${works.join(", ")}`);
+  if (included.some((f) => f.record === "included/story-elements")) lines.push("Recorded the Story elements its Inclusions use");
+  return lines;
 }
 
 /** "Not reverted: 2 Comments, Milestone “Draft 2”, …", or null if nothing is left out. */
@@ -523,11 +542,7 @@ export class HistoryPanel {
       line.append(el("span", "", fieldLine(f)), this.snippetActions(work, anchor, [f.by], f.inEffect, null));
       box.append(line, ...this.previewFor(anchor));
     });
-    const library = shown.fields.filter((f) => f.library);
-    if (library.length > 0) {
-      const names = [...new Set(library.map((f) => f.record.slice(f.record.indexOf("/") + 1)))];
-      box.append(el("p", "history-field quiet", `Recorded library changes: ${names.join(", ")}`));
-    }
+    for (const line of libraryLines(shown.fields)) box.append(el("p", "history-field quiet", line));
     if (shown.snippets.length === 0 && shown.fields.length === 0) box.append(el("p", "muted", "Nothing to show here any more."));
     return box;
   }

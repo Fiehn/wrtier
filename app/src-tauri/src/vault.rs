@@ -15,6 +15,7 @@ use wrtier::ids::DeviceId;
 use wrtier::storage::{self, Probe};
 use crate::library;
 use crate::preamble::{self, Preamble, Shelf, Version};
+use crate::typeset::Block;
 use crate::recovery::{self, Recovery};
 use crate::work::{undoable, Op, OpenWork, Whereabouts, WorkState};
 use wrtier::change::Change;
@@ -53,11 +54,20 @@ pub struct Vault {
     library_generation: u64,
     /// Why the default Styles couldn't be written, if they couldn't.
     defaults_problem: Option<String>,
+    /// Each `.db`'s Work ID, read once: how Inclusions find the Works they include.
+    identities: HashMap<PathBuf, Option<String>>,
+    /// Included Works read from disk (see `inclusions::DocCache`).
+    included_docs: inclusions::DocCache,
 }
 
 /// What an Export needs (see `Vault::export_input`).
 pub struct ExportInput {
+    /// Its text, with its Inclusions written out as Typst.
     pub text: String,
+    /// Its text for a `.docx`, with its Inclusions written out as plain text under headings.
+    pub docx_text: String,
+    /// Inclusions that couldn't be shown, and why: an Export says so.
+    pub missing: Vec<String>,
     pub header: preamble::Header,
     /// Its title, author and language, for a `.docx`'s running header and properties.
     pub preamble: Preamble,
@@ -91,10 +101,12 @@ pub struct PreambleView {
 const DEFAULTS_RECORD: &str = "defaults";
 
 mod history;
+mod inclusions;
 mod mods;
 mod moves;
 mod reviewers;
 mod settings;
+pub use inclusions::{ChapterChoice, InclusionView, Target};
 pub use history::{ComparisonView, HistoryView, RestorePreview, ReturnPreview, RevertPreview, SnippetsView};
 pub use mods::Mods;
 pub use moves::{TrashedWork, TRASH};
@@ -266,6 +278,8 @@ impl Vault {
             themes_stamp: crate::themes::stamp(root),
             library_generation: 0,
             defaults_problem: None,
+            identities: HashMap::new(),
+            included_docs: HashMap::new(),
         };
         vault.absorb_vault_copies(&mut Vec::new()); // any left are reported when the Works are listed
         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
@@ -455,6 +469,8 @@ impl Vault {
             }
         }
 
+        problems.extend(self.duplicate_problems(&histories));
+
         let dbs: HashSet<&PathBuf> = files.dbs.iter().collect();
         for typ in &files.typs {
             let (id, name) = (self.id_of(typ), name_of(typ));
@@ -551,7 +567,9 @@ impl Vault {
                     let in_file = wrtier::text_file::split_header(&wrtier::text_file::split_marker(&contents).0).0;
                     header_dropped = !storage::wrote_text(&db, &contents).unwrap_or(true) && in_file.is_some_and(|h| h != header);
                 }
-                mine.extend(storage::sync_text_file(&db, &typ, &mut doc, &header, now_ms).map_err(err)?);
+                // Its Inclusions are written out at the versions it recorded (ADR 0015).
+                let expansions = inclusions::expansions(&self.shown_in_doc(&doc));
+                mine.extend(storage::sync_text_file_with(&db, &typ, &mut doc, &header, &expansions, now_ms).map_err(err)?);
                 if mine.len() > saved_before {
                     record_name(&db, &mut doc, device_name.as_deref(), now_ms)?;
                 }
@@ -595,6 +613,7 @@ impl Vault {
         work.style_notice = preamble::update_notice(&work.doc, &Shelf::read(&self.root));
         work.vault_root = self.root.clone();
         self.works.insert(id.to_string(), work);
+        self.refresh_text_file_inclusions(id);
         Ok(OpenedWork { id: id.to_string(), name, text, problems, notice })
     }
 
@@ -760,6 +779,25 @@ impl Vault {
                 });
             }
         }
+        // An Inclusion records the ID of the Work it includes, which only the Vault can find.
+        for op in &mut ops {
+            if let Op::Include { work, chapter, target, .. } = op {
+                let found = self.target_for(work, *chapter)?;
+                // Asked before the editor put it in (`check_inclusion`); this only catches a race.
+                self.refuse_loop(id, work, &found)?;
+                *target = Some(found);
+            }
+        }
+        let edits = ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks | Op::Tints | Op::Find { .. } | Op::Stretch { .. }));
+        // What might add or remove an Inclusion (not plain typing).
+        let reshapes = ops.iter().any(|op| match op {
+            Op::Cursor { .. } | Op::Marks | Op::Tints | Op::Find { .. } | Op::Stretch { .. } => false,
+            Op::Type { from, to, .. } => from != to,
+            _ => true,
+        });
+        if edits {
+            self.record_inclusions(id, now_ms);
+        }
         // Before the first edit since the Style library last changed, the Work records the
         // versions of everything it uses (read here only when that's due).
         let (root, generation) = (self.root.clone(), self.library_generation);
@@ -767,6 +805,9 @@ impl Vault {
             let shelf = w.styles_due(generation).then(|| Shelf::read(&root));
             w.edit(ops, name, shelf.as_ref().map(|s| (s, generation)), now_ms)
         })?;
+        if reshapes {
+            self.refresh_text_file_inclusions(id);
+        }
         if let (Some(marks), Some(work)) = (state.marks.as_mut(), self.works.get(&self.current_id(id))) {
             for mark in marks {
                 (mark.name, mark.colour) = self.sender_label(&work.doc, &mark.sender);
@@ -822,11 +863,15 @@ impl Vault {
 
     /// What a compile of an open Work needs: its text as it is now, and the Preamble's Typst
     /// with the Style library's current versions. `look`: the one to render (else its first).
-    pub fn typeset_input(&mut self, id: &str, look: Option<&str>, now_ms: u64) -> Result<(String, preamble::Header), String> {
+    /// Its Inclusions are written out as the included Works are now, and `Block`s say where.
+    pub fn typeset_input(&mut self, id: &str, look: Option<&str>, now_ms: u64) -> Result<(String, preamble::Header, Vec<Block>), String> {
         let shelf = Shelf::read(&self.root);
+        let shown = self.shown_in(id, false)?;
         self.with_work(id, now_ms, |w, _| {
-            let uses = preamble::uses(&w.doc, &shelf, Version::Library);
-            Ok((w.text(), preamble::header(&w.doc, uses, look)))
+            let uses = preamble::uses_plus(&w.doc, &shelf, Version::Library, &inclusions::elements_of(&shown));
+            let (body, places) = inclusions::typst_body(&w.text(), &shown);
+            let blocks = Block::all(&body, &places);
+            Ok((body, preamble::header(&w.doc, uses, look), blocks))
         })
     }
 
@@ -853,12 +898,19 @@ impl Vault {
         let shelf = Shelf::read(&self.root);
         let generation = self.library_generation;
         if self.works.contains_key(&self.current_id(id)) {
+            // The versions of the included Works it shows now go in first (ADR 0015).
+            self.with_work(id, now_ms, |w, _| {
+                w.close_burst(now_ms);
+                Ok(())
+            })?;
+            self.record_inclusions(id, now_ms);
             return self.with_work(id, now_ms, |w, _| Ok(Some(w.make_milestone(name, &shelf, generation, now_ms))));
         }
         let (db, _) = self.paths(id)?;
         let (me, device_name) = (self.device, self.device_name());
         let (_, mut doc) = storage::load(&db, me).map_err(err)?;
-        let mut changes = preamble::record_unrecorded(&mut doc, &shelf, now_ms);
+        let mut changes = self.record_inclusions_in(&mut doc, now_ms);
+        changes.extend(preamble::record_unrecorded(&mut doc, &shelf, now_ms));
         changes.push(doc.make_milestone_local(name, now_ms));
         storage::save(&db, &changes, &doc).map_err(err)?;
         record_name(&db, &mut doc, device_name.as_deref(), now_ms)?;
@@ -892,10 +944,44 @@ impl Vault {
 
     /// What a compile of a Work as it was at a Milestone needs: its text then, and a header
     /// from the copies it had recorded then (never today's Style library).
-    pub fn typeset_input_at(&mut self, id: &str, milestone: &str, look: Option<&str>, now_ms: u64) -> Result<(String, preamble::Header), String> {
+    /// Its Inclusions show the versions it had recorded then (ADR 0015).
+    pub fn typeset_input_at(&mut self, id: &str, milestone: &str, look: Option<&str>, now_ms: u64) -> Result<(String, preamble::Header, Vec<Block>), String> {
         let doc = self.at_milestone(id, milestone, now_ms)?;
         let uses = preamble::uses(&doc, &Shelf::read(&self.root), Version::Recorded);
-        Ok((doc.committed_text(), preamble::header(&doc, uses, look)))
+        let shown = self.shown_in_doc(&doc);
+        let (body, places) = inclusions::typst_body(&doc.committed_text(), &shown);
+        let blocks = Block::all(&body, &places);
+        Ok((body, preamble::header(&doc, uses, look), blocks))
+    }
+
+    /// What an Export of a Work as it was at a Milestone needs: exactly what it showed then,
+    /// with the Styles and the versions of included Works it had recorded (ADR 0015). Nothing is
+    /// recorded. Its date is when the Milestone was named, the same on every Device.
+    pub fn export_input_at(&mut self, id: &str, milestone: &str, look: Option<&str>, now_ms: u64) -> Result<ExportInput, String> {
+        let doc = self.at_milestone(id, milestone, now_ms)?;
+        let named: ChangeId = milestone.parse().map_err(|_| format!("Not a Milestone: {milestone}"))?;
+        let date_ms = self.milestone_time(id, named, now_ms)?;
+        let header = preamble::header(&doc, preamble::uses(&doc, &Shelf::read(&self.root), Version::Recorded), look);
+        let shown = self.shown_in_doc(&doc);
+        let missing: Vec<String> = shown.iter().filter_map(|s| s.missing.as_ref().map(|m| format!("{}: {m}", s.label))).collect();
+        let committed = doc.committed_text();
+        let docx_text = inclusions::docx_body(&committed, &shown);
+        let (text, _) = inclusions::typst_body(&committed, &shown);
+        let (db, _) = self.paths(id)?;
+        let ident = storage::identity(&db).map_err(err)?.unwrap_or_else(|| id.to_string());
+        Ok(ExportInput { text, docx_text, header, preamble: Preamble::of(&doc), date_ms, ident, missing })
+    }
+
+    /// When a Milestone was named.
+    fn milestone_time(&mut self, id: &str, milestone: ChangeId, now_ms: u64) -> Result<u64, String> {
+        let find = |doc: &Doc| doc.milestones().into_iter().find(|m| m.id == milestone).map(|m| m.hlc.0);
+        let found = if self.works.contains_key(&self.current_id(id)) {
+            self.with_work(id, now_ms, |w, _| Ok(find(&w.doc)))?
+        } else {
+            let (db, _) = self.paths(id)?;
+            find(&storage::load(&db, self.device).map_err(err)?.1)
+        };
+        found.ok_or_else(|| "That Milestone isn't in this Work (deleted, or not here yet).".to_string())
     }
 
     /// What a PDF Export of a Work needs, after recording changed Styles (so the Export is
@@ -905,28 +991,44 @@ impl Vault {
         let shelf = Shelf::read(&self.root);
         let generation = self.library_generation;
         let typeset = |doc: &Doc| (doc.committed_text(), preamble::header(doc, preamble::uses(doc, &shelf, Version::Recorded), look), Preamble::of(doc));
-        let (db, (text, header, preamble)) = if self.works.contains_key(&self.current_id(id)) {
+        let (db, (text, header, preamble), shown) = if self.works.contains_key(&self.current_id(id)) {
+            // The versions of the included Works it shows now go in first (ADR 0015).
             self.with_work(id, now_ms, |w, _| {
+                if !w.has_cut() {
+                    w.close_burst(now_ms);
+                }
+                Ok(())
+            })?;
+            self.record_inclusions(id, now_ms);
+            let db = self.with_work(id, now_ms, |w, _| {
                 w.prepare_export(&shelf, generation, now_ms);
                 if let Some(problem) = &w.state(Vec::new()).save_error {
                     return Err(problem.clone());
                 }
-                Ok((w.db.clone(), typeset(&w.doc)))
-            })?
+                Ok(w.db.clone())
+            })?;
+            let shown = self.shown_in(id, true)?;
+            let work = self.works.get(&self.current_id(id)).ok_or_else(|| format!("{id} isn't open."))?;
+            (db, typeset(&work.doc), shown)
         } else {
             let (db, _) = self.paths(id)?;
             let (me, name) = (self.device, self.device_name());
             let (_, mut doc) = storage::load(&db, me).map_err(err)?;
-            let changes = preamble::record_unrecorded(&mut doc, &shelf, now_ms);
+            let mut changes = self.record_inclusions_in(&mut doc, now_ms);
+            changes.extend(preamble::record_unrecorded(&mut doc, &shelf, now_ms));
             if !changes.is_empty() {
                 storage::save(&db, &changes, &doc).map_err(err)?;
                 record_name(&db, &mut doc, name.as_deref(), now_ms)?;
             }
-            (db, typeset(&doc))
+            let shown = self.shown_in_doc(&doc);
+            (db, typeset(&doc), shown)
         };
+        let missing: Vec<String> = shown.iter().filter_map(|s| s.missing.as_ref().map(|m| format!("{}: {m}", s.label))).collect();
+        let docx_text = inclusions::docx_body(&text, &shown);
+        let (text, _) = inclusions::typst_body(&text, &shown);
         let date_ms = storage::read_all(&db).map_err(err)?.iter().map(|c| c.hlc.0).max().unwrap_or(0);
         let ident = storage::identity(&db).map_err(err)?.unwrap_or_else(|| id.to_string());
-        Ok(ExportInput { text, header, preamble, date_ms, ident })
+        Ok(ExportInput { text, docx_text, header, preamble, date_ms, ident, missing })
     }
 
     /// The Style update notice of every open Work, as the library is now.
@@ -1125,7 +1227,7 @@ fn name_of(path: &Path) -> String {
 
 /// What tests of the Vault's parts share.
 #[cfg(test)]
-mod tests_support {
+pub(crate) mod tests_support {
     use super::*;
 
     pub const ME: DeviceId = DeviceId(1);
@@ -1187,7 +1289,7 @@ mod tests {
         vault.edit("Rain", vec![typing(0, "The rain had stopped.")], 2000).unwrap();
         assert!(has_copy(&mut vault));
         // It compiles with the Preamble in front of its text.
-        let (text, header) = vault.typeset_input("Rain", None, 3000).unwrap();
+        let (text, header, _) = vault.typeset_input("Rain", None, 3000).unwrap();
         assert_eq!(text, "The rain had stopped.");
         assert!(header.text.contains("#show: wrtier-look-1"));
     }
@@ -1223,7 +1325,7 @@ mod tests {
         assert!(vault.set_preamble("Rain", &Preamble { language: "English".into(), ..p.clone() }, 3000).is_err());
         // Open again: it renders in Manuscript, from its own records.
         vault.open_work("Rain", 4000).unwrap();
-        let (_, header) = vault.typeset_input("Rain", None, 4000).unwrap();
+        let (_, header, _) = vault.typeset_input("Rain", None, 4000).unwrap();
         assert!(header.text.contains("// Look: Manuscript\n#let wrtier-look-1"), "{}", header.text);
         assert!(header.text.contains("#set document(title: \"Rain\")"));
     }
@@ -1253,7 +1355,7 @@ mod tests {
         assert!(alone.errors.is_empty() && alone.warnings.is_empty(), "{:?} {:?}", alone.errors, alone.warnings);
         // The app, in the Work's first Look.
         vault.open_work("Rain", 4000).unwrap();
-        let (text, header) = vault.typeset_input("Rain", None, 4000).unwrap();
+        let (text, header, _) = vault.typeset_input("Rain", None, 4000).unwrap();
         assert!(!text.contains("Preamble"), "the header isn't the Work's text");
         let app = t.compile_with("Rain", Path::new("no-fonts"), &header, text);
         assert_eq!(alone.pages, app.pages);
@@ -1307,7 +1409,7 @@ mod tests {
         vault.edit("Rain", vec![typing(0, "= The Long Night\n\nThe rain had stopped.")], 2000).unwrap();
         vault.tick(20_000);
         let mut t = crate::typeset::Typesetter::new(false);
-        let (text, header) = vault.typeset_input("Rain", None, 21_000).unwrap();
+        let (text, header, _) = vault.typeset_input("Rain", None, 21_000).unwrap();
         let before = pictures(&mut t, "now", &header, text);
         vault.make_milestone("Rain", "Draft 1", 22_000).unwrap();
         let milestone = vault.milestones("Rain", 22_000).unwrap().remove(0);
@@ -1319,11 +1421,11 @@ mod tests {
         assert!(vault.library_changed());
         vault.edit("Rain", vec![typing(37, " Then it rained again.")], 30_000).unwrap();
         vault.tick(50_000);
-        let (text, header) = vault.typeset_input("Rain", None, 51_000).unwrap();
+        let (text, header, _) = vault.typeset_input("Rain", None, 51_000).unwrap();
         assert_ne!(pictures(&mut t, "now", &header, text), before, "the Work itself looks different now");
 
         // The Milestone: its text and its Styles as they were, page for page.
-        let (text, header) = vault.typeset_input_at("Rain", &milestone.id, None, 52_000).unwrap();
+        let (text, header, _) = vault.typeset_input_at("Rain", &milestone.id, None, 52_000).unwrap();
         assert_eq!(text, "= The Long Night\n\nThe rain had stopped.");
         assert!(!header.text.contains("16pt"));
         assert_eq!(pictures(&mut t, "then", &header, text), before);
@@ -1331,7 +1433,7 @@ mod tests {
         // The same with the Work closed, and after the library's file is gone altogether.
         vault.close_work("Rain", 53_000);
         std::fs::remove_file(dir.path().join("styles/Book text.typ")).unwrap();
-        let (text, header) = vault.typeset_input_at("Rain", &milestone.id, None, 54_000).unwrap();
+        let (text, header, _) = vault.typeset_input_at("Rain", &milestone.id, None, 54_000).unwrap();
         assert_eq!(pictures(&mut t, "then", &header, text), before);
         assert!(vault.typeset_input_at("Rain", "00000001:999", None, 54_000).is_err());
     }
@@ -1423,7 +1525,9 @@ mod tests {
         let root = dir.path();
         let mut vault = open(root);
         work(root, "The Long Night", "It was dark.", ME);
-        work(root, "Short stories/Rain", "The rain had stopped.", ME);
+        // (From another Device: two Works without a given ID, begun by one Device in the same
+        // millisecond, would be one Work to `storage::identity`.)
+        work(root, "Short stories/Rain", "The rain had stopped.", OTHER);
         create_foreign_db(&root.join("addresses.db"));                           // hidden
         std::fs::write(root.join("Lone.typ"), "Written in vim.").unwrap();      // a new Work
         std::fs::create_dir_all(root.join(".stversions")).unwrap();             // Syncthing's old copies

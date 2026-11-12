@@ -954,8 +954,42 @@ fn version_from_str(s: &str) -> Result<Vec<(DeviceId, u32)>> {
 /// half a file. `header`: the Typst the app puts before the text (the Work's Preamble, ADR
 /// 0011), or "" for none; it's never part of the Work's text.
 pub fn write_text_file(db: &Path, text_file: &Path, doc: &Doc, header: &str, now_ms: u64) -> Result<()> {
+    write_text_file_with(db, text_file, doc, header, &Expansions::new(), now_ms)
+}
+
+/// What each Inclusion is written out as in the Text file (its whole block, see
+/// `text_file::inclusion_block`), by its character. An Inclusion missing here is written as an
+/// empty block.
+pub type Expansions = HashMap<CharId, String>;
+
+/// The Work's text as its Text file holds it: every Inclusion written out (ADR 0015).
+pub fn expanded_text(doc: &Doc, inclusions: &Expansions) -> String {
+    let text = doc.committed_text();
+    let found = doc.inclusions();
+    if found.is_empty() {
+        return text;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut next = found.iter().peekable();
+    for (i, c) in text.chars().enumerate() {
+        match next.peek() {
+            Some(&&(id, at)) if at == i => {
+                next.next();
+                match inclusions.get(&id) {
+                    Some(block) => out.push_str(block),
+                    None => out.push_str(&crate::text_file::inclusion_block(id, "an Inclusion", "")),
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// `write_text_file`, with the Work's Inclusions written out as `inclusions` says.
+pub fn write_text_file_with(db: &Path, text_file: &Path, doc: &Doc, header: &str, inclusions: &Expansions, now_ms: u64) -> Result<()> {
     // The header, the text, then the line naming the version it was written from (ADR 0010).
-    let text = crate::text_file::with_header_and_marker(header, &doc.committed_text(), &doc.version());
+    let text = crate::text_file::with_header_and_marker(header, &expanded_text(doc, inclusions), &doc.version());
     let conn = Connection::open(db)?;
     migrate(&conn)?;
     conn.execute(
@@ -999,8 +1033,10 @@ pub fn read_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -
         return Ok(TextFileRead::Known);
     }
     let (text, marked) = crate::text_file::split_marker(&contents);
-    // The header isn't the Work's text: an edit made inside it is dropped (the app says so).
+    // The header isn't the Work's text: an edit made inside it is dropped (the app says so),
+    // and neither is an Inclusion's block, which goes back to being the Inclusion's character.
     let (_, text) = crate::text_file::split_header(&text);
+    let (text, named) = crate::text_file::collapse_inclusions(&text);
     let base = match marked {
         Some(version) => {
             let seen: HashMap<DeviceId, u32> = doc.version().into_iter().collect();
@@ -1017,9 +1053,32 @@ pub fn read_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -
             .transpose()?,
     };
     drop(conn);
-    let changes = doc.import_text(base.as_deref(), &text, now_ms);
+    let mut changes = doc.import_text(base.as_deref(), &text, now_ms);
+    changes.extend(relink_inclusions(doc, &named, now_ms));
     save(db, &changes, doc)?;
     Ok(TextFileRead::Imported(changes))
+}
+
+/// After an External edit: an Inclusion's block moved in another editor too short a way to be
+/// read as a Move becomes a new character, so it gets what its block's start line named
+/// (`named`, one per block, in order) copied over. Returns the Changes doing it.
+fn relink_inclusions(doc: &mut Doc, named: &[Option<CharId>], now_ms: u64) -> Vec<Change> {
+    use crate::change::inclusion_record;
+    let found = doc.inclusions();
+    if found.len() != named.len() {
+        return Vec::new(); // the blocks don't line up with the Inclusions: nothing to go by
+    }
+    let mut changes = Vec::new();
+    for (&(id, _), &old) in found.iter().zip(named) {
+        let Some(old) = old.filter(|&old| old != id) else { continue };
+        if !doc.fields_of(&inclusion_record(id)).is_empty() || doc.index_of_char(old).is_some() {
+            continue; // it has its own, or the one named is still there
+        }
+        for (field, value) in doc.fields_of(&inclusion_record(old)) {
+            changes.push(doc.set_field_local(&inclusion_record(id), &field, &value, now_ms));
+        }
+    }
+    changes
 }
 
 /// `read_text_file`, for callers that only need the Changes (none if it was known or not yet).
@@ -1082,11 +1141,16 @@ pub fn wrote_text(db: &Path, text: &str) -> Result<bool> {
 /// became (empty if there was none). A file written from Changes this History doesn't have yet
 /// is left alone: it's newer.
 pub fn sync_text_file(db: &Path, text_file: &Path, doc: &mut Doc, header: &str, now_ms: u64) -> Result<Vec<Change>> {
+    sync_text_file_with(db, text_file, doc, header, &Expansions::new(), now_ms)
+}
+
+/// `sync_text_file`, with the Work's Inclusions written out as `inclusions` says.
+pub fn sync_text_file_with(db: &Path, text_file: &Path, doc: &mut Doc, header: &str, inclusions: &Expansions, now_ms: u64) -> Result<Vec<Change>> {
     let read = if text_file.exists() { read_text_file(db, text_file, doc, now_ms)? } else { TextFileRead::Known };
     match read {
         TextFileRead::NotYet => Ok(Vec::new()),
-        TextFileRead::Known => write_text_file(db, text_file, doc, header, now_ms).map(|()| Vec::new()),
-        TextFileRead::Imported(changes) => write_text_file(db, text_file, doc, header, now_ms).map(|()| changes),
+        TextFileRead::Known => write_text_file_with(db, text_file, doc, header, inclusions, now_ms).map(|()| Vec::new()),
+        TextFileRead::Imported(changes) => write_text_file_with(db, text_file, doc, header, inclusions, now_ms).map(|()| changes),
     }
 }
 

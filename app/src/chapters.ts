@@ -4,6 +4,10 @@
 // A Chapter starts at a line beginning "= " (as the History engine reads them) and runs to the
 // next Chapter, or to the next Part (a line starting `#part`), which stays where it is. Text
 // before the first of them isn't in any Chapter.
+//
+// An Inclusion (ADR 0015) on a line of its own is an entry too: one Chapter of another Work
+// counts as a Chapter here, and a whole Work as one section under its title. Like a Chapter, it
+// runs to the next entry, so text written after it goes with it when it's moved.
 
 import { wordsIn } from "./counts";
 
@@ -14,9 +18,16 @@ export type Item = {
   from: number;
   /** Where the next Chapter or Part starts, or the end of the text. */
   to: number;
-  /** Words in it, not counting its heading line. */
+  /** Words in it, not counting its heading line (an Inclusion's words included). */
   words: number;
+  /** It's an Inclusion: a Chapter of another Work, or a whole Work. */
+  included?: boolean;
+  /** For a whole included Work: its own Chapters, shown one level down. */
+  chapters?: { title: string; words: number }[];
 };
+
+/** An Inclusion as the Chapter list needs it: where its character is, and what it shows. */
+export type IncludedEntry = { at: number; title: string; words: number; chapters?: { title: string; words: number }[] };
 
 /** One Move: the text at `from`..`to` goes to `at` (positions before the Move). */
 export type MoveOp = { from: number; to: number; at: number };
@@ -35,22 +46,25 @@ function partTitle(line: string): string {
 }
 
 /** The Chapters and Parts of a text, in order. */
-export function chaptersIn(text: string): Item[] {
-  const items: Omit<Item, "to" | "words">[] = [];
+export function chaptersIn(text: string, included: IncludedEntry[] = []): Item[] {
+  const items: (Omit<Item, "to" | "words"> & { more: number })[] = [];
+  const inclusions = new Map(included.map((e) => [e.at, e]));
   let start = 0;
   while (start <= text.length) {
     let end = text.indexOf("\n", start);
     if (end === -1) end = text.length;
     const line = text.slice(start, end);
-    if (line.startsWith("= ")) items.push({ kind: "chapter", title: plainTitle(line.slice(2)) || "Untitled", from: start });
-    else if (PART.test(line)) items.push({ kind: "part", title: partTitle(line), from: start });
+    const inclusion = line === "￼" ? inclusions.get(start) : undefined;
+    if (inclusion) items.push({ kind: "chapter", title: inclusion.title, from: start, included: true, more: inclusion.words, ...(inclusion.chapters ? { chapters: inclusion.chapters } : {}) });
+    else if (line.startsWith("= ")) items.push({ kind: "chapter", title: plainTitle(line.slice(2)) || "Untitled", from: start, more: 0 });
+    else if (PART.test(line)) items.push({ kind: "part", title: partTitle(line), from: start, more: 0 });
     start = end + 1;
   }
-  return items.map((item, i) => {
+  return items.map(({ more, ...item }, i) => {
     const to = items[i + 1]?.from ?? text.length;
     const lineEnd = text.indexOf("\n", item.from);
     const body = lineEnd === -1 || lineEnd >= to ? "" : text.slice(lineEnd + 1, to);
-    return { ...item, to, words: wordsIn(body) };
+    return { ...item, to, words: wordsIn(body) + more };
   });
 }
 

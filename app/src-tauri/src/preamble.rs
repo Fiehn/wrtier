@@ -174,11 +174,13 @@ pub struct Uses {
     /// Each Look with its Styles, in the Preamble's order.
     pub looks: Vec<(Used, Vec<Used>)>,
     pub styles: Vec<Used>,
+    /// Styles given to single Inclusions (ADR 0015): recorded, but not applied to the whole Work.
+    pub inclusion_styles: Vec<Used>,
     /// Names the Work uses that can't be found anywhere.
     pub missing: Vec<String>,
 }
 
-fn find(doc: &Doc, shelf: &Shelf, version: Version, kind: Kind, name: &str) -> Option<Used> {
+pub(crate) fn find(doc: &Doc, shelf: &Shelf, version: Version, kind: Kind, name: &str) -> Option<Used> {
     let recorded = || doc.field(&record(kind, name), CONTENT).map(|c| Used {
         kind, name: name.to_string(), content: c.to_string(), label: format!("this Work's copy of {name}"),
     });
@@ -196,7 +198,29 @@ fn find(doc: &Doc, shelf: &Shelf, version: Version, kind: Kind, name: &str) -> O
 /// What the Work uses: the built-in Story elements, its own, its Looks with their Styles, and
 /// its extra Styles.
 pub fn uses(doc: &Doc, shelf: &Shelf, version: Version) -> Uses {
-    let preamble = Preamble::of(doc);
+    uses_plus(doc, shelf, version, &[])
+}
+
+/// The record holding the Author's own Story elements that the Work's Inclusions use, one name
+/// per line in its `names` field: the app records it with the versions of the included Works
+/// (ADR 0015), and they become part of the Work.
+pub const INCLUDED_ELEMENTS: &str = "included/story-elements";
+
+/// The Story elements the Work's Inclusions use, as it recorded them.
+pub fn included_elements(doc: &Doc) -> Vec<String> {
+    doc.field(INCLUDED_ELEMENTS, "names").unwrap_or("").lines().map(str::trim)
+        .filter(|l| !l.is_empty()).map(str::to_string).collect()
+}
+
+/// `uses`, plus Story elements its Inclusions use now that it hasn't recorded yet (the Page
+/// preview shows Inclusions as they are now).
+pub fn uses_plus(doc: &Doc, shelf: &Shelf, version: Version, extra_elements: &[String]) -> Uses {
+    let mut preamble = Preamble::of(doc);
+    for name in included_elements(doc).into_iter().chain(extra_elements.iter().cloned()) {
+        if !preamble.elements.contains(&name) {
+            preamble.elements.push(name);
+        }
+    }
     let mut missing = Vec::new();
     let get = |kind: Kind, name: &str, missing: &mut Vec<String>| {
         let found = find(doc, shelf, version, kind, name);
@@ -224,7 +248,16 @@ pub fn uses(doc: &Doc, shelf: &Shelf, version: Version) -> Uses {
         looks.push((look, styles));
     }
     let styles = preamble.styles.iter().filter_map(|s| get(Kind::Style, s, &mut missing)).collect();
-    Uses { elements, looks, styles, missing }
+    // Styles given to single Inclusions: recorded like the rest, but applied only inside them.
+    let mut inclusion_styles: Vec<Used> = Vec::new();
+    for record in doc.records("inclusion/") {
+        for name in doc.field(&record, "styles").unwrap_or("").lines().map(str::trim).filter(|l| !l.is_empty()) {
+            if !inclusion_styles.iter().any(|s| s.name == name) {
+                inclusion_styles.extend(get(Kind::Style, name, &mut missing));
+            }
+        }
+    }
+    Uses { elements, looks, styles, inclusion_styles, missing }
 }
 
 /// Everything the Work uses whose library version differs from what it recorded (or that it
@@ -233,7 +266,8 @@ pub fn unrecorded(doc: &Doc, shelf: &Shelf) -> Vec<(String, String)> {
     let uses = uses(doc, shelf, Version::Library);
     let all = uses.elements.iter()
         .chain(uses.looks.iter().flat_map(|(look, styles)| std::iter::once(look).chain(styles)))
-        .chain(&uses.styles);
+        .chain(&uses.styles)
+        .chain(&uses.inclusion_styles);
     let mut found: Vec<(String, String)> = Vec::new();
     for used in all {
         let record = record(used.kind, &used.name);
@@ -335,7 +369,7 @@ pub fn text_file_header(doc: &Doc, shelf: &Shelf) -> String {
 }
 
 /// A Typst string literal.
-fn string(s: &str) -> String {
+pub(crate) fn string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace(['\n', '\r'], " "))
 }
 

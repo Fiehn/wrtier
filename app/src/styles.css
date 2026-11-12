@@ -321,6 +321,28 @@ kbd {
   font-weight: 600;
 }
 
+/* Selected for a new Collection (Ctrl+click): outlined, with its place in the Collection. */
+#works li.picked > .entry {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.entry-pick {
+  margin-left: 6px;
+  min-width: 1.3em;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* A Work can be dragged into a Work's text, to include it there. */
+.entry[draggable="true"] {
+  -webkit-user-drag: element;
+}
+
 #works small {
   display: block;
   padding: 1px 9px 0;
@@ -1653,12 +1675,14 @@ dialog#reviewers {
   font-size: 13px;
 }
 
-.comments-detached-heading {
+.comments-detached-heading,
+.comments-included-heading {
   font-size: 13px;
   margin: 14px 0 2px;
 }
 
-.comments-detached-note {
+.comments-detached-note,
+.comments-included-note {
   font-size: 12px;
   margin: 0 0 8px;
 }
@@ -2647,4 +2671,148 @@ body.phone #write-toolbar button:disabled {
 
 #chapters-sheet #chapters > summary::-webkit-details-marker {
   display: none;
+}
+
+/* An Inclusion in the Raw view: its one uneditable `#inclusion(…)` line. */
+.cm-inclusion-raw {
+  color: var(--accent);
+  background: var(--panel);
+  border-radius: 3px;
+  padding: 0 2px;
+  cursor: default;
+}
+.cm-inclusion-raw.missing {
+  color: var(--warn-text);
+  background: var(--warn-bg);
+}
+
+/* An Inclusion (ADR 0015): another Work's text, shown read-only under a bar that names it. */
+.cm-inclusion {
+  border-left: 3px solid var(--accent);
+  background: var(--panel);
+  border-radius: 0 4px 4px 0;
+  margin: 0.4em 0;
+  padding: 0.2em 0.8em 0.4em;
+  cursor: default;
+}
+.cm-inclusion-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  font-family: system-ui, sans-serif;
+  font-size: 0.75em;
+  color: var(--muted);
+}
+.cm-inclusion-label {
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cm-inclusion-words {
+  margin-right: auto;
+}
+.cm-inclusion-styles,
+.cm-inclusion-fold,
+.cm-inclusion-go {
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.cm-inclusion-fold {
+  color: var(--muted);
+  width: 1.4em;
+}
+.cm-inclusion-styles:hover,
+.cm-inclusion-fold:hover,
+.cm-inclusion-go:hover {
+  background: var(--chip-hover);
+}
+.cm-inclusion-text {
+  white-space: pre-wrap;
+  color: var(--muted);
+  user-select: text;
+  padding-top: 0.3em;
+}
+.cm-inclusion.missing {
+  border-left-color: var(--warn-text);
+  background: var(--warn-bg);
+}
+.cm-inclusion-missing {
+  margin: 0.3em 0 0;
+  color: var(--warn-text);
+  font-family: system-ui, sans-serif;
+  font-size: 0.85em;
+}
+.cm-inclusion-text p {
+  margin: 0.5em 0;
+}
+.cm-inclusion-heading {
+  font-weight: bold;
+  margin: 0.6em 0 0.3em;
+}
+.cm-inclusion-heading.level-1 {
+  font-size: 1.4em;
+}
+.cm-inclusion-heading.level-2 {
+  font-size: 1.15em;
+}
+/* An Inclusion in the Chapter list (ADR 0015). */
+.chapter-included {
+  font-size: 0.75em;
+  color: var(--muted);
+  margin-left: 0.4em;
+}
+#chapters-list li.included .chapter-title {
+  font-style: italic;
+}
+.cm-inclusion:focus {
+  outline: none;
+}
+/* A whole included Work's own Chapters, a level down under it in the Chapter list. */
+#chapters-list li.included {
+  flex-wrap: wrap;
+}
+.chapter-sub {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0 0 0 14px;
+  flex-basis: 100%;
+  font-size: 0.9em;
+  color: var(--muted);
+}
+#chapters-list .chapter-sub li {
+  padding: 1px 0;
+  border: none;
+  cursor: inherit;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+/* The note about a new Chapter after an included one. */
+.cm-inclusion-split {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.6em;
+  margin-top: 0.3em;
+  padding: 0.3em 0.5em;
+  border-radius: 3px;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-family: system-ui, sans-serif;
+  font-size: 0.8em;
+}
+.cm-inclusion-split button {
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  padding: 0 0.2em;
+  cursor: pointer;
 }

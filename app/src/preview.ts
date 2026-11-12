@@ -269,6 +269,11 @@ export class PagePreview {
   }
 
   /** The Work shown, if any. */
+  /** The Milestone shown instead of the Work as it is now, if one: an Export from here is of it. */
+  get shownMilestone(): { id: string; name: string } | null {
+    return this.milestone;
+  }
+
   get shown(): string | null {
     return this.work;
   }

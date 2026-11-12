@@ -3,12 +3,14 @@
 // History and Comments go with it. Parts show as dividers, and stay where they are.
 // Its keys (next and previous Chapter, move this Chapter up or down) work through the same.
 
-import { chaptersIn, itemAt, mapThrough, neighbourDest, planMove, type Item, type MoveOp } from "./chapters";
+import { chaptersIn, itemAt, mapThrough, neighbourDest, planMove, type IncludedEntry, type Item, type MoveOp } from "./chapters";
 
 export type ChapterHooks = {
   /** The Work's text as its editor has it now (null if it isn't open). */
   textOf(id: string): string | null;
   cursorOf(id: string): number | null;
+  /** Its Inclusions, which are entries of their own (ADR 0015). */
+  includedOf(id: string): IncludedEntry[];
   /** Puts the cursor at `at` in the Work and shows it. */
   goTo(id: string, at: number): void;
   /** Moves text as Moves, then puts the cursor at `cursor` (in the text after them). */
@@ -62,10 +64,15 @@ export class ChapterList {
   private refresh() {
     clearTimeout(this.timer);
     const text = this.work ? this.hooks.textOf(this.work) : null;
-    this.items = text === null ? [] : chaptersIn(text);
+    this.items = text === null || !this.work ? [] : this.itemsOf(this.work, text);
     const at = this.work ? this.hooks.cursorOf(this.work) : null;
     this.current = at === null ? -1 : itemAt(this.items, at);
     this.render();
+  }
+
+  /** A Work's entries: its Chapters and Parts, and its Inclusions. */
+  private itemsOf(id: string, text: string): Item[] {
+    return chaptersIn(text, this.hooks.includedOf(id));
   }
 
   // ---- Its keys ----
@@ -78,7 +85,7 @@ export class ChapterList {
     const text = this.hooks.textOf(id);
     const at = this.hooks.cursorOf(id);
     if (text === null || at === null) return false;
-    const chapters = chaptersIn(text).filter((i) => i.kind === "chapter");
+    const chapters = this.itemsOf(id, text).filter((i) => i.kind === "chapter");
     const target = direction === 1 ? chapters.find((i) => i.from > at) : [...chapters].reverse().find((i) => i.from < at);
     if (target) this.hooks.goTo(id, target.from);
     return true;
@@ -89,7 +96,7 @@ export class ChapterList {
     const text = this.hooks.textOf(id);
     const at = this.hooks.cursorOf(id);
     if (text === null || at === null) return false;
-    const items = chaptersIn(text);
+    const items = this.itemsOf(id, text);
     const index = itemAt(items, at);
     const dest = neighbourDest(items, index, direction, text.length);
     if (dest !== null) this.moveTo(id, text, items[index], dest, at);
@@ -117,6 +124,13 @@ export class ChapterList {
       title.className = "chapter-title";
       title.textContent = item.title;
       li.append(title);
+      if (item.included) {
+        li.classList.add("included");
+        const mark = document.createElement("span");
+        mark.className = "chapter-included";
+        mark.textContent = "included";
+        li.append(mark);
+      }
       if (item.kind === "chapter") {
         const words = document.createElement("span");
         words.className = "chapter-words";
@@ -138,6 +152,24 @@ export class ChapterList {
         });
       }
       li.addEventListener("click", () => this.work && this.hooks.goTo(this.work, item.from));
+      // A whole included Work: its own Chapters, a level down (they go with it; clicking one
+      // goes to the Inclusion).
+      if (item.chapters?.length) {
+        const sub = document.createElement("ul");
+        sub.className = "chapter-sub";
+        for (const c of item.chapters) {
+          const row = document.createElement("li");
+          const t = document.createElement("span");
+          t.className = "chapter-title";
+          t.textContent = c.title;
+          const w = document.createElement("span");
+          w.className = "chapter-words";
+          w.textContent = c.words.toLocaleString();
+          row.append(t, w);
+          sub.append(row);
+        }
+        li.append(sub);
+      }
       this.dropTarget(li, index);
       return li;
     });
@@ -174,7 +206,7 @@ export class ChapterList {
       // The text as it is now: if its Chapters changed meanwhile, start again from the list.
       const text = this.hooks.textOf(this.work);
       if (text === null) return;
-      const items = chaptersIn(text);
+      const items = this.itemsOf(this.work, text);
       if (items.length !== this.items.length || items[from]?.title !== this.items[from]?.title) {
         this.refresh();
         return;

@@ -72,7 +72,7 @@ fn free_folder(base: &Path, path: &str) -> Result<String, String> {
 }
 
 impl Vault {
-    fn trash_root(&self) -> PathBuf {
+    pub(super) fn trash_root(&self) -> PathBuf {
         self.root.join(TRASH)
     }
 
