@@ -17,8 +17,18 @@ tempfile = "3"
 
 # The History engine (this crate) and the Tauri app share one target folder and lock file.
 [workspace]
-members = ["app/src-tauri"]
+members = ["app/src-tauri", "typst-docx"]
 exclude = ["spikes"]  # throwaway Phase 0 code, built on its own
+
+# Typst, pinned once: `typst-docx` reads the app's compiled documents, so both must use the
+# very same version (ADR 0016).
+[workspace.dependencies]
+typst = "0.15.1"
+typst-layout = "0.15.1"
+typst-svg = "0.15.1"
+typst-pdf = "0.15.1"
+typst-ide = "0.15.1"
+typst-kit = { version = "0.15.1", default-features = false }
 
 # Profiles only take effect here at the workspace root; members' profiles are ignored.
 

@@ -1,0 +1,15 @@
+[package]
+name = "typst-docx"
+version = "0.1.0"
+description = "Turns a compiled Typst document into an editable .docx with named Word styles"
+edition = "2024"
+license = "Apache-2.0"
+publish = false  # until it's stable; check the name doesn't pass for one of Typst's own crates first
+
+[dependencies]
+# The same Typst as the caller, pinned once in the workspace root Cargo.toml.
+typst.workspace = true
+typst-layout.workspace = true
+
+[dev-dependencies]
+typst-kit = { workspace = true, features = ["embedded-fonts"] }  # Typst's bundled fonts, for tests
