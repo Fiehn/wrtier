@@ -13,3 +13,4 @@ typst-layout.workspace = true
 
 [dev-dependencies]
 typst-kit = { workspace = true, features = ["embedded-fonts"] }  # Typst's bundled fonts, for tests
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2"] }  # the font spike's sample .docx
