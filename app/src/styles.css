@@ -1785,10 +1785,50 @@ dialog#reviewers {
   font-size: 13px;
 }
 
-.comments-detached-heading,
-.comments-included-heading {
+.comments-section-heading {
   font-size: 13px;
   margin: 14px 0 2px;
+}
+
+.comments-on-work-heading,
+.comments-on-text-heading {
+  margin-bottom: 8px;
+}
+
+/* The heading folds its section: a caret, the title, and how many it holds. */
+.comments-section-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.comments-section-toggle::before {
+  content: "▾";
+  width: 10px;
+  color: var(--muted);
+}
+
+.comments-section-toggle[aria-expanded="false"]::before {
+  content: "▸";
+}
+
+.comments-section-count {
+  color: var(--muted);
+  font-weight: normal;
+  font-size: 12px;
+}
+
+.comments-on-work-button {
+  display: block;
+  margin: 0 0 8px;
 }
 
 .comments-detached-note,

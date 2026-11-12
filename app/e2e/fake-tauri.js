@@ -78,8 +78,15 @@
       }
       case "comment":
         fake.comments.push({
-          id: `c${fake.comments.length + 1}`, ranges: [[op.from, op.to]], sender: op.sender, name: "Author", colour: "author",
+          id: `c${fake.comments.length + 1}`, ranges: [[op.from, op.to]], onWork: false, sender: op.sender, name: "Author", colour: "author",
           body: op.body, resolved: false, quote: t.slice(op.from, op.to), timeMs: now, replies: [], otherBody: null,
+        });
+        break;
+      case "workComment":
+        // Rust lists Work comments first, oldest first.
+        fake.comments.splice(fake.comments.filter((c) => c.onWork).length, 0, {
+          id: `c${fake.comments.length + 1}`, ranges: [], onWork: true, sender: op.sender, name: "Author", colour: "author",
+          body: op.body, resolved: false, quote: "", timeMs: now, replies: [], otherBody: null,
         });
         break;
       case "include": {
@@ -182,7 +189,7 @@
       let changed = false;
       for (const op of ops) changed = apply(id, op) || changed;
       if (changed) fake.changes += 1;
-      const wantsMarks = ops.some((op) => op.op === "marks" || op.op === "comment");
+      const wantsMarks = ops.some((op) => op.op === "marks" || op.op === "comment" || op.op === "workComment");
       return workState(id, wantsMarks ? { marks: fake.comments } : {});
     },
     work_text: ({ id }) => ({ text: fake.texts[id], state: workState(id) }),

@@ -590,12 +590,12 @@ export class Tabs {
    * Text selected inside one of a Work's Inclusions, if that's where the selection is: the
    * Inclusion's character, the selection in its text, and what it includes.
    */
-  includedSelectionOf(id: string): { at: number; from: number; to: number; quote: string; label: string } | null {
+  includedSelectionOf(id: string): { at: number; from: number; to: number; quote: string; label: string; work: string | null } | null {
     const tab = this.find(id);
     if (!tab?.isWork) return null;
     const picked = includedSelection(tab.view);
     const v = picked && inclusionsOf(tab.view.state).find((i) => i.at === picked.at);
-    return picked && v ? { ...picked, label: v.label } : null;
+    return picked && v ? { ...picked, label: v.label, work: v.work } : null;
   }
 
   /** The Comments shown on a Work's Inclusions, by the Work they belong to. */

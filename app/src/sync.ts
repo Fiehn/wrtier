@@ -41,6 +41,7 @@ export type HistoryOp =
 /** Something done to Comments. Sent in order with the typing; Rust closes the open burst first. */
 export type CommentOp =
   | { op: "comment"; from: number; to: number; sender: string; body: string }
+  | { op: "workComment"; sender: string; body: string }
   | { op: "reply"; comment: string; sender: string; body: string }
   | { op: "editComment"; id: string; body: string }
   | { op: "setCommentSender"; id: string; sender: string }
@@ -64,15 +65,17 @@ export type ReplyMark = {
 /** A Comment: its highlight, and what the Comments panel shows (work.rs `Mark`). Positions are UTF-16, in the editor's text. */
 export type Mark = {
   id: string;
-  /** Empty: the Comment is detached. */
+  /** Empty: the Comment is detached, or a Work comment. */
   ranges: [number, number][];
+  /** A Work comment: on the Work as a whole, with no text and no quote. */
+  onWork: boolean;
   sender: string;
   name: string;
   /** A colour slot, "author" or "unknown". */
   colour: string;
   body: string;
   resolved: boolean;
-  /** The text it was attached to, as selected. */
+  /** The text it was attached to, as selected; empty for a Work comment. */
   quote: string;
   timeMs: number;
   replies: ReplyMark[];

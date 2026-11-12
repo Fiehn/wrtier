@@ -63,6 +63,8 @@ pub enum Op {
     // current name, which the Work records just before (so its `.db` reads on its own).
     /// A new Comment on `from..to`.
     Comment { from: usize, to: usize, sender: String, body: String, #[serde(skip)] sender_name: Option<String> },
+    /// A new Work comment: on the Work as a whole, not on any of its text.
+    WorkComment { sender: String, body: String, #[serde(skip)] sender_name: Option<String> },
     Reply { comment: String, sender: String, body: String, #[serde(skip)] sender_name: Option<String> },
     /// A new body for a Comment or Reply.
     EditComment { id: String, body: String },
@@ -108,7 +110,8 @@ impl Op {
     /// The Reviewer a Comment op names, for the Vault to fill in their name.
     pub fn sender_mut(&mut self) -> Option<(&str, &mut Option<String>)> {
         match self {
-            Op::Comment { sender, sender_name, .. } | Op::Reply { sender, sender_name, .. } | Op::SetCommentSender { sender, sender_name, .. } => {
+            Op::Comment { sender, sender_name, .. } | Op::WorkComment { sender, sender_name, .. } | Op::Reply { sender, sender_name, .. }
+            | Op::SetCommentSender { sender, sender_name, .. } => {
                 Some((sender.as_str(), sender_name))
             }
             _ => None,
@@ -154,8 +157,11 @@ pub struct Tint {
 #[serde(rename_all = "camelCase")]
 pub struct Mark {
     pub id: String,
-    /// Where its text is: from..to in UTF-16, in reading order. Empty: it's detached.
+    /// Where its text is: from..to in UTF-16, in reading order. Empty: it's detached, or a Work
+    /// comment.
     pub ranges: Vec<(usize, usize)>,
+    /// A Work comment: on the Work as a whole, with no text and no quote.
+    pub on_work: bool,
     /// `author` or `reviewer/<id>`.
     pub sender: String,
     /// Who sent it, as the app shows them, and their colour slot (or "author", or "unknown").
@@ -164,7 +170,7 @@ pub struct Mark {
     pub colour: String,
     pub body: String,
     pub resolved: bool,
-    /// The text it was attached to, as selected.
+    /// The text it was attached to, as selected; empty for a Work comment.
     pub quote: String,
     /// When it was made (ms since 1970).
     pub time_ms: u64,
@@ -473,6 +479,7 @@ impl OpenWork {
             let id = c.id.to_string();
             Mark {
                 ranges: c.ranges.iter().map(|&(from, to)| (self.positions.to_utf16(from), self.positions.to_utf16(to))).collect(),
+                on_work: c.on_work,
                 sender: c.sender,
                 name: String::new(),
                 colour: String::new(),
@@ -530,6 +537,10 @@ impl OpenWork {
                 }
                 self.record_sender(&sender, sender_name.as_deref(), now_ms);
                 self.doc.comment_local(f, t - f, &sender, &body, now_ms)
+            }
+            Op::WorkComment { sender, body, sender_name } => {
+                self.record_sender(&sender, sender_name.as_deref(), now_ms);
+                self.doc.work_comment_local(&sender, &body, now_ms)
             }
             Op::Reply { comment, sender, body, sender_name } => {
                 let comment = self.comment_id(&comment, false)?;
@@ -1008,7 +1019,7 @@ impl OpenWork {
                 let changes = target.record(&mut self.doc, *id, now_ms);
                 self.unsaved.extend(changes);
             }
-            op @ (Op::Comment { .. } | Op::Reply { .. } | Op::EditComment { .. } | Op::SetCommentSender { .. }
+            op @ (Op::Comment { .. } | Op::WorkComment { .. } | Op::Reply { .. } | Op::EditComment { .. } | Op::SetCommentSender { .. }
                 | Op::Resolve { .. } | Op::DeleteComment { .. }) => self.apply_comment_op(op, now_ms)?,
             op @ (Op::Revert { .. } | Op::Restore { .. } | Op::ReturnTo { .. }) => self.apply_history_op(op, now_ms)?,
         }
@@ -1337,6 +1348,21 @@ mod tests {
 
     fn comment_op(from: usize, to: usize, sender: &str, body: &str) -> Op {
         Op::Comment { from, to, sender: sender.into(), body: body.into(), sender_name: None }
+    }
+
+    #[test]
+    fn a_work_comment_closes_the_burst_covers_no_text_and_records_its_reviewer() {
+        let (_dir, mut w) = work("The rain had stopped.");
+        w.edit(vec![typing(21, " Then")], None, None, 1000).unwrap(); // a burst is open
+        let op = Op::WorkComment { sender: "reviewer/7f3a0001".into(), body: "the ending drags".into(), sender_name: Some("Anna".into()) };
+        let state = w.edit(vec![comment_op(4, 8, wrtier::change::AUTHOR, "too wet?"), op, Op::Marks], None, None, 1100).unwrap();
+        assert!(state.burst.is_none(), "the burst was recorded first");
+        let marks = state.marks.unwrap();
+        assert_eq!(marks.iter().map(|m| (m.on_work, m.body.as_str())).collect::<Vec<_>>(), [(true, "the ending drags"), (false, "too wet?")]);
+        assert_eq!((marks[0].ranges.as_slice(), marks[0].quote.as_str()), ([].as_slice(), ""));
+        assert_eq!(w.doc.field("reviewer/7f3a0001", "name"), Some("Anna"), "the Reviewer's name was recorded with it");
+        let (_, reopened) = storage::load(&w.db, DeviceId(1)).unwrap();
+        assert!(reopened.comments()[0].on_work, "saved");
     }
 
     #[test]

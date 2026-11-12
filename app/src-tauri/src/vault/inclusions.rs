@@ -367,12 +367,14 @@ fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]) -> Vec<cr
                 }
             }
         }
+        // Detached ones aren't shown on the Inclusion, and nor are Work comments: they're
+        // about the included Work as a whole, so they show only in it.
         if ranges.is_empty() {
             return None;
         }
         let id = c.id.to_string();
         Some(crate::work::Mark {
-            id, ranges, sender: c.sender, name: String::new(), colour: String::new(), body: c.body,
+            id, ranges, on_work: false, sender: c.sender, name: String::new(), colour: String::new(), body: c.body,
             resolved: c.resolved, quote: c.quote, time_ms: c.hlc.0, other_body: None,
             replies: c.replies.into_iter().map(|r| crate::work::ReplyMark {
                 id: r.id.to_string(), sender: r.sender, name: String::new(), colour: String::new(),

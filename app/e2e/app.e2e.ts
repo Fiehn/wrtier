@@ -144,6 +144,55 @@ test("right-click on a selection adds a Comment", async ({ app }) => {
   await expect(app.locator(".cm-comment", { hasText: "Morning came slowly." })).toBeVisible();
 });
 
+test("the Comments panel adds a Work comment, listed first with no quote", async ({ app }) => {
+  // One on the text first, so the Work comment has something to come before.
+  await selectLine(app, "Morning came slowly.");
+  await line(app, "Morning came slowly.").click({ button: "right", position: { x: 30, y: 8 } });
+  await app.getByRole("menuitem", { name: /Add Comment/ }).click();
+  await app.locator("#comments-new textarea").fill("Too slow?");
+  await app.locator("#comments-new").getByRole("button", { name: "Save" }).click();
+  await expect(app.locator(".comment-card")).toHaveCount(1);
+
+  await app.getByRole("button", { name: "Comment on this Work" }).click();
+  await expect(app.locator("#comments-new")).toContainText("New Comment on the whole Work");
+  await expect(app.locator(".cm-comment-pending")).toHaveCount(0);
+  await app.locator("#comments-new textarea").fill("The ending drags.");
+  await app.locator("#comments-new").getByRole("button", { name: "Save" }).click();
+
+  await expect.poll(async () => (await ops(app)).find((op) => op.op === "workComment")).toBeTruthy();
+  const sent = (await ops(app)).find((op) => op.op === "workComment")!;
+  expect([sent.sender, sent.body]).toEqual(["author", "The ending drags."]);
+  await expect(app.locator("#comments-new")).toBeHidden();
+  await expect(app.locator("#comments-list .comments-section-title")).toHaveText(["On the whole Work", "On the text"]);
+  const cards = app.locator(".comment-card");
+  await expect(cards).toHaveCount(2);
+  await expect(cards.first()).toContainText("The ending drags.");
+  await expect(cards.first().locator(".comment-quote")).toHaveCount(0);
+  await expect(cards.nth(1).locator(".comment-quote")).toHaveText("Morning came slowly.");
+
+  // Each kind folds under its heading, remembered on this Device.
+  const onWork = app.locator(".comments-on-work-heading button");
+  await onWork.click();
+  await expect(onWork).toHaveAttribute("aria-expanded", "false");
+  await expect(onWork).toContainText("1");
+  await expect(cards).toHaveCount(1);
+  await expect(cards.first()).toContainText("Too slow?");
+  expect(await app.evaluate(() => localStorage.getItem("comments-folded"))).toBe(JSON.stringify(["work"]));
+  await app.locator(".comments-on-text-heading button").click();
+  await expect(cards).toHaveCount(0);
+  await expect(app.locator("#comments-list .comments-section-title")).toHaveText(["On the whole Work", "On the text"]);
+  await onWork.click();
+  await expect(cards).toHaveCount(1);
+  await expect(cards.first()).toContainText("The ending drags.");
+
+  // Clicking a highlight unfolds the text's Comments to show it.
+  await app.locator(".cm-comment", { hasText: "Morning came slowly." }).click();
+  await expect(cards).toHaveCount(2);
+  await expect(app.locator(".comment-card.focused")).toContainText("Too slow?");
+  await app.locator(".comments-on-work-heading button").click();
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/work-comment.png` : undefined });
+});
+
 test("the sidebar and the right panel hide and show", async ({ app }) => {
   const sidebar = app.locator("#sidebar");
   const panel = app.locator("#side-panel");
@@ -443,7 +492,7 @@ test("a Comment on included text is kept in the Work it comes from, and shown he
   expect(sent).toMatchObject({ id: "Rain", from: 23 + "It measured a ".length, to: 23 + "It measured a quarter inch".length, body: "How much, exactly?" });
   // Shown on the Inclusion, and in the Comments panel under the Inclusion.
   await expect(app.locator(".cm-inclusion .cm-comment")).toHaveText("quarter inch");
-  await expect(app.locator(".comments-included-heading")).toHaveText("In Zampanò: The Navidson Record");
+  await expect(app.locator(".comments-included-heading .comments-section-title")).toHaveText("In Zampanò: The Navidson Record");
   const card = app.locator(".comment-card", { hasText: "How much, exactly?" });
   await expect(card).toBeVisible();
   await expect(app.locator("#counts")).toContainText("(12 included)");

@@ -476,14 +476,15 @@ impl Doc {
     }
 
     /// How many Comments now attached to text would be Detached comments after returning to a
-    /// Milestone (keeping nothing): none of the text they cover is in the Milestone's text.
+    /// Milestone (keeping nothing): none of the text they cover is in the Milestone's text. Work
+    /// comments have no text, so they never count.
     pub fn detached_by_return(&self, milestone: ChangeId) -> usize {
         let seen = self.milestone(milestone).clone();
         let (_, nodes) = self.view_among(&|c| holds(&seen, c));
         let there: rustc_hash::FxHashSet<u32> = nodes.into_iter().collect();
         let order = self.tree.order();
         let pos = positions(&order, self.tree.len());
-        let attached: Vec<ChangeId> = self.comments().into_iter().filter(|c| !c.is_detached()).map(|c| c.id).collect();
+        let attached: Vec<ChangeId> = self.comments().into_iter().filter(|c| !c.ranges.is_empty()).map(|c| c.id).collect();
         self.comments.iter()
             .filter(|c| attached.contains(&c.id))
             .filter(|c| !c.pieces.iter().any(|span| {
@@ -664,12 +665,13 @@ mod tests {
         doc.set_field_local("style/Book text", "content", "#set text(size: 11pt)", 3_000);
         doc.comment_local(22, 5, AUTHOR, "new?", 4_000); // on "Gulls", written after Draft 1
         doc.comment_local(4, 4, AUTHOR, "rain?", 5_000); // on "rain", in Draft 1
+        doc.work_comment_local(AUTHOR, "too short?", 5_500); // on the whole Work: no text to lose
         let draft2 = doc.make_milestone_local("Draft 2", 6_000); // at the end of the sitting
         let parts = doc.sessions();
         let later = parts.iter().find(|p| p.changes.contains(&gulls.id)).unwrap();
         let left = doc.left_out(&later.changes);
         assert_eq!(left.library, vec!["style/Book text".to_string()]);
-        assert_eq!(left.comments, 2);
+        assert_eq!(left.comments, 3);
         assert_eq!(left.milestones, vec![draft2.id], "named in this part; Draft 1 is the divider before it");
         let earlier = parts.iter().find(|p| p.changes.contains(&text.id)).unwrap();
         assert!(doc.left_out(&earlier.changes).milestones.is_empty());

@@ -17,6 +17,7 @@ enum Action {
     Mark { device: usize },
     Return { device: usize, pick: u16 },
     Comment { device: usize, at: u16, len: u8 },
+    WorkComment { device: usize },
     Reply { device: usize, pick: u16 },
     EditComment { device: usize, pick: u16, body: u8 },
     Resolve { device: usize, pick: u16, resolved: bool },
@@ -37,6 +38,7 @@ fn action() -> impl Strategy<Value = Action> {
         (0..3usize).prop_map(|device| Action::Mark { device }),
         (0..3usize, any::<u16>()).prop_map(|(device, pick)| Action::Return { device, pick }),
         (0..3usize, any::<u16>(), 1..6u8).prop_map(|(device, at, len)| Action::Comment { device, at, len }),
+        (0..3usize).prop_map(|device| Action::WorkComment { device }),
         (0..3usize, any::<u16>()).prop_map(|(device, pick)| Action::Reply { device, pick }),
         (0..3usize, any::<u16>(), 0..3u8).prop_map(|(device, pick, body)| Action::EditComment { device, pick, body }),
         (0..3usize, any::<u16>(), any::<bool>()).prop_map(|(device, pick, resolved)| Action::Resolve { device, pick, resolved }),
@@ -211,6 +213,14 @@ fn run(actions: &[Action]) {
                 changes[*device].push(change);
                 now_ms += 1;
             }
+            Action::WorkComment { device } => {
+                let change = docs[*device].work_comment_local(AUTHOR, "overall", now_ms - skew[*device]);
+                let made = docs[*device].comments().into_iter().find(|c| c.id == change.id).unwrap();
+                assert!(made.on_work && made.ranges.is_empty() && !made.is_detached());
+                all.push(change.clone());
+                changes[*device].push(change);
+                now_ms += 1;
+            }
             Action::Reply { device, pick } => {
                 let comments = docs[*device].comments();
                 if comments.is_empty() {
@@ -282,6 +292,7 @@ fn run(actions: &[Action]) {
     // Every Comment's ranges are in order, apart, and inside the text.
     let len = docs[0].text().chars().count();
     for comment in docs[0].comments() {
+        assert!(!comment.on_work || comment.ranges.is_empty(), "a Work comment covers no text");
         assert!(comment.ranges.windows(2).all(|w| w[0].1 < w[1].0), "ranges in order and apart: {:?}", comment.ranges);
         assert!(comment.ranges.iter().all(|&(start, end)| start < end && end <= len));
     }
