@@ -64,6 +64,10 @@
       case "cut":
         t = t.slice(0, op.from) + t.slice(op.to);
         break;
+      case "replace":
+        // Find and replace: word edits in the text as it was, applied last first.
+        for (const e of [...op.edits].sort((x, y) => y.from - x.from)) t = t.slice(0, e.from) + e.text + t.slice(e.to);
+        break;
       case "move": {
         // `at` is where the text goes, counted in the text before the move.
         const piece = t.slice(op.from, op.to);

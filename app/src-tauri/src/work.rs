@@ -80,8 +80,8 @@ pub enum Op {
     /// Returns the content to a Milestone, except the Changes in `keep`.
     ReturnTo { milestone: String, keep: Vec<String> },
     /// Where some characters are now (a History snippet was clicked): answered in
-    /// `WorkState::found`, in the editor's text, through the queue so it fits like patches.
-    Find { first: String, last: Option<String> },
+    /// `WorkState::located`, in the editor's text, through the queue so it fits like patches.
+    Locate { first: String, last: Option<String> },
     /// "History of this text": the History tab narrows to `from..to` (or, empty, the paragraph
     /// the cursor is in). The open burst closes first. Answered in `WorkState::stretch`.
     Stretch { from: usize, to: usize },
@@ -89,6 +89,19 @@ pub enum Op {
     /// Vault), or the Chapter starting at `chapter` in its text (UTF-16) (ADR 0015). The Vault
     /// fills in `target`, the record it gets, since only it can find the Work.
     Include { at: usize, work: String, chapter: Option<usize>, #[serde(skip)] target: Option<crate::vault::Target> },
+    /// Find and replace: the words that differ between the matches and their replacements
+    /// (`edits`, in the text as it was before any of them, not overlapping), as one action that
+    /// Ctrl+Z takes back whole. `find`, `with` and `count` say what it was, for the History view.
+    /// The open burst closes first.
+    Replace { edits: Vec<ReplaceOpEdit>, find: String, with: String, count: usize },
+}
+
+/// One word-level edit of an `Op::Replace`: `from..to` (UTF-16) becomes `text`.
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ReplaceOpEdit {
+    pub from: usize,
+    pub to: usize,
+    pub text: String,
 }
 
 impl Op {
@@ -225,11 +238,11 @@ pub struct WorkState {
     pub marks: Option<Vec<Mark>>,
     /// The newest Sessions' text, in the answer to a batch with `Op::Tints`.
     pub tints: Option<Vec<Tint>>,
-    /// Where an `Op::Find`'s characters are (UTF-16, in the editor's text), in the answer to a
+    /// Where an `Op::Locate`'s characters are (UTF-16, in the editor's text), in the answer to a
     /// batch with one; None in it if they aren't shown any more. Left out of other answers
     /// (so the interface can tell "not asked" from "not shown").
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub found: Option<Option<(usize, usize)>>,
+    pub located: Option<Option<(usize, usize)>>,
     /// The text an `Op::Stretch` picked, quoted for the History tab's bar, in the answer to a
     /// batch with one; None in it if there was no text there (an empty line).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -409,7 +422,7 @@ impl OpenWork {
             notices: self.notice_count(),
             marks: None,
             tints: None,
-            found: None,
+            located: None,
             stretch: None,
         }
     }
@@ -595,7 +608,7 @@ impl OpenWork {
     }
 
     /// Where some characters are in the editor's text (UTF-16), if they're shown.
-    fn find(&self, first: &str, last: Option<&str>) -> Option<(usize, usize)> {
+    fn locate(&self, first: &str, last: Option<&str>) -> Option<(usize, usize)> {
         let first: CharId = first.parse().ok()?;
         let last: Option<CharId> = match last {
             Some(l) => Some(l.parse().ok()?),
@@ -779,11 +792,11 @@ impl OpenWork {
     pub fn edit(&mut self, ops: Vec<Op>, device_name: Option<&str>, library: Option<(&crate::preamble::Shelf, u64)>, now_ms: u64) -> Result<WorkState, String> {
         let want_marks = ops.contains(&Op::Marks);
         let want_tints = ops.contains(&Op::Tints);
-        let find = ops.iter().rev().find_map(|op| match op {
-            Op::Find { first, last } => Some((first.clone(), last.clone())),
+        let locate = ops.iter().rev().find_map(|op| match op {
+            Op::Locate { first, last } => Some((first.clone(), last.clone())),
             _ => None,
         });
-        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks | Op::Tints | Op::Find { .. } | Op::Stretch { .. })) {
+        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks | Op::Tints | Op::Locate { .. } | Op::Stretch { .. })) {
             self.name_this_device(device_name, now_ms)?;
             self.record_styles(library, now_ms);
         }
@@ -815,9 +828,9 @@ impl OpenWork {
         let took_in = self.took_in.take();
         let marks = want_marks.then(|| self.marks());
         let tints = want_tints.then(|| self.tints());
-        let found = find.map(|(first, last)| self.find(&first, last.as_deref()));
+        let located = locate.map(|(first, last)| self.locate(&first, last.as_deref()));
         let stretch = self.stretch_answer.take();
-        result.map(|()| WorkState { took_in, marks, tints, found, stretch, ..self.state(patches) })
+        result.map(|()| WorkState { took_in, marks, tints, located, stretch, ..self.state(patches) })
     }
 
     /// Records this Device's name in the Work before its first edit in a sitting, while no burst
@@ -954,7 +967,7 @@ impl OpenWork {
             Op::Undo => self.undo(now_ms),
             Op::Redo => self.redo(now_ms),
             Op::Sync => self.take_in(now_ms)?,
-            Op::Marks | Op::Tints | Op::Find { .. } => {} // answered at the end of the batch
+            Op::Marks | Op::Tints | Op::Locate { .. } => {} // answered at the end of the batch
             Op::Stretch { from, to } => {
                 let (f, t) = self.chars(from, to)?;
                 self.close_burst(now_ms);
@@ -964,6 +977,26 @@ impl OpenWork {
                     self.stretch = picked;
                 }
                 self.stretch_answer = Some(answer);
+            }
+            Op::Replace { edits, find, with, count } => {
+                self.authored();
+                self.close_burst(now_ms);
+                let mut chars = Vec::with_capacity(edits.len());
+                for e in &edits {
+                    let (f, t) = self.chars(e.from, e.to)?;
+                    chars.push(wrtier::doc::ReplaceEdit { index: f, len: t - f, text: e.text.clone() });
+                }
+                let mut sorted = chars.clone();
+                sorted.sort_by_key(|e| e.index);
+                if sorted.windows(2).any(|w| w[0].index + w[0].len > w[1].index) {
+                    return Err("a replacement whose parts overlap".into());
+                }
+                let changes = self.doc.replace_matches_local(&chars, &find, &with, count, now_ms);
+                self.recorded(changes);
+                // Last first, so each one's place still holds.
+                for e in sorted.iter().rev() {
+                    self.positions.edit(e.index, e.len, &e.text);
+                }
             }
             Op::Include { at, target, .. } => {
                 let target = target.ok_or("that Work couldn't be found to include")?;
@@ -1010,7 +1043,8 @@ impl OpenWork {
     }
 
     /// Ctrl+Z beyond the editor's own undo: drops the open burst (or waiting cut) if there is
-    /// one, otherwise reverts this sitting's latest Change still in effect.
+    /// one, otherwise reverts this sitting's latest Change still in effect. A Replace all (or a
+    /// Replace that rewrote several words) is taken back whole, as one Revert.
     fn undo(&mut self, now_ms: u64) {
         if self.doc.burst().is_some() {
             self.cut = None;
@@ -1019,8 +1053,12 @@ impl OpenWork {
         }
         let latest = self.sitting.iter().rev().copied().find(|&id| self.doc.is_in_effect(id));
         if let Some(target) = latest {
-            let change = self.doc.revert_local(target, true, now_ms);
-            self.unsaved.push(change);
+            let change = match self.doc.replace_group(target) {
+                Some(group) => self.doc.revert_changes_local(&group, true, now_ms),
+                None => Some(self.doc.revert_local(target, true, now_ms)),
+            };
+            self.unsaved.extend(change);
+            // Redo restores it by taking back that Revert, which brings the whole group back.
             self.redo.push(target);
         }
     }
@@ -1514,6 +1552,35 @@ mod tests {
         w.close(2000);
         assert_eq!(w.text(), "Hello");
         assert_eq!(saved(&w), vec!["insert"], "the undone typing was never recorded");
+    }
+
+    fn replace_op(edits: &[(usize, usize, &str)], find: &str, with: &str, count: usize) -> Op {
+        let edits = edits.iter().map(|&(from, to, text)| ReplaceOpEdit { from, to, text: text.into() }).collect();
+        Op::Replace { edits, find: find.into(), with: with.into(), count }
+    }
+
+    #[test]
+    fn a_replace_all_is_one_action_for_undo_and_redo() {
+        let (_dir, mut w) = work("Rain fell. The *rain* had stopped.");
+        // Typing first: the replacement closes the burst, which stays its own action.
+        w.edit(vec![typing(34, " Then")], None, None, 1000).unwrap();
+        let state = w.edit(vec![replace_op(&[(0, 4, "Snow"), (16, 20, "snow"), (22, 25, "has")], "rain", "snow", 2)], None, None, 2000).unwrap();
+        assert!(state.patches.is_empty(), "the editor already shows it");
+        assert_eq!(w.text(), "Snow fell. The *snow* has stopped. Then");
+        let state = w.edit(vec![Op::Undo], None, None, 3000).unwrap();
+        assert_eq!(w.text(), "Rain fell. The *rain* had stopped. Then", "all three words back, the typing stays");
+        assert_eq!(editor_after("Snow fell. The *snow* has stopped. Then", &state), w.text());
+        w.edit(vec![Op::Redo], None, None, 4000).unwrap();
+        assert_eq!(w.text(), "Snow fell. The *snow* has stopped. Then");
+        w.edit(vec![Op::Undo], None, None, 5000).unwrap();
+        w.edit(vec![Op::Undo], None, None, 6000).unwrap();
+        assert_eq!(w.text(), "Rain fell. The *rain* had stopped.");
+    }
+
+    #[test]
+    fn a_replacement_whose_parts_overlap_is_refused() {
+        let (_dir, mut w) = work("rain");
+        assert!(w.edit(vec![replace_op(&[(0, 3, "x"), (2, 4, "y")], "rain", "xy", 1)], None, None, 1000).is_err());
     }
 
     #[test]

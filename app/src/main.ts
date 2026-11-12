@@ -26,6 +26,7 @@ import { ThemeApplier, themeChoices, VAULT_PREFIX } from "./themes";
 import { SyncPanel } from "./syncpanel";
 import { UpdateDialog } from "./updates";
 import { UninstallDialog } from "./uninstall";
+import { FindBar } from "./findbar";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -188,6 +189,17 @@ function act(run: () => Promise<unknown>) {
   run().catch(showError);
 }
 
+// ---- Find and replace (in the tab in front) ----
+
+const findBar = new FindBar({
+  target: () => tabs.frontEditor(),
+  openWork: (work, at) => act(async () => {
+    await openWork(work, at);
+    await tabs.reveal(work, at, at); // also when it was open already
+  }),
+});
+$("find-open").addEventListener("click", () => findBar.open(false));
+
 // ---- Tabs ----
 
 const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $("status"), moved: $("moved"), style: $("style-notice") }, {
@@ -196,6 +208,8 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     // A library file is plain Typst: no Formatted view, and no pages of its own.
     $("view-mode").hidden = !tabs.activeIsWork;
     $("panel-toggle").hidden = !tabs.activeIsWork;
+    $("find-open").hidden = tabs.active === null;
+    findBar.attach();
     showToolbar();
     preview.show(tabs.activeIsWork ? tabs.active : null);
     commentsPanel.render();
@@ -291,9 +305,9 @@ const historyPanel = new HistoryPanel($("history-list"), {
     clearError();
     tabs.history(work, op);
   },
-  find: (work, first, last) => {
+  locate: (work, first, last) => {
     phone.toWrite();
-    return tabs.findText(work, first, last);
+    return tabs.locateText(work, first, last);
   },
   nameMilestone: (work) => nameMilestone(work),
   renameMilestone: async (work, milestone, name) => {
@@ -475,6 +489,7 @@ function selectionMenu(id: string): MenuItem[] {
   return [
     { label: withKey("Add Comment", "addComment"), run: () => startComment(id) },
     { label: withKey("History of this text", "textHistory"), run: () => textHistory(id) },
+    { label: withKey("Find and replace…", "find"), run: () => findBar.open(false) },
     "separator",
     { label: "Cut", run: command("cut") },
     { label: "Copy", run: command("copy") },
@@ -1507,6 +1522,15 @@ const appCommands: Partial<Record<CommandId, () => boolean>> = {
     act(() => editMods(tabs.active!));
     return true;
   },
+  // Always the app's own, never the web engine's page search (which only sees the lines drawn).
+  find: () => {
+    findBar.open(false);
+    return true;
+  },
+  replace: () => {
+    findBar.open(true);
+    return true;
+  },
 };
 
 window.addEventListener("keydown", (e) => {
@@ -1520,7 +1544,9 @@ window.addEventListener("keydown", (e) => {
 
 /** Everything that names a key says the current one. */
 function showKeys() {
-  $("open-switcher").title = withKey("Find a Work", "quickSwitcher");
+  $("open-switcher").title = withKey("Open a Work", "quickSwitcher");
+  $("find-open").title = withKey("Find and replace", "find");
+  findBar.showKeys();
   $("open-switcher-key").textContent = keyLabel("quickSwitcher");
   $("open-switcher-key").hidden = !keyLabel("quickSwitcher");
   $("view-mode").title = withKey("Switch between the Formatted and the Raw view", "toggleView");

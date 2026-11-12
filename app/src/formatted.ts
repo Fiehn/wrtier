@@ -45,15 +45,30 @@ const spansField = StateField.define<Span[]>({
     if (!tr.docChanged) return spans;
     let from = Infinity;
     let to = -Infinity;
-    tr.changes.iterChangedRanges((_fa, _ta, fromB, toB) => {
+    let firstA = Infinity;
+    let lastA = -Infinity;
+    tr.changes.iterChangedRanges((fromA, toA, fromB, toB) => {
       from = Math.min(from, fromB);
       to = Math.max(to, toB);
+      firstA = Math.min(firstA, fromA);
+      lastA = Math.max(lastA, toA);
     });
     const doc = tr.state.doc;
     const [start, end] = paragraphAround(doc, from, to);
-    const kept = spans
-      .map((s) => mapSpan(s, (pos) => tr.changes.mapPos(pos)))
-      .filter((s) => s.to < start || s.from > end);
+    // Everything between the first change and the last is parsed again. Spans before it stay
+    // where they are, and those after it move by how much the text grew: worked out directly,
+    // since mapping each one through a transaction with thousands of changes (a Replace all)
+    // would take seconds.
+    const delta = tr.changes.newLength - tr.changes.length;
+    const kept: Span[] = [];
+    for (const s of spans) {
+      if (s.to < firstA) {
+        if (s.to < start) kept.push(s);
+      } else if (s.from > lastA) {
+        const moved = delta === 0 ? s : mapSpan(s, (pos) => pos + delta);
+        if (moved.from > end) kept.push(moved);
+      }
+    }
     const fresh = parseMarkup(doc.sliceString(start, end), start);
     return [...kept, ...fresh].sort((a, b) => a.from - b.from || b.to - a.to);
   },
@@ -351,6 +366,11 @@ const tooltips = hoverTooltip((view, pos) => {
 export function formattedView(): Extension {
   const desktop = window.matchMedia("(hover: hover)").matches;
   return [spansField, pairsField, keepBrackets, formatting, desktop ? tooltips : []];
+}
+
+/** The markup in a state's text, if it's in the Formatted view (null in the Raw view). */
+export function markupSpans(state: EditorState): Span[] | null {
+  return state.field(spansField, false) ?? null;
 }
 
 /** For tests: the brackets' field and filter, which need the spans' field before them. */

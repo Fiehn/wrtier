@@ -23,7 +23,7 @@
         </header>
         <div id="sidebar-vault">
         <div id="vault-actions" class="row" hidden>
-          <button id="open-switcher" type="button" title="Find a Work (Ctrl+O)">Find… <kbd id="open-switcher-key">Ctrl+O</kbd></button>
+          <button id="open-switcher" type="button" title="Open a Work (Ctrl+O)">Open… <kbd id="open-switcher-key">Ctrl+O</kbd></button>
         </div>
         <ul id="works"></ul>
         <details id="library" hidden>
@@ -58,6 +58,7 @@
           <button id="sidebar-toggle" type="button" title="Hide the Works (Ctrl+\)" aria-label="Show or hide the Works">☰</button>
           <nav id="tabbar"></nav>
           <button id="chapters-open" type="button" class="link" hidden>Chapters</button>
+          <button id="find-open" type="button" class="link" title="Find and replace (Ctrl+F)" hidden>Find</button>
           <button id="view-mode" type="button" class="link" title="Ctrl+E" hidden>Raw view</button>
           <button id="panel-toggle" type="button" class="link" title="The Page preview, the Comments and the History (Ctrl+Shift+P)" hidden>Show panel</button>
         </div>
@@ -65,6 +66,27 @@
         <div id="style-notice" hidden></div>
         <div id="moved" hidden></div>
         <div id="status" hidden></div>
+        <!-- Find and replace (findbar.ts): in the tab in front. -->
+        <div id="find-bar" role="search" aria-label="Find and replace" hidden>
+          <div class="find-row">
+            <button type="button" id="find-toggle-replace" class="find-toggle" aria-expanded="false" title="Replace (Ctrl+H)">▸</button>
+            <input id="find-input" type="search" placeholder="Find" aria-label="Find" autocomplete="off" spellcheck="false" />
+            <span id="find-count" class="muted" aria-live="polite"></span>
+            <button type="button" id="find-prev" title="Previous match (Shift+Enter)" aria-label="Previous match">↑</button>
+            <button type="button" id="find-next" title="Next match (Enter)" aria-label="Next match">↓</button>
+            <label class="find-option"><input type="checkbox" id="find-case" /> Match case</label>
+            <label class="find-option"><input type="checkbox" id="find-words" /> Whole words</label>
+            <label class="find-option" id="find-scope-label" hidden><input type="checkbox" id="find-scope" /> In selection</label>
+            <button type="button" id="find-close" title="Close (Escape)" aria-label="Close">×</button>
+          </div>
+          <div class="find-row" id="find-replace-row" hidden>
+            <span class="find-toggle-space"></span>
+            <input id="replace-input" type="text" placeholder="Replace with" aria-label="Replace with" autocomplete="off" spellcheck="false" />
+            <button type="button" id="replace-one" title="Replace this match (Enter)">Replace</button>
+            <button type="button" id="replace-all" title="Replace every match, as one action (Ctrl+Enter)">Replace all</button>
+          </div>
+          <p id="find-note" class="muted" hidden></p>
+        </div>
         <div id="panes"></div>
         <!-- The word and character count Mod: the Work in front's counts, if it has the Mod here. -->
         <div id="counts" hidden></div>
@@ -376,7 +398,7 @@
 
     <dialog id="switcher">
       <form method="dialog">
-        <input id="switcher-input" placeholder="Find a Work…" autocomplete="off" />
+        <input id="switcher-input" placeholder="Open a Work…" autocomplete="off" />
         <ul id="switcher-list"></ul>
       </form>
     </dialog>

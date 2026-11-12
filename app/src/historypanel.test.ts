@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dayOf, entries, fieldLine, leftOutLine, libraryLines, moveLine, noticeLine, showMeLabel, wordCounts, type HistoryView, type NoticeView, type SessionRow } from "./historypanel";
+import { dayOf, entries, fieldLine, leftOutLine, libraryLines, moveLine, noticeLine, replacementLine, showMeLabel, wordCounts, type HistoryView, type NoticeView, type SessionRow } from "./historypanel";
 
 const session = (key: string, endMs: number): SessionRow => ({
   key,
@@ -36,6 +36,12 @@ describe("the History tab", () => {
     expect(fieldLine(f)).toBe("Title: The Rain (was Rain)");
     expect(fieldLine({ ...f, field: "looks", value: "Paperback\nManuscript", before: null })).toBe("Looks: Paperback, Manuscript");
     expect(fieldLine({ ...f, field: "raw", takenBack: true })).toBe("Taken back: Raw Typst edited");
+  });
+
+  it("says what a Replace all did, as one line", () => {
+    const r = { find: "rain", with: "snow", count: 14, changes: ["a", "b"], inEffect: true, revertedBy: null };
+    expect(replacementLine(r)).toBe("Replaced “rain” with “snow” (14)");
+    expect(replacementLine({ ...r, find: "rain had", with: "snow has", count: 1 })).toBe("Replaced “rain had” with “snow has”");
   });
 
   it("says where moved text came from", () => {

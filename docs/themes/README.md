@@ -73,6 +73,14 @@ Each Reviewer gets one of eight colour slots. Each slot has a colour for names a
 |---|---|
 | `--session-tint-0` … `--session-tint-4` | "Colour text by Session": the newest Session's text (0) to the fifth newest (4). Faint and see-through. |
 
+**Find and replace**
+
+| Variable | |
+|---|---|
+| `--find-match` | Every match. See-through, so Comment highlights show under it. |
+| `--find-current` | The current match. |
+| `--find-current-edge` | The thin outline round the current match. |
+
 **Typst colouring** (the Raw view and Style library files)
 
 | Variable | What it colours |

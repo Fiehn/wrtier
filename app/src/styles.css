@@ -51,6 +51,10 @@
     --session-tint-2: rgb(226 194 48 / 0.16);
     --session-tint-3: rgb(226 194 48 / 0.1);
     --session-tint-4: rgb(226 194 48 / 0.06);
+    /* Find and replace (find.ts): every match, and the current one. */
+    --find-match: rgb(232 150 0 / 0.25);
+    --find-current: rgb(232 130 0 / 0.55);
+    --find-current-edge: #a85f00;
     /* Typst colouring in the Raw view and Style library tabs (colouring.ts). */
     --syntax-comment: #8a857b;
     --syntax-keyword: #8a3b6e;
@@ -104,6 +108,9 @@
       --session-tint-2: rgb(240 214 110 / 0.11);
       --session-tint-3: rgb(240 214 110 / 0.07);
       --session-tint-4: rgb(240 214 110 / 0.045);
+      --find-match: rgb(250 190 70 / 0.2);
+      --find-current: rgb(250 165 50 / 0.5);
+      --find-current-edge: #f0b050;
       --syntax-comment: #8b867c;
       --syntax-keyword: #d59ac4;
       --syntax-function: #8fc0d8;
@@ -156,6 +163,9 @@
     --session-tint-2: rgb(240 214 110 / 0.11);
     --session-tint-3: rgb(240 214 110 / 0.07);
     --session-tint-4: rgb(240 214 110 / 0.045);
+    --find-match: rgb(250 190 70 / 0.2);
+    --find-current: rgb(250 165 50 / 0.5);
+    --find-current-edge: #f0b050;
     --syntax-comment: #8b867c;
     --syntax-keyword: #d59ac4;
     --syntax-function: #8fc0d8;
@@ -1380,6 +1390,106 @@ dialog#reviewers {
   background: var(--line);
 }
 
+/* ---- Find and replace (findbar.ts, find.ts) ---- */
+
+#find-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+#find-bar[hidden],
+#find-bar [hidden] {
+  display: none;
+}
+
+.find-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+#find-input,
+#replace-input {
+  flex: 1 1 14em;
+  min-width: 8em;
+}
+
+.find-toggle,
+.find-toggle-space {
+  width: 2em;
+  flex: none;
+}
+
+.find-toggle {
+  border: none;
+  background: none;
+  color: var(--muted);
+  padding: 2px;
+}
+
+#find-count {
+  min-width: 6em;
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
+.find-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
+#find-close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 1.2em;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+#find-close:hover,
+.find-toggle:hover {
+  color: var(--text);
+  background: var(--chip);
+}
+
+#find-note {
+  margin: 0 0 0 2.6em;
+  font-size: 0.9em;
+}
+
+#find-open {
+  margin-bottom: 6px;
+  white-space: nowrap;
+}
+
+.cm-find-match {
+  background-color: var(--find-match);
+  border-radius: 2px;
+}
+
+.cm-find-current {
+  background-color: var(--find-current);
+  box-shadow: 0 0 0 1px var(--find-current-edge);
+}
+
+/* A Replace all in a Session's History: one line, taken back whole. */
+.history-replacement.reverted > span:first-child {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
 /* ---- Comment highlights (comments.ts) ---- */
 
 .cm-comment {
@@ -2588,6 +2698,7 @@ body.phone #tabbar .tab {
 }
 
 body.phone #chapters-open,
+body.phone #find-open,
 body.phone #view-mode {
   margin-bottom: 0;
 }

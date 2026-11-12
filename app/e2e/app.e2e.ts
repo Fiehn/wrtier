@@ -60,6 +60,39 @@ test("the Formatted view hides markup, and shows it while the cursor is inside",
   await expect.poll(() => textOf(app)).toContain("Morning came slowly. It was _quiet_ there.");
 });
 
+test("Ctrl+F finds in the whole Work, past the lines drawn, and Replace all is one op", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+  // Far more text than the editor draws at once, with the rain at the very end.
+  await page.addInitScript(() => {
+    const fake = (window as any).__fake;
+    fake.texts.Rain += "Filler line.\n\n".repeat(400) + "The *rain* had stopped at last.\n";
+  });
+  await page.goto("/");
+  await expect(line(page, "She walked home.")).toBeVisible();
+  await line(page, "She walked home.").click();
+  await page.keyboard.press("Control+f");
+  const bar = page.locator("#find-bar");
+  await expect(bar).toBeVisible();
+  await expect(page.locator("#find-input")).toBeFocused();
+  // As it reads: the stars around "rain" are hidden, so "rain had" finds it.
+  await page.keyboard.type("rain had");
+  await expect(page.locator("#find-count")).toHaveText("2 of 2"); // the first after the cursor is the far one
+  await expect(line(page, "had stopped at last.").locator(".cm-find-current")).toBeVisible();
+  await page.keyboard.press("Control+h");
+  await expect(page.locator("#replace-input")).toBeFocused();
+  await page.keyboard.type("snow has");
+  await page.locator("#replace-all").click();
+  await expect(page.locator("#find-note")).toHaveText("Replaced 2.");
+  await expect.poll(() => page.evaluate(() => (window as any).__fake.texts.Rain)).toContain("The *snow* has stopped at last.");
+  const sent = await page.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd === "edit").flatMap((e: any) => e.args.ops));
+  expect(sent.filter((op: Op) => op.op === "replace")).toHaveLength(1);
+  await page.keyboard.press("Escape");
+  await expect(bar).toBeHidden();
+  expect(errors, "errors in the page").toEqual([]);
+});
+
 test("the Raw view shows every mark, coloured by Typst", async ({ app }) => {
   await endOf(app, "She walked home.");
   await app.keyboard.press("Control+e");

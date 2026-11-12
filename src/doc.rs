@@ -17,10 +17,12 @@ use std::collections::{HashMap, HashSet};
 mod colours;
 mod compare;
 mod history;
+mod replace;
 mod snippets;
 pub use colours::SessionText;
 pub use compare::{Comparison, Stretch, Version};
 pub use history::{LeftOut, Reverted, SessionPart, Summary};
+pub use replace::{Replacement, ReplaceEdit};
 pub use snippets::{FieldLine, MovedFrom, Segment, SegmentKind, Snippet, Snippets};
 
 pub struct Doc {
@@ -677,23 +679,7 @@ impl Doc {
     /// if there's nothing to record. Updates what's shown directly instead of `refresh`; in
     /// debug builds that's checked against a full recompute.
     fn commit_text(&mut self, left: Option<u32>, doomed: &[u32], text: &str, reserved: Option<ChangeId>, now_ms: u64) -> Option<Change> {
-        let ranges = self.ranges_of(doomed);
-        if ranges.is_empty() && text.is_empty() {
-            if let Some(id) = reserved {
-                self.unreserve(id); // an empty burst records nothing, not even a gap in the counters
-            }
-            return None;
-        }
-        // Where the new text goes, worked out before anything changes.
-        let (left_id, into) = self.placement_after(left);
-        let (parent, side, right_origin) = self.tree.place_after(left_id);
-        let run = InsertRun { text: text.to_string(), parent, side, right_origin, into };
-        let kind = match (ranges.is_empty(), text.is_empty()) {
-            (true, _) => ChangeKind::Insert(run),
-            (false, true) => ChangeKind::Delete(ranges),
-            (false, false) => ChangeKind::Replace { deleted: ranges, inserted: run },
-        };
-        let change = self.new_change(reserved, kind, now_ms);
+        let (change, into) = self.text_change(left, doomed, text, reserved, now_ms)?;
 
         // Shortcut instead of `refresh`. A deletion moves nothing: it only hides characters.
         // New text lands right after `left` in the tree, shows right after it on screen, and
@@ -712,6 +698,28 @@ impl Doc {
         self.place_burst();
         self.debug_check();
         Some(change)
+    }
+
+    /// The Change that deletes `doomed` and puts `text` right after `left` (see `commit_text`),
+    /// with the piece the text goes into; nothing is applied yet. None if there's nothing to record.
+    fn text_change(&mut self, left: Option<u32>, doomed: &[u32], text: &str, reserved: Option<ChangeId>, now_ms: u64) -> Option<(Change, Option<CharId>)> {
+        let ranges = self.ranges_of(doomed);
+        if ranges.is_empty() && text.is_empty() {
+            if let Some(id) = reserved {
+                self.unreserve(id); // an empty burst records nothing, not even a gap in the counters
+            }
+            return None;
+        }
+        // Where the new text goes, worked out before anything changes.
+        let (left_id, into) = self.placement_after(left);
+        let (parent, side, right_origin) = self.tree.place_after(left_id);
+        let run = InsertRun { text: text.to_string(), parent, side, right_origin, into };
+        let kind = match (ranges.is_empty(), text.is_empty()) {
+            (true, _) => ChangeKind::Insert(run),
+            (false, true) => ChangeKind::Delete(ranges),
+            (false, false) => ChangeKind::Replace { deleted: ranges, inserted: run },
+        };
+        Some((self.new_change(reserved, kind, now_ms), into))
     }
 
     /// Visible nodes (in reading order) as ranges of consecutive characters of one Change.

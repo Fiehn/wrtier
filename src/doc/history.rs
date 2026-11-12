@@ -303,9 +303,9 @@ impl Doc {
     /// added text strictly inside text they wrote (and so on), still in effect, not already
     /// among them. In the fixed Change order.
     pub fn dependents(&self, changes: &[ChangeId]) -> Vec<ChangeId> {
-        let mut found: Vec<ChangeId> = changes.iter()
-            .flat_map(|&id| self.depends_on(id))
-            .filter(|id| !changes.contains(id) && self.is_in_effect(*id) && self.content_set.contains(id))
+        let given: rustc_hash::FxHashSet<ChangeId> = changes.iter().copied().collect();
+        let mut found: Vec<ChangeId> = self.tree.inside_all(changes).into_iter()
+            .filter(|id| !given.contains(id) && self.is_in_effect(*id) && self.content_set.contains(id))
             .collect();
         found.sort_by_key(|id| self.made[id].hlc_key(*id));
         found.dedup();

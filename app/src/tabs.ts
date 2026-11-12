@@ -22,6 +22,7 @@ import { sessionTints, setTints } from "./sessiontints";
 import { modExtensions, type Mod } from "./mods";
 import { INCLUSION, includedSelection, inclusions, inclusionsOf, placeInclusion, rawInclusions, readerText, setInclusions, workDrops, type InclusionView } from "./inclusions";
 import { wordsIn } from "./counts";
+import { findExtension } from "./find";
 
 export type OpenedWork = { id: string; name: string; text: string; problems: { path: string; reason: string }[]; notice: string | null };
 
@@ -226,6 +227,7 @@ class Tab {
             keymap.of([...historyKeymap, ...standardKeymap]),
             linesCompartment.of(lineExtensions(tabs.options)),
             typstColouring(true),
+            findExtension(),
             EditorView.updateListener.of((update) => {
               if (update.transactions.some((tr) => tr.docChanged && !tr.annotation(fromDisk))) this.file!.edited();
             }),
@@ -260,6 +262,7 @@ class Tab {
           commentsCompartment.of(commentClasses(tabs.commentOptions)),
           sessionTints(),
           inclusions(),
+          findExtension(),
           modsCompartment.of([]),
           EditorView.updateListener.of((update) => {
             for (const tr of update.transactions) this.sync.track(tr);
@@ -521,10 +524,10 @@ export class Tabs {
    * Selects some characters of a Work by their identity (a History snippet was clicked):
    * where they are now, asked through its queue. False if they aren't shown any more.
    */
-  async findText(id: string, first: string, last: string | null): Promise<boolean> {
+  async locateText(id: string, first: string, last: string | null): Promise<boolean> {
     const tab = this.find(id);
     if (!tab?.isWork) return false;
-    const range = await tab.sync.find(first, last);
+    const range = await tab.sync.locate(first, last);
     if (!range) return false;
     const length = tab.view.state.doc.length;
     tab.view.dispatch({ selection: { anchor: Math.min(range[0], length), head: Math.min(range[1], length) }, scrollIntoView: true });
@@ -686,6 +689,12 @@ export class Tabs {
 
   private find(id: string) {
     return this.open.find((tab) => tab.id === id);
+  }
+
+  /** The editor in front, and its Work's ID (null for a Style library file): what Find and replace works in. */
+  frontEditor(): { view: EditorView; work: string | null } | null {
+    if (!this.front) return null;
+    return { view: this.front.view, work: this.front.isWork ? this.front.id : null };
   }
 
   /** Runs an editor command in the tab in front, as its key would (the phone's toolbar). */

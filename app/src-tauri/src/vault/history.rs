@@ -4,7 +4,7 @@
 //!
 //! None of this holds positions in the editor's text, so it's asked for beside the editor's
 //! queue, not through it. A snippet says what to select by its characters' identities; the
-//! editor asks for their place through the queue (`Op::Find`) when it's clicked. Reverting,
+//! editor asks for their place through the queue (`Op::Locate`) when it's clicked. Reverting,
 //! restoring and returning themselves are ops in the queue (`Op::Revert` and the rest).
 
 use super::*;
@@ -87,6 +87,23 @@ pub struct MilestoneRow {
 pub struct SnippetsView {
     pub snippets: Vec<SnippetView>,
     pub fields: Vec<FieldView>,
+    /// Find and replace actions that made several Changes, each one line with Revert or
+    /// Restore for all of it (only for a Session's own snippets, not narrowed to some text).
+    pub replacements: Vec<ReplacementView>,
+}
+
+/// "Replaced “rain” with “snow” (14)": one Find and replace action, taken back whole.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplacementView {
+    pub find: String,
+    pub with: String,
+    pub count: usize,
+    pub changes: Vec<String>,
+    /// Some of it is still in effect: it can be reverted.
+    pub in_effect: bool,
+    /// The latest Revert that took some of it back: it can be restored.
+    pub reverted_by: Option<RevertedByView>,
 }
 
 #[derive(Serialize, Debug)]
@@ -95,7 +112,7 @@ pub struct SnippetView {
     pub segments: Vec<SegmentView>,
     pub changes: Vec<String>,
     /// What to select when it's clicked: the first and last characters (or, last missing, the
-    /// place just before the first). Asked for through the editor's queue (`Op::Find`).
+    /// place just before the first). Asked for through the editor's queue (`Op::Locate`).
     pub find: Option<FindView>,
     pub moves: Vec<MoveView>,
     /// Some of its Changes are still in effect: it can be reverted.
@@ -250,7 +267,23 @@ pub fn snippets_view(shown: Snippets, doc: &Doc, name: &Namer) -> SnippetsView {
             included: None,
             in_effect: f.in_effect,
         }).collect(),
+        replacements: Vec::new(),
     }
+}
+
+/// The Find and replace actions among `changes`, as the History tab lists them.
+fn replacements_view(doc: &Doc, changes: &[ChangeId], name: &Namer) -> Vec<ReplacementView> {
+    doc.replacements(changes)
+        .into_iter()
+        .map(|r| ReplacementView {
+            in_effect: r.changes.iter().any(|&c| doc.is_in_effect(c)),
+            reverted_by: doc.latest_revert_of(&r.changes).map(|by| RevertedByView { device: name(doc, by.device), time_ms: doc.made_at(by).map_or(0, |h| h.0) }),
+            changes: ids(&r.changes),
+            find: r.find,
+            with: r.with,
+            count: r.count,
+        })
+        .collect()
 }
 
 /// A comparison as the History tab shows it.
@@ -426,7 +459,11 @@ impl Vault {
                 (true, None) => return Err("There's no text to show the History of: select some first.".into()),
                 (false, _) => w.doc.snippets(&changes),
             };
-            Ok(snippets_view(shown, &w.doc, &name))
+            let mut view = snippets_view(shown, &w.doc, &name);
+            if !filtered {
+                view.replacements = replacements_view(&w.doc, &changes, &name);
+            }
+            Ok(view)
         })
         .map(|mut view| {
             self.name_included(&mut view);
@@ -595,16 +632,40 @@ mod tests {
     }
 
     #[test]
+    fn a_replace_all_is_one_line_in_its_session_with_revert_for_all_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = rain(dir.path());
+        vault.edit("Rain", vec![typing(21, " Rain again.")], 3500).unwrap();
+        let edits = vec![
+            crate::work::ReplaceOpEdit { from: 4, to: 8, text: "snow".into() },
+            crate::work::ReplaceOpEdit { from: 22, to: 26, text: "Snow".into() },
+        ];
+        vault.edit("Rain", vec![Op::Replace { edits, find: "rain".into(), with: "snow".into(), count: 2 }], 4000).unwrap();
+        let session = vault.history("Rain", 50, false, 5000).unwrap().sessions.remove(0);
+        let shown = vault.snippets("Rain", &session.changes, false, 5000).unwrap();
+        assert_eq!(shown.replacements.len(), 1);
+        let line = &shown.replacements[0];
+        assert_eq!((line.find.as_str(), line.with.as_str(), line.count, line.in_effect), ("rain", "snow", 2, true));
+        assert_eq!(line.changes.len(), 2);
+        assert!(shown.fields.iter().all(|f| !f.record.starts_with("replace/")), "the grouping isn't a Preamble line");
+        // Reverting the line takes back both places at once.
+        vault.edit("Rain", vec![Op::Revert { changes: line.changes.clone(), dependents: true }], 6000).unwrap();
+        assert_eq!(vault.work_text("Rain", 6500).unwrap().0, "The rain had stopped. Rain again.");
+        let shown = vault.snippets("Rain", &session.changes, false, 7000).unwrap();
+        assert!(!shown.replacements[0].in_effect && shown.replacements[0].reverted_by.is_some());
+    }
+
+    #[test]
     fn a_clicked_snippet_is_found_where_it_is_now() {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = rain(dir.path());
         let session = vault.history("Rain", 50, false, 4000).unwrap().sessions.remove(0);
         let find = vault.snippets("Rain", &session.changes, false, 4000).unwrap().snippets.remove(0).find.expect("something to go to");
         // More typed before it, still a draft: the place counts it.
-        let state = vault.edit("Rain", vec![typing(0, "Outside, "), Op::Find { first: find.first, last: find.last }], 5000).unwrap();
-        assert_eq!(state.found, Some(Some((9, 30))));
+        let state = vault.edit("Rain", vec![typing(0, "Outside, "), Op::Locate { first: find.first, last: find.last }], 5000).unwrap();
+        assert_eq!(state.located, Some(Some((9, 30))));
         let plain = vault.edit("Rain", vec![typing(9, "x")], 5100).unwrap();
-        assert_eq!(plain.found, None, "only an answer to a Find carries it");
+        assert_eq!(plain.located, None, "only an answer to a Locate carries it");
     }
 
     /// The phase's check, as the History tab does it: "stopped" changed to "eased" in a later
@@ -646,7 +707,7 @@ mod tests {
         vault.edit("Rain", vec![Op::Comment { from: 22, to: 27, sender: "author".into(), body: "new?".into(), sender_name: None }], 6000).unwrap();
         let preview = vault.preview_return("Rain", &draft, 7000).unwrap();
         assert!(!preview.nothing);
-        assert_eq!(texts(&SnippetsView { snippets: preview.since.snippets, fields: Vec::new() }, "removed"), [" Gulls circled."]);
+        assert_eq!(texts(&SnippetsView { snippets: preview.since.snippets, fields: Vec::new(), replacements: Vec::new() }, "removed"), [" Gulls circled."]);
         assert_eq!(preview.detached, 1);
         assert!(preview.earlier.is_empty());
         assert!(!preview.preamble);
@@ -713,8 +774,8 @@ Gulls grey circled.");
 
         // "Show me" selects it.
         let place = &notice.places[0];
-        let state = vault.edit("Rain", vec![Op::Find { first: place.first.clone(), last: place.last.clone() }], 6000).unwrap();
-        let (from, to) = state.found.flatten().expect("it's in the text");
+        let state = vault.edit("Rain", vec![Op::Locate { first: place.first.clone(), last: place.last.clone() }], 6000).unwrap();
+        let (from, to) = state.located.flatten().expect("it's in the text");
         let text = vault.with_work("Rain", 0, |w, _| Ok(w.text())).unwrap();
         assert_eq!(&text[from..to], "cd");
 

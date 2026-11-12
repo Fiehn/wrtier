@@ -5,7 +5,7 @@
 // so the editor's own keymap can use them as they are.
 
 export type CommandId =
-  | "toggleWorks" | "quickSwitcher" | "closeTab" | "toggleView" | "togglePanel" | "preamble" | "mods"
+  | "toggleWorks" | "quickSwitcher" | "closeTab" | "toggleView" | "togglePanel" | "preamble" | "mods" | "find" | "replace"
   | "undo" | "redo" | "redoAlt" | "strong" | "emph" | "addComment" | "textHistory"
   // The Chapter list Mod's
   | "nextChapter" | "previousChapter" | "chapterUp" | "chapterDown";
@@ -25,12 +25,14 @@ export type Command = {
 
 export const COMMANDS: Command[] = [
   { id: "toggleWorks", label: "Show or hide the Works", where: "app", key: "Mod-\\" },
-  { id: "quickSwitcher", label: "Find a Work", where: "app", key: "Mod-o" },
+  { id: "quickSwitcher", label: "Open a Work", where: "app", key: "Mod-o" },
   { id: "closeTab", label: "Close the tab", where: "app", key: "Mod-w" },
   { id: "toggleView", label: "Formatted or Raw view", where: "app", key: "Mod-e" },
   { id: "togglePanel", label: "Show or hide the panel", where: "app", key: "Mod-Shift-p" },
   { id: "preamble", label: "The Work's Preamble", where: "app", key: "Mod-Shift-l" },
   { id: "mods", label: "The Work's Mods", where: "app", key: "Mod-Shift-k" },
+  { id: "find", label: "Find and replace", where: "app", key: "Mod-f" },
+  { id: "replace", label: "Find and replace, with Replace showing", where: "app", key: "Mod-h" },
   { id: "undo", label: "Undo", where: "editor", key: "Mod-z" },
   { id: "redo", label: "Redo", where: "editor", key: "Mod-Shift-z" },
   { id: "redoAlt", label: "Redo (a second key)", where: "editor", key: "Mod-y" },

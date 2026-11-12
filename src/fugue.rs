@@ -375,20 +375,36 @@ impl Tree {
     /// Every other Change with a character strictly between this Change's first and last node
     /// in the fixed order: the Changes that depend on it when it's reverted.
     pub fn inside(&self, change: ChangeId) -> Vec<ChangeId> {
-        let Some(entry) = self.by_change.get(&change) else { return Vec::new() };
-        let order = self.order();
-        let of_change = |i: &u32| self.nodes[*i as usize].change == entry.index;
-        let (Some(lo), Some(hi)) = (order.iter().position(of_change), order.iter().rposition(of_change)) else {
-            return Vec::new();
-        };
-        if hi <= lo + 1 {
+        self.inside_all(&[change])
+    }
+
+    /// `inside` for several Changes at once (a Replace all's), with the fixed order worked out
+    /// once rather than for each: every other Change with a character strictly between one of
+    /// these Changes' first and last node, sorted.
+    pub fn inside_all(&self, changes: &[ChangeId]) -> Vec<ChangeId> {
+        let wanted: FxHashSet<u32> = changes.iter().filter_map(|c| self.by_change.get(c)).map(|e| e.index).collect();
+        if wanted.is_empty() {
             return Vec::new();
         }
-        let mut result: Vec<ChangeId> = order[lo + 1..hi].iter()
-            .map(|&i| &self.nodes[i as usize])
-            .filter(|n| n.change != entry.index && n.ch.is_some()) // a Move's anchor is never a dependent
-            .map(|n| self.changes[n.change as usize])
-            .collect();
+        let order = self.order();
+        // Each Change's first and last place in the fixed order.
+        let mut span: FxHashMap<u32, (usize, usize)> = FxHashMap::default();
+        for (pos, &i) in order.iter().enumerate() {
+            let change = self.nodes[i as usize].change;
+            if wanted.contains(&change) {
+                span.entry(change).and_modify(|s| s.1 = pos).or_insert((pos, pos));
+            }
+        }
+        let mut result: Vec<ChangeId> = Vec::new();
+        for (&change, &(lo, hi)) in &span {
+            if hi <= lo + 1 {
+                continue;
+            }
+            result.extend(order[lo + 1..hi].iter()
+                .map(|&i| &self.nodes[i as usize])
+                .filter(|n| n.change != change && n.ch.is_some()) // a Move's anchor is never a dependent
+                .map(|n| self.changes[n.change as usize]));
+        }
         result.sort_unstable();
         result.dedup();
         result

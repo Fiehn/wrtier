@@ -69,7 +69,16 @@ export type FieldView = {
   included?: string | null;
   inEffect: boolean;
 };
-export type SnippetsView = { snippets: SnippetView[]; fields: FieldView[] };
+/** A Find and replace action that made several Changes (vault/history.rs `ReplacementView`). */
+export type ReplacementView = {
+  find: string;
+  with: string;
+  count: number;
+  changes: string[];
+  inEffect: boolean;
+  revertedBy: { device: string; timeMs: number } | null;
+};
+export type SnippetsView = { snippets: SnippetView[]; fields: FieldView[]; replacements?: ReplacementView[] };
 export type GroupView = { device: string; startMs: number; endMs: number; addedWords: number; removedWords: number; changes: string[]; snippets: SnippetsView };
 export type RevertPreview = {
   goes: SnippetsView;
@@ -95,7 +104,7 @@ export type HistoryHooks = {
   /** Reverts, restores or returns, through the editor's queue. */
   act(work: string, op: HistoryOp): void;
   /** Selects some characters in the editor; false if they aren't in the text any more. */
-  find(work: string, first: string, last: string | null): Promise<boolean>;
+  locate(work: string, first: string, last: string | null): Promise<boolean>;
   nameMilestone(work: string): Promise<void>;
   renameMilestone(work: string, milestone: string, name: string): Promise<void>;
   setMilestoneDeleted(work: string, milestone: string, deleted: boolean): Promise<void>;
@@ -174,6 +183,12 @@ export function fieldLine(f: FieldView): string {
 }
 
 /** "Moved here from Chapter 3, after “…the harbour wall.”"; in a preview, where it would go. */
+/** "Replaced “rain” with “snow” (14)": a Replace all (or one Replace that rewrote several words). */
+export function replacementLine(r: ReplacementView): string {
+  const what = `Replaced “${r.find}” with “${r.with}”`;
+  return r.count > 1 ? `${what} (${r.count.toLocaleString()})` : what;
+}
+
 export function moveLine(m: MoveView, preview = false): string {
   const where = m.chapter ? m.chapter : m.earlier ? "earlier in the text" : "later in the text";
   const after = m.after ? `, after “${m.after}”` : "";
@@ -532,6 +547,14 @@ export class HistoryPanel {
       box.append(el("p", "muted", "…"));
       return box;
     }
+    // Find and replace: one line for each action, taken back whole; its places follow as snippets.
+    (shown.replacements ?? []).forEach((r, i) => {
+      const anchor = `replacement:${key}:${i}`;
+      const line = el("div", "history-field history-replacement");
+      line.classList.toggle("reverted", !r.inEffect);
+      line.append(el("span", "", replacementLine(r)), this.snippetActions(work, anchor, r.changes, r.inEffect, r.revertedBy));
+      box.append(line, ...this.previewFor(anchor));
+    });
     shown.snippets.forEach((snippet, i) => {
       const anchor = `snippet:${key}:${i}`;
       box.append(this.snippet(work, snippet, "session", this.snippetActions(work, anchor, snippet.changes, snippet.inEffect, snippet.revertedBy)), ...this.previewFor(anchor));
@@ -543,7 +566,7 @@ export class HistoryPanel {
       box.append(line, ...this.previewFor(anchor));
     });
     for (const line of libraryLines(shown.fields)) box.append(el("p", "history-field quiet", line));
-    if (shown.snippets.length === 0 && shown.fields.length === 0) box.append(el("p", "muted", "Nothing to show here any more."));
+    if (shown.snippets.length === 0 && shown.fields.length === 0 && !shown.replacements?.length) box.append(el("p", "muted", "Nothing to show here any more."));
     return box;
   }
 
@@ -589,7 +612,7 @@ export class HistoryPanel {
       box.classList.add("findable");
       box.title = "Show this in the text";
       box.addEventListener("click", () => {
-        void this.hooks.find(work, find.first, find.last).then((found) => {
+        void this.hooks.locate(work, find.first, find.last).then((found) => {
           if (!found) this.hooks.error("That text isn't in the Work any more.");
         });
       });
@@ -766,7 +789,7 @@ export class HistoryPanel {
   /** Selects one of a notice's places; the button then offers the next. */
   private showPlace(work: string, n: NoticeView, i: number) {
     const place = n.places[Math.min(i, n.places.length - 1)];
-    void this.hooks.find(work, place.first, place.last).then((found) => {
+    void this.hooks.locate(work, place.first, place.last).then((found) => {
       if (!found) this.hooks.error("That text isn't in the Work any more.");
     });
     if (n.places.length > 1) {

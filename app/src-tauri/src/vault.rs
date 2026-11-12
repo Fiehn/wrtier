@@ -788,10 +788,10 @@ impl Vault {
                 *target = Some(found);
             }
         }
-        let edits = ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks | Op::Tints | Op::Find { .. } | Op::Stretch { .. }));
+        let edits = ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks | Op::Tints | Op::Locate { .. } | Op::Stretch { .. }));
         // What might add or remove an Inclusion (not plain typing).
         let reshapes = ops.iter().any(|op| match op {
-            Op::Cursor { .. } | Op::Marks | Op::Tints | Op::Find { .. } | Op::Stretch { .. } => false,
+            Op::Cursor { .. } | Op::Marks | Op::Tints | Op::Locate { .. } | Op::Stretch { .. } => false,
             Op::Type { from, to, .. } => from != to,
             _ => true,
         });
