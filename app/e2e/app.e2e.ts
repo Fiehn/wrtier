@@ -472,6 +472,8 @@ test("Settings shows the App version, and an update found is saved for, download
 
   const dialog = app.locator("#update");
   await expect(app.locator("#update-message")).toHaveText("Version 0.2.0 is available (you have 0.1.2).");
+  // The check is over: no moving bar until a download starts.
+  await expect(app.locator("#update-progress")).toBeHidden();
   await expect(app.locator("#update-close")).toHaveText("Not now");
   await app.locator("#update-whats-new").click();
   await app.locator("#update-install").click();
@@ -490,6 +492,7 @@ test("with no newer version, the dialog says so and offers nothing to install", 
   await app.locator("#open-settings").click();
   await app.locator("#check-updates").click();
   await expect(app.locator("#update-message")).toHaveText("You have the newest version (0.1.2).");
+  await expect(app.locator("#update-progress")).toBeHidden(); // the check is over: nothing moving
   await expect(app.locator("#update-install")).toBeHidden();
   await expect(app.locator("#update-whats-new-row")).toBeHidden();
   await app.locator("#update-close").click();

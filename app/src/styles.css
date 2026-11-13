@@ -1438,7 +1438,13 @@ dialog#reviewers {
   margin: 0 0 12px;
 }
 
-/* App updates: the download's progress in the Updates dialog. */
+/* App updates: the download's progress in the Updates dialog. Only while downloading: without
+   a value it's an indeterminate bar, moving back and forth, so it must really be gone when hidden
+   (the display below would otherwise beat the hidden attribute). */
+.update-progress[hidden] {
+  display: none;
+}
+
 .update-progress {
   display: block;
   width: 100%;
