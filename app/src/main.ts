@@ -17,6 +17,7 @@ import { openShortcuts } from "./shortcutsdialog";
 import { openLicenses } from "./licensesdialog";
 import { browseForVault, ensureFilesAccess, onAndroid } from "./android";
 import { PhoneLayout } from "./phone";
+import { PanelSizes } from "./panelsizes";
 import { fillNewWorkMods, openMods } from "./modsdialog";
 import { inUse, modNamed, type ModsState } from "./mods";
 import { ChapterList } from "./chapterlist";
@@ -1442,6 +1443,23 @@ try {
   setSidebar(true);
 }
 $("sidebar-toggle").addEventListener("click", () => setSidebar($("app").classList.contains("sidebar-hidden")));
+
+// ---- The panels' widths: dragged by their edges, remembered on this Device ----
+
+new PanelSizes({
+  vault: {
+    element: $("sidebar"),
+    handle: $("sidebar-resizer"),
+    shown: () => !$("app").classList.contains("sidebar-hidden"),
+    setShown: setSidebar,
+  },
+  side: {
+    element: $("side-panel"),
+    handle: $("panel-resizer"),
+    shown: () => panel.shown,
+    setShown: (shown) => panel.setShown(shown),
+  },
+});
 
 
 // ---- Formatted and Raw view (Ctrl+E), remembered on this Device ----

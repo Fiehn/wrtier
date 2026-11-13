@@ -209,6 +209,81 @@ test("the sidebar and the right panel hide and show", async ({ app }) => {
   await expect(panel).toBeVisible({ visible: panelShown });
 });
 
+test("the panels are resized by dragging their edges, and the widths are remembered", async ({ app }) => {
+  const sidebar = app.locator("#sidebar");
+  const panel = app.locator("#side-panel");
+  const sidebarEdge = app.locator("#sidebar-resizer");
+  const panelEdge = app.locator("#panel-resizer");
+  const width = (l: Locator) => l.evaluate((e) => Math.round(e.getBoundingClientRect().width));
+  /** Drags a handle sideways by `by` pixels, in a few steps as a hand would. */
+  async function drag(handle: Locator, ...steps: number[]) {
+    const box = (await handle.boundingBox())!;
+    let x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await app.mouse.move(x, y);
+    await app.mouse.down();
+    for (const by of steps) await app.mouse.move((x += by), y, { steps: 3 });
+    await app.mouse.up();
+  }
+  if (!(await panel.isVisible())) await app.keyboard.press("Control+Shift+P");
+  await expect(panel).toBeVisible();
+
+  // Today's widths, at first.
+  expect(await width(sidebar)).toBe(280);
+  expect(await width(panel)).toBe(538); // 42% of 1280
+
+  await drag(panelEdge, -40); // the Side panel's edge is on its left
+  expect(await width(panel)).toBe(578);
+  // As wide as it can go: the editor keeps 400px.
+  await drag(panelEdge, -400);
+  expect(await width(panel)).toBe(1280 - 280 - 400);
+  await panelEdge.dblclick();
+  expect(await width(panel)).toBe(538);
+
+  // A wider Vault browser: the Side panel gives way so the editor keeps its 400px.
+  await drag(sidebarEdge, 100);
+  expect(await width(sidebar)).toBe(380);
+  expect(await width(panel)).toBe(1280 - 380 - 400);
+
+  // Dragged all the way: hidden, and dragging back out before letting go brings it back.
+  await drag(sidebarEdge, -300, 150);
+  await expect(sidebar).toBeVisible();
+  expect(await width(sidebar)).toBe(230);
+  // Hidden by dragging, it comes back at the width it had before that drag.
+  await drag(sidebarEdge, -200);
+  await expect(sidebar).toBeHidden();
+  await expect(sidebarEdge).toBeHidden();
+  await app.keyboard.press("Control+\\");
+  await expect(sidebar).toBeVisible();
+  expect(await width(sidebar)).toBe(230);
+
+  // The keyboard: arrows move the edge, Enter goes back to the default.
+  await panelEdge.focus();
+  await app.keyboard.press("ArrowLeft");
+  expect(await width(panel)).toBe(538 + 16);
+  await app.keyboard.press("Shift+ArrowRight");
+  expect(await width(panel)).toBe(538 + 16 - 64);
+  await app.keyboard.press("Home");
+  expect(await width(panel)).toBe(260);
+  await app.keyboard.press("Enter");
+  expect(await width(panel)).toBe(538);
+  await drag(panelEdge, -40);
+
+  // A narrower window shows them narrower (the Side panel first) without forgetting.
+  await app.setViewportSize({ width: 850, height: 800 });
+  expect(await width(panel)).toBe(260);
+  expect(await width(sidebar)).toBe(850 - 400 - 260);
+  await app.setViewportSize({ width: 1280, height: 800 });
+  expect(await width(sidebar)).toBe(230);
+  expect(await width(panel)).toBe(578);
+
+  // Remembered on this Device.
+  await app.reload();
+  await expect(line(app, "She walked home.")).toBeVisible();
+  expect(await width(sidebar)).toBe(230);
+  expect(await width(panel)).toBe(578);
+});
+
 test("a Vault theme wins over the built-in colours it starts from", async ({ page }) => {
   await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
   await page.addInitScript(() => {

@@ -208,6 +208,50 @@ body {
   display: none;
 }
 
+/* A panel's edge next to the editor, dragged to change its width (panelsizes.ts). It sits over
+   the panel's border line and takes no room: the negative margins cancel its width. */
+.resizer {
+  flex: none;
+  position: relative;
+  z-index: 5;
+  width: 7px;
+  margin: 0 -3px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.resizer[hidden] {
+  display: none;
+}
+
+.resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 3px;
+  background: transparent;
+  transition: background-color 0.1s;
+}
+
+.resizer:hover::after,
+.resizer:focus-visible::after,
+.resizer.dragging::after {
+  background: var(--accent);
+}
+
+.resizer:focus-visible {
+  outline: none;
+}
+
+/* While dragging, the pointer stays the resize arrow and nothing gets selected. */
+body.resizing,
+body.resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
 .row {
   display: flex;
   gap: 6px;
@@ -226,6 +270,7 @@ kbd {
 
 /* ---- The Vault browser ---- */
 
+/* Its width is set by panelsizes.ts; 280px is the default it uses too. */
 #sidebar {
   width: 280px;
   flex: none;
@@ -613,6 +658,7 @@ main > :not(#panes) {
 
 /* ---- The side panel: Pages | Comments, one at a time ---- */
 
+/* Its width is set by panelsizes.ts, which has the same default. */
 #side-panel {
   width: min(42%, 640px);
   min-width: 260px;
@@ -2647,7 +2693,8 @@ body.phone #app {
 
 body.phone #app > #sidebar,
 body.phone #app > main,
-body.phone #app > #side-panel {
+body.phone #app > #side-panel,
+body.phone #app > .resizer {
   display: none;
 }
 

@@ -49,6 +49,8 @@
           <p id="chapters-none" class="muted" hidden>No Chapters yet. A line starting with “= ” starts one.</p>
         </details>
       </aside>
+      <!-- The panels' edges next to the editor, dragged to change their widths (panelsizes.ts). -->
+      <div id="sidebar-resizer" class="resizer" role="separator" aria-orientation="vertical" aria-controls="sidebar" aria-label="Width of the Vault browser" tabindex="0" title="Drag to change the width, or drag all the way to hide. Double-click for the default width."></div>
 
       <main>
         <div id="problems" hidden></div>
@@ -105,6 +107,7 @@
 
       <!-- The panel beside the editor: the Page preview, the Comments and the History, one tab
            at a time. Shown and hidden as a whole. -->
+      <div id="panel-resizer" class="resizer" role="separator" aria-orientation="vertical" aria-controls="side-panel" aria-label="Width of the side panel" tabindex="0" title="Drag to change the width, or drag all the way to hide. Double-click for the default width." hidden></div>
       <aside id="side-panel" hidden>
         <header class="panel-tabs">
           <div role="tablist" aria-label="Panel">
