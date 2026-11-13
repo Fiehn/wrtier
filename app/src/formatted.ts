@@ -373,6 +373,9 @@ export function markupSpans(state: EditorState): Span[] | null {
   return state.field(spansField, false) ?? null;
 }
 
+/** What reading a text as the Formatted view shows it needs, without an editor (find.ts `readingOfText`). */
+export const readingFields = [spansField, pairsField];
+
 /** For tests: the brackets' field and filter, which need the spans' field before them. */
 export const bracketsForTests = [spansField, pairsField, keepBrackets];
 

@@ -100,12 +100,14 @@ pub struct PreambleView {
 /// one field per file, holding the version written.
 const DEFAULTS_RECORD: &str = "defaults";
 
+mod find;
 mod history;
 mod inclusions;
 mod mods;
 mod moves;
 mod reviewers;
 mod settings;
+pub use find::TextForFinding;
 pub use inclusions::{ChapterChoice, InclusionView, Target};
 pub use history::{ComparisonView, HistoryView, RestorePreview, ReturnPreview, RevertPreview, SnippetsView};
 pub use mods::Mods;

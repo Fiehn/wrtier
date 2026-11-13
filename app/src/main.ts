@@ -28,6 +28,7 @@ import { SyncPanel } from "./syncpanel";
 import { UpdateDialog } from "./updates";
 import { UninstallDialog } from "./uninstall";
 import { FindBar } from "./findbar";
+import { FindInVault, type TextForFinding, type VaultWork } from "./findinvault";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -225,6 +226,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     preview.edited(id);
     chapterList.edited(id);
     countLine.edited(id);
+    findInVault.edited(id);
   },
   committed: (id) => preview.committed(id),
   cursor: (id, at) => {
@@ -592,7 +594,7 @@ async function openLibraryFile(path: string, title: string = library.titleOf(pat
 // The library changed: in a tab here, in another editor, or from another Device. The Page
 // preview uses the library's versions, so it's compiled again too.
 void listen("library-changed", () => {
-  library.refresh().then(() => refreshElements()).catch(showError);
+  library.refresh().then(() => refreshElements()).then(() => findInVault.libraryChanged()).catch(showError);
   void tabs.libraryChanged();
   void preview.preambleChanged(tabs.activeIsWork ? tabs.active : null);
 });
@@ -960,6 +962,7 @@ async function askDeviceName(suggested: string) {
 async function openVault(path: string) {
   clearError();
   await tabs.closeAll();
+  findInVault.reset();
   vaultOpen = false;
   let opened = await invoke<VaultOpened>("open_vault", { path, create: false });
   if (opened.status === "notAVault") {
@@ -1342,6 +1345,7 @@ async function refreshQuietly() {
   try {
     await refreshList();
     await refreshMods(); // another Device may have changed them
+    void findInVault.refresh(); // Works synced in, renamed or trashed: its list catches up
     remember();
   } catch (e) {
     showError(e);
@@ -1355,6 +1359,71 @@ window.addEventListener("blur", () => {
   remember();
   void tabs.leave();
 });
+
+// ---- Find in Vault (Ctrl+Shift+F): every Work's text, in place of the Works list ----
+
+/** The Works to find in, in the Works list's order (folders first, as it shows them). */
+function vaultWorks(): VaultWork[] {
+  const out: VaultWork[] = [];
+  const walk = (folder: Folder<Entry>) => {
+    for (const sub of folder.folders) walk(sub);
+    for (const e of folder.items) {
+      if (e.kind === "work" || e.kind === "newWork") out.push({ id: e.id, name: e.name, problem: null });
+      else if (e.kind === "newer") out.push({ id: e.id, name: e.name, problem: "made by a newer version of the app" });
+      else if (e.kind === "unreadable") out.push({ id: e.id, name: e.name, problem: e.reason });
+      // A leftover or blocked Text file isn't a Work.
+    }
+  };
+  walk(buildTree(entries, folders));
+  return out;
+}
+
+/** Shows a match found: its Work in a passing tab if it isn't open, the match selected. */
+async function showFound(id: string, from: number, to: number, focus: boolean) {
+  if (!tabs.has(id)) {
+    const work = await invoke<OpenedWork>("open_work", { id });
+    await tabs.addPassing(work, focus);
+    await refreshElements(work.id);
+    await refreshMods(work.id);
+    if (work.problems.length > 0) showProblems(work.problems);
+    if (entries.some((e) => e.id === id && e.kind === "newWork")) await refreshList(); // it has a History now
+  }
+  await tabs.reveal(id, from, to, focus);
+  if (focus) phone.toWrite();
+}
+
+const findInVault = new FindInVault({
+  works: vaultWorks,
+  openText: (id) => tabs.docOf(id),
+  read: (id, known) => invoke<TextForFinding>("text_for_finding", { id, known }),
+  elements: () => library.items.filter((i) => i.kind === "storyElement").map((i) => ({ name: i.name, title: i.title, shownAs: i.shownAs ?? "block", inWork: true })),
+  show: showFound,
+  openWithFind: async (id, query, match) => {
+    await openWork(id);
+    tabs.keep(id);
+    if (match) await tabs.reveal(id, match.from, match.to);
+    findBar.open(true, query);
+  },
+  shown: (open) => $("sidebar-vault").classList.toggle("finding", open),
+  error: showError,
+});
+
+/** Ctrl+Shift+F, or the button: the Vault browser shows (the Works screen on the phone), finding. */
+function openFindInVault() {
+  if (!vaultOpen) return;
+  setSidebar(true);
+  phone.show("works");
+  // A selection within one line in the editor is what to find, as with Ctrl+F.
+  const front = tabs.frontEditor();
+  let text: string | undefined;
+  if (front?.view.hasFocus) {
+    const { state } = front.view;
+    const s = state.selection.main;
+    if (!s.empty && state.doc.lineAt(s.from).number === state.doc.lineAt(s.to).number) text = state.sliceDoc(s.from, s.to);
+  }
+  findInVault.show(text);
+}
+$("open-find-in-vault").addEventListener("click", openFindInVault);
 
 // ---- Quick switcher (Ctrl+O) ----
 
@@ -1549,6 +1618,11 @@ const appCommands: Partial<Record<CommandId, () => boolean>> = {
     findBar.open(true);
     return true;
   },
+  findInVault: () => {
+    if (!vaultOpen) return false;
+    openFindInVault();
+    return true;
+  },
   // Only while the Page preview has the focus: in the editor these keys do nothing.
   zoomIn: () => inPages(() => preview.zoom.zoomIn()),
   zoomInAlt: () => inPages(() => preview.zoom.zoomIn()),
@@ -1579,6 +1653,9 @@ function showKeys() {
   findBar.showKeys();
   $("open-switcher-key").textContent = keyLabel("quickSwitcher");
   $("open-switcher-key").hidden = !keyLabel("quickSwitcher");
+  $("open-find-in-vault").title = withKey("Find some text in every Work", "findInVault");
+  $("find-in-vault-key").textContent = keyLabel("findInVault");
+  $("find-in-vault-key").hidden = !keyLabel("findInVault");
   $("view-mode").title = withKey("Switch between the Formatted and the Raw view", "toggleView");
   $("panel-toggle").title = withKey("The Page preview and the Comments", "togglePanel");
   $("panel-close").title = withKey("Hide the panel", "togglePanel");

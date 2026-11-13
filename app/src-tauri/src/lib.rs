@@ -153,6 +153,19 @@ fn open_work(state: State<AppState>, id: String) -> Result<OpenedWork, String> {
     with_app(&state, |app| open_vault_of(app)?.open_work(&id, now_ms()))
 }
 
+/// A Work's own text, for Find in Vault, unless it still has the stamp `known`. It runs off the
+/// main thread, and takes the app's lock only to find the Work's files: reading a History can
+/// take a while, and typing in an open Work mustn't wait for it.
+#[tauri::command]
+async fn text_for_finding(handle: AppHandle, id: String, known: Option<String>) -> Result<vault::TextForFinding, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = with_app(&handle.state::<AppState>(), |app| open_vault_of(app)?.text_source(&id))?;
+        Ok(source.read(known.as_deref()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Makes a new, empty Work and opens it.
 #[tauri::command]
 fn create_work(state: State<AppState>, id: String) -> Result<OpenedWork, String> {
@@ -1112,6 +1125,7 @@ pub fn run() {
             work_text,
             get_inclusions,
             chapters_of,
+            text_for_finding,
             check_inclusion,
             create_collection,
             missing_inclusions,

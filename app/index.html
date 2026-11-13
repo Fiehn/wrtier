@@ -24,6 +24,20 @@
         <div id="sidebar-vault">
         <div id="vault-actions" class="row" hidden>
           <button id="open-switcher" type="button" title="Open a Work (Ctrl+O)">Open… <kbd id="open-switcher-key">Ctrl+O</kbd></button>
+          <button id="open-find-in-vault" type="button" title="Find some text in every Work (Ctrl+Shift+F)">Find in Vault <kbd id="find-in-vault-key">Ctrl+Shift+F</kbd></button>
+        </div>
+        <!-- Find in Vault (findinvault.ts): in place of the Works list while it's open. -->
+        <div id="vault-find" role="search" aria-label="Find in Vault" hidden>
+          <div class="vf-field">
+            <input id="vault-find-input" type="text" placeholder="Find in every Work" aria-label="Find in every Work" autocomplete="off" spellcheck="false" />
+            <button id="vault-find-close" type="button" class="link" title="Back to the Works (Esc)" aria-label="Close Find in Vault">✕</button>
+          </div>
+          <div class="row vf-options">
+            <label class="check"><input type="checkbox" id="vault-find-case" /> Match case</label>
+            <label class="check"><input type="checkbox" id="vault-find-words" /> Whole words</label>
+          </div>
+          <p id="vault-find-summary" class="muted" aria-live="polite" hidden></p>
+          <div id="vault-find-results" tabindex="0" aria-label="Matches"></div>
         </div>
         <ul id="works"></ul>
         <details id="library" hidden>

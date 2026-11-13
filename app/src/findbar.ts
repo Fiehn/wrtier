@@ -78,16 +78,21 @@ export class FindBar {
 
   /**
    * Ctrl+F (or Ctrl+H, `withReplace`). A selection within one line is what to find; one over
-   * several lines is where to look ("In selection").
+   * several lines is where to look ("In selection"). With `query` (Find in Vault's "Open with
+   * Find and replace"), that's what to find instead, in the whole Work.
    */
-  open(withReplace: boolean) {
+  open(withReplace: boolean, query?: Query) {
     const target = this.hooks.target();
     if (!target) return;
     this.switchTo(target.view);
     const { state } = target.view;
     const selection = state.selection.main;
     this.scope = null;
-    if (!selection.empty) {
+    if (query) {
+      this.input.value = query.text;
+      this.matchCase.checked = query.matchCase;
+      this.wholeWords.checked = query.wholeWords;
+    } else if (!selection.empty) {
       if (state.doc.lineAt(selection.from).number === state.doc.lineAt(selection.to).number) {
         this.input.value = state.sliceDoc(selection.from, selection.to);
       } else {

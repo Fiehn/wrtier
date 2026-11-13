@@ -10,10 +10,10 @@
 // word, so only the words that differ are rewritten: markup inside stays put, and the rest
 // keeps its History. With case ignored, the replacement copies the match's capitals.
 
-import { StateEffect, StateField, type EditorState, type Extension } from "@codemirror/state";
+import { EditorState, StateEffect, StateField, type Extension, type Text } from "@codemirror/state";
 import { Decoration, EditorView } from "@codemirror/view";
-import { markupSpans, pairsIn } from "./formatted";
-import { callAt, elementsFacet } from "./elements";
+import { markupSpans, pairsIn, readingFields } from "./formatted";
+import { callAt, elementsFacet, type ElementInfo } from "./elements";
 import { INCLUSION, inclusionsOf, includedFinds, rawLine, type IncludedFind, type InclusionView } from "./inclusions";
 
 export type Query = { text: string; matchCase: boolean; wholeWords: boolean };
@@ -188,6 +188,16 @@ export function readingOfState(state: EditorState): Reading {
     }
   }
   return marks.read();
+}
+
+/**
+ * Any Work's own text as it reads in the Formatted view, whichever view it's in or whether it's
+ * open at all (Find in Vault). `elements`: the Style library's Story elements, whose calls show
+ * as chips and stop a match, as in the editor.
+ */
+export function readingOfText(doc: string | Text, elements: ElementInfo[]): Reading {
+  const state = EditorState.create({ doc, extensions: [readingFields, elementsFacet.of(elements)] });
+  return readingOfState(state);
 }
 
 // ---- Matching ----

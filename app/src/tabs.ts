@@ -3,7 +3,7 @@
 // shown at a time.
 
 import { invoke } from "@tauri-apps/api/core";
-import { Compartment, EditorState } from "@codemirror/state";
+import { Compartment, EditorState, Transaction, type Text } from "@codemirror/state";
 import { EditorView, dropCursor, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from "@codemirror/view";
 import { history, historyKeymap, standardKeymap } from "@codemirror/commands";
 import { LibraryFile, fromDisk, libraryId } from "./libraryfile";
@@ -116,6 +116,18 @@ class Tab {
   /** Does it (maybe) have Inclusions? Then they're asked for again now and then, to stay live. */
   hasInclusions = false;
   private fetchingInclusions = false;
+  /**
+   * A passing tab (Find in Vault opened it, its name in italics): the next Work opened that way
+   * takes its place. It becomes an ordinary tab once typed in, or its name is double-clicked.
+   */
+  passing = false;
+
+  setPassing(on: boolean) {
+    this.passing = on;
+    this.label.classList.toggle("passing", on);
+    const name = this.label.querySelector<HTMLElement>(".tab-name")!;
+    name.title = on ? `${this.id}: just passing (double-click to keep it open)` : this.id;
+  }
 
   /**
    * Asks Rust for the Inclusions as they are now (the included Works may have changed in other
@@ -204,6 +216,7 @@ class Tab {
     name.type = "button";
     name.className = "tab-name";
     name.addEventListener("click", () => void tabs.activate(this.id));
+    name.addEventListener("dblclick", () => this.setPassing(false));
     const close = document.createElement("button");
     close.type = "button";
     close.className = "tab-close";
@@ -266,6 +279,10 @@ class Tab {
           modsCompartment.of([]),
           EditorView.updateListener.of((update) => {
             for (const tr of update.transactions) this.sync.track(tr);
+            // Written in by the Author (not a merge or a change from elsewhere): it stays open.
+            if (this.passing && update.transactions.some((tr) => tr.docChanged && tr.annotation(Transaction.userEvent) !== undefined)) {
+              this.setPassing(false);
+            }
             if (update.docChanged) tabs.events.edited(this.sync.id);
             if (update.docChanged || update.selectionSet) tabs.events.cursor(this.sync.id, update.state.selection.main.head);
           }),
@@ -718,10 +735,43 @@ export class Tabs {
     await this.activate(work.id);
   }
 
-  /** Brings a tab to the front. The one that was there is left: its Text file catches up. */
-  async activate(id: string) {
+  /**
+   * Shows a Work opened by Find in Vault in a passing tab: in place of the one there is (which
+   * closes), or a new one. A Work already open keeps its own tab.
+   */
+  async addPassing(work: OpenedWork, focus: boolean) {
+    if (this.find(work.id)) return this.activate(work.id, focus);
+    const old = this.open.find((t) => t.passing && t.isWork);
+    const tab = new Tab(work, this);
+    tab.setPassing(true);
+    if (old) {
+      old.label.before(tab.label);
+      this.open.splice(this.open.indexOf(old), 0, tab);
+    } else {
+      this.open.push(tab);
+    }
+    await this.activate(work.id, focus);
+    if (old) await this.close(old.id);
+  }
+
+  /** A passing tab becomes an ordinary one. */
+  keep(id: string) {
+    this.find(id)?.setPassing(false);
+  }
+
+  /** A Work's text as its open tab has it now (typing included, not copied), or null if it isn't open. */
+  docOf(id: string): Text | null {
     const tab = this.find(id);
-    if (!tab || tab === this.front) return;
+    return tab?.isWork ? tab.view.state.doc : null;
+  }
+
+  /** Brings a tab to the front (`focus`: and into its editor). The one that was there is left: its Text file catches up. */
+  async activate(id: string, focus = true) {
+    const tab = this.find(id);
+    if (!tab || tab === this.front) {
+      if (tab && focus) tab.view.focus();
+      return;
+    }
     const previous = this.front;
     this.front = tab;
     for (const t of this.open) {
@@ -729,7 +779,7 @@ export class Tabs {
       t.label.classList.toggle("active", t === tab);
     }
     this.show(tab);
-    tab.view.focus();
+    if (focus) tab.view.focus();
     this.events.changed();
     if (previous) await this.leave(previous);
   }
@@ -796,14 +846,14 @@ export class Tabs {
     await this.find(id)?.idle();
   }
 
-  /** Brings a Work to the front and selects a stretch of its text (UTF-16 positions). */
-  async reveal(id: string, from: number, to: number) {
+  /** Brings a Work to the front and selects a stretch of its text (UTF-16 positions); `focus`: into the editor. */
+  async reveal(id: string, from: number, to: number, focus = true) {
     const tab = this.find(id);
     if (!tab) return;
-    await this.activate(id);
+    await this.activate(id, focus);
     const length = tab.view.state.doc.length;
     tab.view.dispatch({ selection: { anchor: Math.min(from, length), head: Math.min(to, length) }, scrollIntoView: true });
-    tab.view.focus();
+    if (focus) tab.view.focus();
   }
 
   /** What the timer said about a Work (Rust names it by the ID the tab had). */

@@ -130,6 +130,12 @@
     get_layout: () => ({ tabs: ["Rain"], active: "Rain", cursors: {} }),
     save_layout: () => null,
     open_work: ({ id }) => ({ id, name: id, text: fake.texts[id], problems: [], notice: null }),
+    /** Find in Vault: a Work's text, stamped with how many edits the fake has had. */
+    text_for_finding: ({ id, known }) => {
+      if (!(id in fake.texts)) return { kind: "unreadable", reason: "isn't in the Vault any more" };
+      const stamp = String(fake.changes);
+      return known === stamp ? { kind: "unchanged" } : { kind: "text", stamp, text: fake.texts[id] };
+    },
     leave_work: () => null,
     close_work: () => null,
     get_mods: ({ id }) => ({ work: fake.mods[id] ?? [], newWorks: [], hidden: [] }),

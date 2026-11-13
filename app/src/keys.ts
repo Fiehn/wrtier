@@ -5,7 +5,7 @@
 // so the editor's own keymap can use them as they are.
 
 export type CommandId =
-  | "toggleWorks" | "quickSwitcher" | "closeTab" | "toggleView" | "togglePanel" | "preamble" | "mods" | "find" | "replace"
+  | "toggleWorks" | "quickSwitcher" | "closeTab" | "toggleView" | "togglePanel" | "preamble" | "mods" | "find" | "replace" | "findInVault"
   | "undo" | "redo" | "redoAlt" | "strong" | "emph" | "addComment" | "textHistory"
   | "zoomIn" | "zoomInAlt" | "zoomOut" | "zoomReset"
   // The Chapter list Mod's
@@ -34,6 +34,7 @@ export const COMMANDS: Command[] = [
   { id: "mods", label: "The Work's Mods", where: "app", key: "Mod-Shift-k" },
   { id: "find", label: "Find and replace", where: "app", key: "Mod-f" },
   { id: "replace", label: "Find and replace, with Replace showing", where: "app", key: "Mod-h" },
+  { id: "findInVault", label: "Find in Vault (every Work)", where: "app", key: "Mod-Shift-f" },
   { id: "undo", label: "Undo", where: "editor", key: "Mod-z" },
   { id: "redo", label: "Redo", where: "editor", key: "Mod-Shift-z" },
   { id: "redoAlt", label: "Redo (a second key)", where: "editor", key: "Mod-y" },

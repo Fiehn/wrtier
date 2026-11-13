@@ -363,6 +363,85 @@ test("the Page preview zooms by its menu, its keys and Ctrl + wheel, keeping the
   await expect(zoom).toHaveValue(String(landed));
 });
 
+test("Find in Vault finds in every Work, opens matches in a passing tab, and keeps up", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+  await page.addInitScript(() => {
+    const fake = (window as any).__fake;
+    fake.texts["Zampanò"] += "\n= Ending\n\nA *lighthouse* -- far off.\n";
+    fake.texts.Salt = "= Shore\n\nThe lighthouse stood alone.\n";
+  });
+  await page.goto("/");
+  await expect(line(page, "She walked home.")).toBeVisible();
+
+  const panel = page.locator("#vault-find");
+  const input = page.locator("#vault-find-input");
+  const summary = page.locator("#vault-find-summary");
+  const group = (name: string) => page.locator(".vf-work", { has: page.locator(".vf-work-name", { hasText: name }) });
+  const tab = (name: string) => page.locator(".tab", { has: page.locator(".tab-name", { hasText: name }) });
+
+  // Ctrl+Shift+F: in place of the Works list, the cursor in the field.
+  await page.keyboard.press("Control+Shift+F");
+  await expect(panel).toBeVisible();
+  await expect(page.locator("#works")).toBeHidden();
+  await expect(input).toBeFocused();
+
+  // As it reads: markup hidden, -- a dash; each match under its Chapter. Rain (open) has none.
+  await input.fill("lighthouse");
+  await expect(summary).toHaveText("2 matches in 2 Works");
+  await expect(group("Zampanò").locator(".vf-chapter")).toHaveText("Ending");
+  await expect(group("Zampanò").locator(".vf-match")).toHaveText("A lighthouse – far off.");
+  await expect(group("Salt").locator(".vf-match mark")).toHaveText("lighthouse");
+  await expect(group("Rain")).toHaveCount(0);
+
+  // A match opens its Work in a passing tab; the next Work found takes its place.
+  await group("Zampanò").locator(".vf-match").click();
+  await expect(tab("Zampanò")).toHaveClass(/passing/);
+  await expect(tab("Zampanò")).toHaveClass(/active/);
+  await expect(page.locator(".cm-line", { hasText: "far off" }).first()).toBeVisible();
+  await group("Salt").locator(".vf-match").click();
+  await expect(tab("Salt")).toHaveClass(/passing/);
+  await expect(tab("Zampanò")).toHaveCount(0);
+  await expect(tab("Rain")).not.toHaveClass(/passing/); // open before: untouched
+  // Double-clicked, it stays.
+  await tab("Salt").locator(".tab-name").dblclick();
+  await expect(tab("Salt")).not.toHaveClass(/passing/);
+
+  // Up and Down go through the matches, keeping the focus in the list.
+  await input.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator(".vf-match.current")).toHaveCount(1);
+  await expect(page.locator("#vault-find-results")).toBeFocused();
+
+  // The list keeps up with typing in an open Work.
+  await tab("Rain").locator(".tab-name").click();
+  await endOf(page, "The end.");
+  await page.keyboard.type(" A lighthouse.");
+  await expect(summary).toHaveText("3 matches in 3 Works");
+  await expect(group("Rain").locator(".vf-chapter")).toHaveText("Three");
+  await page.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/find-in-vault.png` : undefined });
+
+  // Open with Find and replace: an ordinary tab, Find showing the same search, for Replace all there.
+  await group("Zampanò").locator(".vf-open-find").click();
+  await expect(tab("Zampanò")).not.toHaveClass(/passing/);
+  await expect(page.locator("#find-bar")).toBeVisible();
+  await expect(page.locator("#find-input")).toHaveValue("lighthouse");
+  await expect(page.locator("#find-replace-row")).toBeVisible();
+
+  // Esc: the Works come back; the search is still there next time.
+  await input.focus();
+  await page.keyboard.press("Escape");
+  await expect(panel).toBeHidden();
+  await expect(page.locator("#works")).toBeVisible();
+  await page.locator("#open-find-in-vault").click();
+  await expect(input).toHaveValue("lighthouse");
+  await expect(summary).toHaveText("3 matches in 3 Works");
+
+  expect(errors, "errors in the page").toEqual([]);
+  expect(await page.evaluate(() => (window as any).__fake.unknown), "commands the fake doesn't know").toEqual([]);
+});
+
 test("a Vault theme wins over the built-in colours it starts from", async ({ page }) => {
   await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
   await page.addInitScript(() => {

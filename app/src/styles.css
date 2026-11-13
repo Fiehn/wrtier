@@ -310,6 +310,143 @@ kbd {
   margin-bottom: 10px;
 }
 
+/* ---- Find in Vault (findinvault.ts): in place of the Works list while it's open ---- */
+
+#sidebar-vault.finding > :not(#vault-actions, #vault-find) {
+  display: none;
+}
+
+#vault-find:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vf-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#vault-find-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 4px 6px;
+}
+
+#vault-find-summary {
+  margin: 0;
+  font-size: 12px;
+}
+
+#vault-find-results:focus {
+  outline: none;
+}
+
+.vf-work-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 4px 2px;
+  text-align: left;
+  font-weight: 600;
+}
+
+.vf-work-head:hover {
+  background: var(--chip);
+}
+
+.vf-work-head .chevron {
+  display: inline-block;
+  color: var(--muted);
+  transition: transform 0.1s;
+}
+
+.vf-work-head[aria-expanded="true"] .chevron {
+  transform: rotate(90deg);
+}
+
+.vf-work-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.vf-work-name small,
+.vf-count {
+  font-weight: normal;
+  color: var(--muted);
+}
+
+.vf-count {
+  font-size: 12px;
+}
+
+.vf-matches {
+  margin: 0 0 8px 14px;
+}
+
+.vf-matches[hidden] {
+  display: none;
+}
+
+.vf-chapter {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 6px 0 2px;
+}
+
+/* A match's few words: wrapping onto a second line in a narrow Vault browser, never more. */
+.vf-match {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  width: 100%;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  padding: 3px 6px;
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.vf-match:hover {
+  background: var(--chip);
+}
+
+.vf-match.current {
+  background: var(--chip-open);
+}
+
+.vf-match mark {
+  background: var(--find-current);
+  color: inherit;
+  border-radius: 2px;
+}
+
+.vf-open-find {
+  font-size: 12px;
+  margin: 4px 0 0 6px;
+}
+
+.vf-cap {
+  font-size: 12px;
+  margin: 8px 0;
+}
+
+.vf-unsearched p {
+  margin: 4px 0;
+  font-size: 12px;
+}
+
 #works,
 #works ul,
 #trash-list {
@@ -570,6 +707,13 @@ kbd {
 /* A library file's tab: set apart from the Works' tabs. */
 .tab.library .tab-name {
   font-style: italic;
+}
+
+/* A passing tab (Find in Vault): the next Work found takes its place. Faint as well as italic,
+   so it isn't taken for a library file's. */
+.tab.passing .tab-name {
+  font-style: italic;
+  color: var(--muted);
 }
 
 #trash {
