@@ -121,12 +121,13 @@
           <header>
             <select id="preview-version" title="The Work now, or as it was at one of its Milestones" hidden></select>
             <select id="preview-look" title="Which of the Work's Looks the pages are in (remembered on this Device)" hidden></select>
+            <select id="preview-zoom" aria-label="Zoom" title="How big the pages are shown (remembered on this Device). Ctrl + mouse wheel or a pinch over the pages zooms too."></select>
             <span class="spacer"></span>
             <button id="preview-pdf" type="button" class="link" title="Export the Work as a PDF">PDF…</button>
             <button id="preview-docx" type="button" class="link" title="Export the Work as a manuscript .docx">.docx…</button>
           </header>
           <div id="preview-bar" hidden></div>
-          <div id="preview-pages"></div>
+          <div id="preview-pages" tabindex="0" aria-label="Pages"></div>
         </section>
         <section id="comments-pane" role="tabpanel" aria-labelledby="panel-tab-comments" hidden>
           <label class="check"><input type="checkbox" id="comments-show-resolved" /> Show resolved</label>

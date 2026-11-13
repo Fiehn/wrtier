@@ -42,6 +42,8 @@
     update: { kind: "newest", current: "0.1.2" },
     /** What "Uninstall…" finds before asking (lib.rs's UninstallCheck). */
     uninstallCheck: { problem: null, unsaved: [] },
+    /** The pages a compile gives (their sizes in points). None unless a test adds some. */
+    pages: [],
   };
   window.__fake = fake;
 
@@ -181,7 +183,14 @@
       fake.included[id][k].settled = true;
       return null;
     },
-    compile_preview: () => ({ pages: [], stale: false, errors: [], warnings: [], deviceFonts: [], ms: 1 }),
+    compile_preview: () => ({ pages: fake.pages, stale: false, errors: [], warnings: [], deviceFonts: [], ms: 1 }),
+    /** A plain page with its number on it. */
+    preview_page: ({ page }) => {
+      const { width, height } = fake.pages[page];
+      const hash = `page-${page}`;
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}"><text x="40" y="80" font-size="24">Page ${page + 1}</text></svg>`;
+      return { hash, svg };
+    },
     forget_preview: () => null,
     preview_locate: () => null,
     get_history: () => ({ sessions: [], milestones: [], notices: [], more: false }),

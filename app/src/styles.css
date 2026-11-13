@@ -718,6 +718,7 @@ main > :not(#panes) {
 
 #preview header {
   display: flex;
+  flex-wrap: wrap; /* a narrow panel puts the Export links on a line of their own */
   align-items: baseline;
   gap: 6px;
   padding: 10px 16px 8px;
@@ -765,11 +766,27 @@ main > :not(#panes) {
   max-width: 50%;
 }
 
+#preview-zoom {
+  font: inherit;
+  font-size: 13px;
+}
+
+/* Focusable, so the zoom keys work after clicking beside the pages (zoom.ts). Zoomed in past
+   the panel's width, a page scrolls sideways; narrower pages stay centred. */
 #preview-pages {
   flex: 1;
-  overflow-y: auto;
+  overflow: auto;
   padding: 8px 16px 24px;
   position: relative; /* pages measure their place from here, for following the cursor */
+}
+
+#preview-pages:focus {
+  outline: none;
+}
+
+#preview-pages:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 #preview-pages .page {

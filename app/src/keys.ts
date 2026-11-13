@@ -7,14 +7,15 @@
 export type CommandId =
   | "toggleWorks" | "quickSwitcher" | "closeTab" | "toggleView" | "togglePanel" | "preamble" | "mods" | "find" | "replace"
   | "undo" | "redo" | "redoAlt" | "strong" | "emph" | "addComment" | "textHistory"
+  | "zoomIn" | "zoomInAlt" | "zoomOut" | "zoomReset"
   // The Chapter list Mod's
   | "nextChapter" | "previousChapter" | "chapterUp" | "chapterDown";
 
 export type Command = {
   id: CommandId;
   label: string;
-  /** "app": anywhere in the app; "editor": while writing in a Work. */
-  where: "app" | "editor";
+  /** "app": anywhere in the app; "editor": while writing in a Work; "pages": in the Page preview. */
+  where: "app" | "editor" | "pages";
   key: string;
   /**
    * The Mod it belongs to (mods.ts), if any. It's listed under that Mod whether or not any Work
@@ -40,6 +41,11 @@ export const COMMANDS: Command[] = [
   { id: "emph", label: "Emphasis (italic)", where: "editor", key: "Mod-i" },
   { id: "addComment", label: "Add a Comment", where: "editor", key: "Mod-Shift-m" },
   { id: "textHistory", label: "History of this text (the selection, or the paragraph)", where: "editor", key: "Mod-Shift-h" },
+  { id: "zoomIn", label: "Zoom in", where: "pages", key: "Mod-=" },
+  // Keyboards where + is a key of its own (Danish, German …), and the number pad's.
+  { id: "zoomInAlt", label: "Zoom in (a second key)", where: "pages", key: "Mod-+" },
+  { id: "zoomOut", label: "Zoom out", where: "pages", key: "Mod--" },
+  { id: "zoomReset", label: "Fit the pages to the width", where: "pages", key: "Mod-0" },
   { id: "nextChapter", label: "Go to the next Chapter", where: "editor", key: "Alt-PageDown", mod: "chapters" },
   { id: "previousChapter", label: "Go to the previous Chapter", where: "editor", key: "Alt-PageUp", mod: "chapters" },
   { id: "chapterUp", label: "Move this Chapter up (a Move)", where: "editor", key: "Alt-Shift-PageUp", mod: "chapters" },

@@ -284,6 +284,85 @@ test("the panels are resized by dragging their edges, and the widths are remembe
   expect(await width(panel)).toBe(578);
 });
 
+test("the Page preview zooms by its menu, its keys and Ctrl + wheel, keeping the spot in view", async ({ app }) => {
+  const panel = app.locator("#side-panel");
+  const list = app.locator("#preview-pages");
+  const zoom = app.locator("#preview-zoom");
+  const first = list.locator(".page").first();
+  const width = (l: Locator) => l.evaluate((e) => Math.round(e.getBoundingClientRect().width));
+  /** The page in the middle of the view. */
+  const middlePage = () =>
+    list.evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return (hit?.closest(".page") as HTMLElement | null)?.dataset.page ?? null;
+    });
+
+  // Eight A5 pages (420 × 595 points).
+  if (await panel.isVisible()) await app.keyboard.press("Control+Shift+P");
+  await app.evaluate(() => {
+    (window as any).__fake.pages = Array.from({ length: 8 }, () => ({ width: 420, height: 595 }));
+  });
+  await app.keyboard.press("Control+Shift+P");
+  await app.locator("#panel-tab-pages").click();
+  await expect(list.locator(".page img")).not.toHaveCount(0);
+
+  // Fit width at first: as wide as the column.
+  await expect(zoom).toHaveValue("width");
+  const column = await list.evaluate((el) => el.clientWidth - 32);
+  expect(await width(first)).toBe(column);
+
+  // 100% is the real size: 420pt is 560 CSS pixels, wider than the panel, so it scrolls sideways.
+  await zoom.selectOption("1");
+  expect(await width(first)).toBe(560);
+  expect(await list.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+
+  // Fit page: a whole page in view.
+  await zoom.selectOption("page");
+  const room = await list.evaluate((el) => el.clientHeight - 8 - 14);
+  expect(await first.evaluate((e) => Math.round(e.getBoundingClientRect().height))).toBe(room);
+
+  // The keys, while the pages have the focus; the spot in the middle stays there.
+  await zoom.selectOption("1");
+  await list.evaluate((el) => (el.scrollTop = el.scrollHeight / 2));
+  const middle = await middlePage();
+  expect(middle).not.toBeNull();
+  await list.focus();
+  await app.keyboard.press("Control+=");
+  await expect(zoom).toHaveValue("1.25");
+  expect(await width(first)).toBe(700);
+  expect(await middlePage()).toBe(middle);
+  await app.keyboard.press("Control+-");
+  await app.keyboard.press("Control+-");
+  await expect(zoom).toHaveValue("0.75");
+  expect(await middlePage()).toBe(middle);
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/zoom.png` : undefined });
+  await app.keyboard.press("Control+0");
+  await expect(zoom).toHaveValue("width");
+
+  // Ctrl + wheel over the pages: about 10% a notch, and the menu shows where it landed.
+  await zoom.selectOption("1");
+  await first.hover();
+  await app.keyboard.down("Control");
+  await app.mouse.wheel(0, -100);
+  await app.keyboard.up("Control");
+  await expect.poll(() => width(first)).toBeGreaterThan(560);
+  const landed = Number(await zoom.inputValue());
+  expect(landed).toBeGreaterThan(1);
+  expect(landed).toBeLessThanOrEqual(1.25);
+
+  // In the editor, the keys do nothing to the pages.
+  await line(app, "She walked home.").click();
+  const before = await width(first);
+  await app.keyboard.press("Control+=");
+  expect(await width(first)).toBe(before);
+
+  // Remembered on this Device.
+  await app.reload();
+  await expect(line(app, "She walked home.")).toBeVisible();
+  await expect(zoom).toHaveValue(String(landed));
+});
+
 test("a Vault theme wins over the built-in colours it starts from", async ({ page }) => {
   await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
   await page.addInitScript(() => {

@@ -280,7 +280,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
 
 // ---- The side panel (Ctrl+Shift+P): the Page preview and the Comments ----
 
-const preview = new PagePreview($("preview-bar"), $("preview-pages"), $<HTMLSelectElement>("preview-look"), $<HTMLSelectElement>("preview-version"), {
+const preview = new PagePreview($("preview-bar"), $("preview-pages"), $<HTMLSelectElement>("preview-look"), $<HTMLSelectElement>("preview-version"), $<HTMLSelectElement>("preview-zoom"), {
   settled: (id) => tabs.settled(id),
   reveal: (id, from, to) => {
     phone.toWrite();
@@ -1549,7 +1549,19 @@ const appCommands: Partial<Record<CommandId, () => boolean>> = {
     findBar.open(true);
     return true;
   },
+  // Only while the Page preview has the focus: in the editor these keys do nothing.
+  zoomIn: () => inPages(() => preview.zoom.zoomIn()),
+  zoomInAlt: () => inPages(() => preview.zoom.zoomIn()),
+  zoomOut: () => inPages(() => preview.zoom.zoomOut()),
+  zoomReset: () => inPages(() => preview.zoom.reset()),
 };
+
+/** Runs a Page preview command if the focus is in the Page preview (its pages or its header). */
+function inPages(run: () => void): boolean {
+  if (!$("preview").contains(document.activeElement)) return false;
+  run();
+  return true;
+}
 
 window.addEventListener("keydown", (e) => {
   for (const [command, run] of Object.entries(appCommands)) {

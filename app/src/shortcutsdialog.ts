@@ -23,6 +23,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 const GROUPS: { title: string; has: (c: Command) => boolean }[] = [
   { title: "Anywhere in the app", has: (c) => !c.mod && c.where === "app" },
   { title: "While writing", has: (c) => !c.mod && c.where === "editor" },
+  { title: "In the Page preview", has: (c) => !c.mod && c.where === "pages" },
   ...MODS.map((m) => ({ title: `${m.name} (a Mod)`, has: (c: Command) => c.mod === m.id })),
 ];
 
