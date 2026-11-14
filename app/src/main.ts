@@ -3,12 +3,13 @@ import { listen } from "@tauri-apps/api/event";
 import { type WorkState } from "./sync";
 import { Tabs, type Layout, type OpenedWork } from "./tabs";
 import { buildTree, folderOf, foldersOf, hiddenFolderAt, withoutHidden, type Folder } from "./tree";
+import { destinations, movedFolders, whereTo, type Movable, type Taken } from "./vaultmoves";
 import { showMenu, type MenuItem } from "./menu";
 import { PagePreview, type Milestone } from "./preview";
 import { LibraryPanel, type LibraryItem } from "./library";
 import { libraryId, libraryPath } from "./libraryfile";
 import { PreambleDialog, type Preamble } from "./preambledialog";
-import { openReviewers, type Reviewer } from "./reviewers";
+import { colourOf, COLOURS, openReviewers, type Reviewer } from "./reviewers";
 import { SidePanel, type PanelTab } from "./sidepanel";
 import { CommentsPanel } from "./commentspanel";
 import { HistoryPanel, type ComparisonView, type HistoryView, type RestorePreview, type ReturnPreview, type RevertPreview, type SnippetsView } from "./historypanel";
@@ -18,8 +19,8 @@ import { openLicenses } from "./licensesdialog";
 import { browseForVault, ensureFilesAccess, onAndroid } from "./android";
 import { PhoneLayout } from "./phone";
 import { PanelSizes } from "./panelsizes";
-import { fillNewWorkMods, openMods } from "./modsdialog";
-import { inUse, modNamed, type ModsState } from "./mods";
+import { fillNewWorkMods, fillVaultMods, openMods } from "./modsdialog";
+import { inUse, modNamed, vaultModInUse, type ModsState } from "./mods";
 import { ChapterList } from "./chapterlist";
 import { CountLine } from "./countline";
 import { endWorkDrag, startWorkDrag, type ChapterChoice } from "./inclusions";
@@ -47,7 +48,9 @@ type Entry = { id: string; name: string } & EntryKind;
 /** `newer`: made by a newer version of the app, so updating this Device is the fix. */
 type SyncProblem = { path: string; reason: string; newer?: boolean };
 /** `hidden`: the Hidden folders on this Device (vault/hidden.rs), ones gone from the Vault too. */
-type Listing = { entries: Entry[]; problems: SyncProblem[]; folders: string[]; hidden: string[] };
+type Listing = { entries: Entry[]; problems: SyncProblem[]; folders: string[]; hidden: string[]; colours: Colours };
+/** The colours of Works (by ID) and folders (by path), each a Reviewer colour slot (vault/colours.rs). */
+type Colours = { works: Record<string, string>; folders: Record<string, string> };
 type TrashedWork = { id: string; name: string };
 type Settings = {
   /** "system", "light", "dark", or "vault:<file>" for a theme in the Vault's `themes/`. */
@@ -608,7 +611,7 @@ void listen("library-changed", () => {
 const modsOf = new Map<string, ModsState>();
 
 /** Is this Mod at work in this Work on this Device? */
-const modInUse = (id: string, mod: string) => inUse(modsOf.get(id) ?? { work: [], newWorks: [], hidden: [] }).some((m) => m.id === mod);
+const modInUse = (id: string, mod: string) => inUse(modsOf.get(id) ?? { work: [], newWorks: [], vault: [], hidden: [] }).some((m) => m.id === mod);
 
 function setModsOf(id: string, state: ModsState) {
   modsOf.set(id, state);
@@ -948,6 +951,40 @@ let entries: Entry[] = [];
 let folders: string[] = [];
 /** The Hidden folders on this Device: they and everything in them are left out of the Vault browser. */
 let hiddenFolders: string[] = [];
+let colours: Colours = { works: {}, folders: {} };
+/** The Vault's Mods as last read: which Vault Mods it has, and which this Device hides. */
+let vaultMods: ModsState | null = null;
+
+/** Is the Colours Vault Mod at work here? Its colours are kept either way. */
+const coloursOn = () => vaultMods !== null && vaultModInUse(vaultMods, "colours");
+
+/** A Work's or folder's colour as CSS, if it has one and Colours is on. */
+function shownColour(slot: string | undefined): string | null {
+  return slot && coloursOn() ? colourOf(slot) : null;
+}
+
+/** Gives a list item its colour (on its name; for a folder, also its chevron and line). */
+function paint(item: HTMLElement, slot: string | undefined) {
+  const css = shownColour(slot);
+  if (!css) return;
+  item.classList.add("coloured");
+  item.style.setProperty("--item-colour", css);
+}
+
+/** Colour… on a Work or folder: a row of the colours, "no colour" first, at (x, y). */
+function pickColour(x: number, y: number, current: string | undefined, save: (colour: string) => Promise<unknown>) {
+  const choose = (colour: string) => () => act(async () => {
+    await save(colour);
+    await refreshList();
+    void findInVault.refresh();
+  });
+  showMenu(x, y, [{
+    swatches: [
+      { label: "No colour", css: null, chosen: !current, run: choose("") },
+      ...COLOURS.map((c) => ({ label: c[0].toUpperCase() + c.slice(1), css: colourOf(c), chosen: current === c, run: choose(c) })),
+    ],
+  }]);
+}
 
 async function askDeviceName(suggested: string) {
   const input = $<HTMLInputElement>("name-input");
@@ -1058,6 +1095,7 @@ function workItem(entry: Entry): HTMLElement {
   const item = document.createElement("li");
   item.className = `work-entry ${entry.kind}`;
   item.dataset.id = entry.id;
+  paint(item, colours.works[entry.id]);
   const pill = document.createElement("div");
   pill.className = "entry";
   const name = document.createElement("button");
@@ -1073,10 +1111,16 @@ function workItem(entry: Entry): HTMLElement {
   });
   pill.append(name);
   if (entry.kind === "work") {
-    // Dragged into a Work's text, it's included there.
+    // Dragged into a Work's text, it's included there; onto a folder, it moves there.
     pill.draggable = true;
-    pill.addEventListener("dragstart", (e) => startWorkDrag(e, entry.id));
-    pill.addEventListener("dragend", endWorkDrag);
+    pill.addEventListener("dragstart", (e) => {
+      startWorkDrag(e, entry.id);
+      startMove({ kind: "work", id: entry.id });
+    });
+    pill.addEventListener("dragend", () => {
+      endWorkDrag();
+      endMove();
+    });
   }
   const actions = document.createElement("span");
   actions.className = "entry-actions";
@@ -1103,6 +1147,7 @@ function folderItem(folder: Folder<Entry>): HTMLElement {
   const item = document.createElement("li");
   item.className = "folder";
   item.dataset.path = folder.path;
+  paint(item, colours.folders[folder.path]);
   const isOpen = openFolders.has(folder.path);
   item.classList.toggle("expanded", isOpen);
   const toggle = document.createElement("button");
@@ -1113,6 +1158,23 @@ function folderItem(folder: Folder<Entry>): HTMLElement {
   chevron.className = "chevron";
   chevron.textContent = "▸";
   toggle.append(chevron, document.createTextNode(folder.name));
+  // Dragged by its row onto another folder (or the space around the list), it moves there.
+  // The whole item is what's dragged, as WebKit won't drag a button itself; a press anywhere
+  // else in it (on "Empty") doesn't drag, and a drag of something inside it isn't this one's.
+  item.draggable = true;
+  let pressedRow = false;
+  // (mousedown, not pointerdown: WebKit sends no pointerdown for the press after a drag.)
+  item.addEventListener("mousedown", (e) => (pressedRow = toggle.contains(e.target as Node)));
+  item.addEventListener("dragstart", (e) => {
+    if (e.target !== item) return;
+    if (!pressedRow) return e.preventDefault();
+    e.dataTransfer?.setData(FOLDER_DRAG, folder.path); // some engines only drag with data
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+    startMove({ kind: "folder", path: folder.path });
+  });
+  item.addEventListener("dragend", (e) => {
+    if (e.target === item) endMove();
+  });
   toggle.addEventListener("click", () => {
     if (openFolders.has(folder.path)) openFolders.delete(folder.path);
     else openFolders.add(folder.path);
@@ -1151,6 +1213,8 @@ async function refreshList() {
   entries = listing.entries;
   folders = listing.folders;
   hiddenFolders = listing.hidden ?? [];
+  colours = listing.colours ?? { works: {}, folders: {} };
+  vaultMods = await invoke<ModsState>("get_mods", { id: null });
   showProblems(listing.problems);
   const list = $("works");
   list.replaceChildren();
@@ -1223,12 +1287,7 @@ async function renameFolder(path: string) {
   const name = await askText(`Rename the folder ${path} to:`, path, "Rename",
     "Everything in it goes along. Move it into another folder with a slash.");
   if (name === null || name === path) return;
-  const moved = await invoke<[string, string][]>("rename_folder", { path, name });
-  for (const [from, to] of moved) tabs.renamed(from, to);
-  // Folders that were open stay open under their new name.
-  const renamed = name.split("/").map((p) => p.trim()).join("/");
-  openFolders = new Set([...openFolders].map((f) => (f === path || f.startsWith(`${path}/`) ? renamed + f.slice(path.length) : f)));
-  saveOpenFolders();
+  await moveFolder(path, name); // folders that were open stay open under their new name
   await refreshList();
 }
 
@@ -1279,11 +1338,13 @@ $("sidebar-vault").addEventListener("contextmenu", (e) => {
         },
         { label: "Preamble…", run: run(() => editPreamble(entry.id)) },
         { label: "Mods…", run: run(() => editMods(entry.id)) },
+        ...(coloursOn() ? [{ label: "Colour…", run: () => pickColour(at.x, at.y, colours.works[entry.id], (colour) => invoke("set_work_colour", { id: entry.id, colour })) }] : []),
         { label: "Name a Milestone…", run: run(() => nameMilestone(entry.id)) },
         { label: "Export PDF…", run: run(() => exportPdf(entry.id)) },
         { label: "Export .docx…", run: run(() => exportDocx(entry.id)) },
         "separator",
         { label: "Rename…", run: run(() => renameWork(entry.id)) },
+        ...moveToItem({ kind: "work", id: entry.id }, at),
         { label: "Move to trash", run: run(() => trashWork(entry.id)) },
         "separator",
         { label: folder ? "New Work in this folder…" : "New Work…", run: run(() => newWork(undefined, folder)) },
@@ -1298,7 +1359,9 @@ $("sidebar-vault").addEventListener("contextmenu", (e) => {
       { label: "New folder here…", run: run(() => newFolder(path)) },
       "separator",
       { label: "Rename folder…", run: run(() => renameFolder(path)) },
+      ...moveToItem({ kind: "folder", path }, { x: e.clientX, y: e.clientY }),
       { label: "Hide folder", run: run(() => setFolderHidden(path, true)) },
+      ...(coloursOn() ? [{ label: "Colour…", run: () => pickColour(e.clientX, e.clientY, colours.folders[path], (colour) => invoke("set_folder_colour", { path, colour })) }] : []),
       { label: "Move folder to trash", run: run(() => trashFolder(path)) },
     ];
   } else {
@@ -1313,9 +1376,158 @@ $("sidebar-vault").addEventListener("contextmenu", (e) => {
 async function renameWork(id: string) {
   const name = await askText(`Rename ${id} to:`, id, "Rename");
   if (name === null || name === id) return;
+  await moveWork(id, name);
+  await refreshList();
+}
+
+/** Renames a Work, maybe into another folder: its tab, and its place in a Collection being picked, go along. */
+async function moveWork(id: string, name: string): Promise<string> {
   const renamed = await invoke<string>("rename_work", { id, name });
   tabs.renamed(id, renamed);
+  picked = picked.map((p) => (p === id ? renamed : p));
+  return renamed;
+}
+
+/** Renames a folder, maybe into another: the tabs of Works in it, and the folders open in it, go along. */
+async function moveFolder(path: string, name: string): Promise<string> {
+  const moved = await invoke<[string, string][]>("rename_folder", { path, name });
+  for (const [from, to] of moved) tabs.renamed(from, to);
+  const renamed = name.split("/").map((p) => p.trim()).join("/");
+  openFolders = new Set(movedFolders(openFolders, path, renamed));
+  saveOpenFolders();
+  picked = picked.map((p) => (p.startsWith(`${path}/`) ? renamed + p.slice(path.length) : p));
+  return renamed;
+}
+
+// ---- Moving Works and folders: dragged onto a folder in the Vault browser, or Move to… ----
+
+/** What a folder dragged in the Vault browser carries: its path. */
+const FOLDER_DRAG = "application/x-wrtier-folder";
+
+/**
+ * What's being dragged to move, while it is: kept a moment past the drag's end, since WebKitGTK
+ * reports the end before the drop (see dragging.ts).
+ */
+let moving: Movable | null = null;
+let forgetMoving: number | undefined;
+/** A closed folder dragged over opens after a moment, to reach the folders in it. */
+let springOpen: { path: string; timer: number } | null = null;
+/** Why the move can't go where it's being dragged, as last said (said once, not on every move of the mouse). */
+let refusedSaid: string | null = null;
+
+function startMove(item: Movable) {
+  window.clearTimeout(forgetMoving);
+  moving = item;
+}
+
+function endMove() {
+  window.clearTimeout(forgetMoving);
+  forgetMoving = window.setTimeout(() => (moving = null), 1000);
+  showDropTarget(null);
+  springOpenSoon(null);
+  refusedSaid = null;
+}
+
+const taken = (): Taken => ({ works: entries.map((e) => e.id), folders });
+
+/**
+ * The folder a drop at `target` goes into: a folder's row (or anything inside it) is that
+ * folder, a Work's row is its folder, and the space around the list is the top of the Vault.
+ */
+function dropFolder(target: EventTarget | null): string {
+  const el = target instanceof Element ? target : null;
+  const work = el?.closest<HTMLElement>("#works li.work-entry");
+  if (work) return folderOf(work.dataset.id ?? "");
+  return el?.closest<HTMLElement>("#works li.folder")?.dataset.path ?? "";
+}
+
+/** Shades where a drop would go: a folder, or (for "") the whole list. */
+function showDropTarget(into: string | null) {
+  for (const el of document.querySelectorAll(".drop-target")) el.classList.remove("drop-target");
+  if (into === null) return;
+  const el = into === "" ? $("works") : document.querySelector(`#works li.folder[data-path="${CSS.escape(into)}"]`);
+  el?.classList.add("drop-target");
+}
+
+/** Opens a closed folder whose row has been dragged over for a moment. */
+function springOpenSoon(target: EventTarget | null) {
+  const row = target instanceof Element ? target.closest<HTMLElement>("#works .folder-toggle") : null;
+  const folderEl = row?.parentElement ?? null;
+  const path = folderEl && !folderEl.classList.contains("expanded") ? folderEl.dataset.path ?? null : null;
+  if (springOpen?.path === path) return;
+  if (springOpen) window.clearTimeout(springOpen.timer);
+  springOpen = path === null ? null : {
+    path,
+    timer: window.setTimeout(() => {
+      springOpen = null;
+      if (!folderEl!.classList.contains("expanded")) row!.click();
+    }, 750),
+  };
+}
+
+const vaultSide = $("sidebar-vault");
+vaultSide.addEventListener("dragover", (e) => {
+  if (!moving || vaultSide.classList.contains("finding")) return;
+  const into = dropFolder(e.target);
+  const result = whereTo(moving, into, taken());
+  springOpenSoon(e.target);
+  e.preventDefault(); // it's ours, wherever it is over the Vault browser
+  // Where it can't go, it can't be dropped (the cursor says so), and the info line says why.
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "to" in result ? "move" : "none";
+  showDropTarget("to" in result ? into : null);
+  if ("refused" in result && refusedSaid !== result.refused) showInfo(result.refused);
+  refusedSaid = "refused" in result ? result.refused : null;
+});
+vaultSide.addEventListener("dragleave", (e) => {
+  // Out of the Vault browser altogether (not just from one row to the next).
+  if (!(e.relatedTarget instanceof Node && vaultSide.contains(e.relatedTarget))) {
+    showDropTarget(null);
+    springOpenSoon(null);
+  }
+});
+vaultSide.addEventListener("drop", (e) => {
+  const item = moving;
+  if (!item || vaultSide.classList.contains("finding")) return;
+  e.preventDefault();
+  moving = null;
+  showDropTarget(null);
+  springOpenSoon(null);
+  refusedSaid = null;
+  const result = whereTo(item, dropFolder(e.target), taken());
+  if ("to" in result) act(() => moveTo(item, result.to));
+});
+
+/** Moves a Work or folder to `to`, then shows where it went: its folder opened, its row flashing. */
+async function moveTo(item: Movable, to: string) {
+  const moved = item.kind === "work" ? await moveWork(item.id, to) : await moveFolder(item.path, to);
+  foldersOf(moved).forEach((f) => openFolders.add(f));
+  saveOpenFolders();
   await refreshList();
+  void findInVault.refresh();
+  const row = item.kind === "work"
+    ? document.querySelector(`#works li.work-entry[data-id="${CSS.escape(moved)}"]`)
+    : document.querySelector(`#works li.folder[data-path="${CSS.escape(moved)}"]`);
+  if (!row) return;
+  row.scrollIntoView({ block: "nearest" });
+  row.classList.add("just-moved");
+  window.setTimeout(() => row.classList.remove("just-moved"), 1600);
+}
+
+/** Move to…: the folders it can go to (no Hidden ones), "Top of the Vault" first. None if there are none. */
+function moveToItem(item: Movable, at: { x: number; y: number }): MenuItem[] {
+  const choices = destinations(item, withoutHidden(entries, folders, hiddenFolders).folders);
+  if (choices.length === 0) return [];
+  return [{
+    label: "Move to…",
+    run: () => showMenu(at.x, at.y, choices.map((f) => ({
+      label: f === "" ? "Top of the Vault" : f,
+      run: () => act(async () => {
+        const result = whereTo(item, f, taken());
+        if ("refused" in result) showInfo(result.refused);
+        else if ("to" in result) await moveTo(item, result.to);
+      }),
+    }))),
+  }];
 }
 
 async function trashWork(id: string) {
@@ -1404,7 +1616,7 @@ function vaultWorks(): VaultWork[] {
   const walk = (folder: Folder<Entry>) => {
     for (const sub of folder.folders) walk(sub);
     for (const e of folder.items) {
-      if (e.kind === "work" || e.kind === "newWork") out.push({ id: e.id, name: e.name, problem: null });
+      if (e.kind === "work" || e.kind === "newWork") out.push({ id: e.id, name: e.name, problem: null, colour: shownColour(colours.works[e.id]) });
       else if (e.kind === "newer") out.push({ id: e.id, name: e.name, problem: "made by a newer version of the app" });
       else if (e.kind === "unreadable") out.push({ id: e.id, name: e.name, problem: e.reason });
       // A leftover or blocked Text file isn't a Work.
@@ -1841,6 +2053,13 @@ $("open-settings").addEventListener("click", () => act(async () => {
   applySettings(await invoke<Settings>("get_settings")); // another Device may have changed them
   await refreshList(); // and the Hidden folders with them
   fillHiddenFolders();
+  await fillVaultMods($("vault-mods"), (state) => {
+    vaultMods = state;
+    act(async () => {
+      await refreshList(); // the colours come or go
+      void findInVault.refresh();
+    });
+  });
   await fillNewWorkMods($("new-work-mods"));
   await ask($<HTMLDialogElement>("settings"));
 }));

@@ -760,6 +760,24 @@ fn rename_folder(state: State<AppState>, path: String, name: String) -> Result<V
     with_app(&state, |app| open_vault_of(app)?.rename_folder(&path, &name, now_ms()))
 }
 
+/// Adds a Vault Mod (such as Colours) to the whole Vault, or removes it.
+#[tauri::command]
+fn set_vault_mod(state: State<AppState>, name: String, on: bool) -> Result<vault::Mods, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_vault_mod(&name, on, now_ms()))
+}
+
+/// Gives a Work a colour (one of the Reviewers' slots), or none ("").
+#[tauri::command]
+fn set_work_colour(state: State<AppState>, id: String, colour: String) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.set_work_colour(&id, &colour, now_ms()))
+}
+
+/// Gives a folder a colour, or none ("").
+#[tauri::command]
+fn set_folder_colour(state: State<AppState>, path: String, colour: String) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.set_folder_colour(&path, &colour, now_ms()))
+}
+
 /// Hides a folder in the Vault browser, or shows it again. Returns the folders hidden now.
 #[tauri::command]
 fn set_folder_hidden(state: State<AppState>, path: String, hidden: bool) -> Result<Vec<String>, String> {
@@ -1154,6 +1172,9 @@ pub fn run() {
             create_folder,
             rename_folder,
             set_folder_hidden,
+            set_vault_mod,
+            set_work_colour,
+            set_folder_colour,
             set_hidden_folders_here,
             trash_folder,
             discard_work,

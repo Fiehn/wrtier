@@ -864,3 +864,92 @@ test("in the Raw view an Inclusion is one line saying what it includes", async (
   await app.locator("#view-mode").click();
   await expect(app.locator(".cm-inclusion .cm-inclusion-label")).toHaveText("Zampanò: The Navidson Record");
 });
+
+test("with the Colours Vault Mod, a Work is coloured from its right-click menu", async ({ app }) => {
+  const rain = app.locator("#works li.work-entry", { hasText: "Rain" });
+  // Without the Mod, there's no Colour… to choose.
+  await rain.locator(".entry-name").click({ button: "right" });
+  await expect(app.locator("#menu button", { hasText: "Mods…" })).toBeVisible();
+  await expect(app.locator("#menu button", { hasText: "Colour…" })).toHaveCount(0);
+  await app.keyboard.press("Escape");
+  // Switched on in Settings, for the whole Vault.
+  await app.locator("#open-settings").click();
+  await app.locator("#vault-mods label", { hasText: "Colours" }).locator("input").check();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.vaultMods)).toEqual(["colours"]);
+  await app.locator("#settings button[value=done]").click();
+  await rain.locator(".entry-name").click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Colour…" }).click();
+  await app.locator("#menu .colour-pick[aria-label=Red]").click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.colours.works.Rain)).toBe("red");
+  await expect(rain).toHaveClass(/coloured/);
+  const red = await app.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--reviewer-red").trim());
+  const shown = await rain.locator(".entry-name").evaluate((el) => getComputedStyle(el).color);
+  const probe = await app.evaluate((c) => {
+    const el = document.createElement("span");
+    el.style.color = c;
+    document.body.append(el);
+    const rgb = getComputedStyle(el).color;
+    el.remove();
+    return rgb;
+  }, red);
+  expect(shown).toBe(probe);
+  // No colour again.
+  await rain.locator(".entry-name").click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Colour…" }).click();
+  await app.locator("#menu .colour-pick[aria-label='No colour']").click();
+  await expect(rain).not.toHaveClass(/coloured/);
+});
+
+test("Works and folders move by dragging onto a folder, or with Move to…", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+  await page.addInitScript(() => {
+    const fake = (window as any).__fake;
+    fake.texts["Short stories/Storm"] = "= Storm\n\nThunder.\n";
+    fake.vaultFolders = ["Notes"];
+  });
+  await page.goto("/");
+  await expect(line(page, "She walked home.")).toBeVisible();
+  const renames = () => page.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd.startsWith("rename_")).map((e: any) => [e.cmd, e.args]));
+  const folderRow = (name: string) => page.locator("#works li.folder > .folder-toggle", { hasText: name }).first();
+
+  // Rain (open in its tab) dragged onto a closed folder: it moves in, the folder opens and the
+  // row flashes; the tab follows it.
+  await page.locator("#works li.work-entry", { hasText: "Rain" }).locator(".entry").dragTo(folderRow("Short stories"));
+  await expect.poll(renames).toEqual([["rename_work", { id: "Rain", name: "Short stories/Rain" }]]);
+  const moved = page.locator('#works li.work-entry[data-id="Short stories/Rain"]');
+  await expect(moved).toBeVisible();
+  await expect(moved).toHaveClass(/just-moved/);
+  await expect(line(page, "She walked home.")).toBeVisible();
+
+  // A folder dragged onto another goes in.
+  await folderRow("Notes").dragTo(folderRow("Short stories"));
+  await expect.poll(async () => (await renames()).at(-1)).toEqual(["rename_folder", { path: "Notes", name: "Short stories/Notes" }]);
+  await expect(page.locator('#works li.folder[data-path="Short stories/Notes"]')).toBeVisible();
+  // But not into one inside itself: nothing moves, and the info line says why.
+  await folderRow("Short stories").dragTo(folderRow("Notes"));
+  await expect(page.locator("#info")).toHaveText("A folder can't go inside itself.");
+  expect(await renames()).toHaveLength(2);
+
+  // Move to…: from the right-click menu, to the top of the Vault.
+  await page.locator("#works li.work-entry", { hasText: "Storm" }).locator(".entry-name").click({ button: "right" });
+  await page.locator("#menu button", { hasText: "Move to…" }).click();
+  await expect(page.locator("#menu button")).toHaveText(["Top of the Vault", "Short stories/Notes"]);
+  await page.locator("#menu button", { hasText: "Top of the Vault" }).click();
+  await expect.poll(async () => (await renames()).at(-1)).toEqual(["rename_work", { id: "Short stories/Storm", name: "Storm" }]);
+  await expect(page.locator('#works > li.work-entry[data-id="Storm"]')).toBeVisible();
+
+  expect(errors, "errors in the page").toEqual([]);
+  expect(await page.evaluate(() => (window as any).__fake.unknown), "commands the fake doesn't know").toEqual([]);
+});
+
+test("the Style library and the trash are pinned under the Works, above the Chapters", async ({ app }) => {
+  const order = await app.evaluate(() => [...document.querySelectorAll("#sidebar > *")].map((el) => el.id));
+  expect(order).toEqual(["sidebar-top", "sidebar-vault", "sidebar-shelf", "chapters"]);
+  await expect(app.locator("#sidebar-shelf #library")).toBeVisible();
+  // However the Works scroll, the shelf stays where it is.
+  const before = await app.locator("#sidebar-shelf").boundingBox();
+  await app.locator("#sidebar-vault").evaluate((el) => (el.scrollTop = 1000));
+  expect(await app.locator("#sidebar-shelf").boundingBox()).toEqual(before);
+});

@@ -32,7 +32,7 @@ export type Snippet = { before: string; match: string; after: string };
 export type VaultMatch = { from: number; to: number; chapter: string | null; snippet: Snippet };
 
 /** A Work in the Works list's order: its ID, its name, and why it can't be searched (if so). */
-export type VaultWork = { id: string; name: string; problem: string | null };
+export type VaultWork = { id: string; name: string; problem: string | null; colour?: string | null };
 
 // ---- Matching (pure) ----
 
@@ -366,7 +366,7 @@ export class FindInVault {
     this.status.hidden = !line;
 
     const hidden = this.input.value ? this.hooks.hiddenFolders?.() ?? 0 : 0;
-    const signature = JSON.stringify([listed.map(({ group, matches }) => [group.work.id, group.total, matches.map((m) => [m.from, m.to, m.snippet])]),
+    const signature = JSON.stringify([listed.map(({ group, matches }) => [group.work.id, group.work.colour, group.total, matches.map((m) => [m.from, m.to, m.snippet])]),
       unreadable.map((g) => [g.work.id, g.unreadable]), total, hidden]);
     if (signature === this.drawn) return;
     this.drawn = signature;
@@ -423,6 +423,7 @@ export class FindInVault {
     const name = document.createElement("span");
     name.className = "vf-work-name";
     name.textContent = work.name;
+    if (work.colour) name.style.color = work.colour; // the Colours Vault Mod
     const folder = work.id.slice(0, Math.max(0, work.id.length - work.name.length - 1));
     if (folder) {
       const where = document.createElement("small");

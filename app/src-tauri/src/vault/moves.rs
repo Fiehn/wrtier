@@ -141,9 +141,10 @@ impl Vault {
             self.aliases.insert(id.clone(), new_id.clone());
             moved.push((id, new_id));
         }
-        // The folder has moved already: if the mark can't be saved, it shows again, which is
-        // the safe way round (nothing is hidden by mistake).
+        // The folder has moved already: if a mark can't be saved, it shows again (uncoloured,
+        // or not hidden), which is the safe way round: nothing is hidden by mistake.
         let _ = self.hidden_folders_follow(path, &new_path, now_ms);
+        let _ = self.folder_colours_follow(path, &new_path, now_ms);
         Ok(moved)
     }
 

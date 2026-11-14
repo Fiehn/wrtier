@@ -413,12 +413,15 @@ const WORK_DRAG = "application/x-wrtier-work";
 let draggedWork: string | null = null;
 let forgetDrag: number | undefined;
 
-/** A Work's pill in the Vault browser started being dragged: it can be dropped in a Work's text. */
+/**
+ * A Work's pill in the Vault browser started being dragged: it can be dropped in a Work's text
+ * (a copy: it's included) or on a folder in the Vault browser (a move).
+ */
 export function startWorkDrag(event: DragEvent, work: string) {
   draggedWork = work;
   window.clearTimeout(forgetDrag);
   event.dataTransfer?.setData(WORK_DRAG, work);
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = "copy";
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "copyMove";
 }
 
 /** The drag ended (dropped, or let go elsewhere). */

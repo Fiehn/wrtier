@@ -52,7 +52,7 @@ The editor's font size is a setting of its own (Settings → Editor font size), 
 
 **Comments and Reviewers**
 
-Each Reviewer gets one of eight colour slots. Each slot has a colour for names and swatches, and a see-through `-soft` one for highlighting the text of their Comments. Overlapping highlights darken, so keep the soft colours see-through.
+Each Reviewer gets one of eight colour slots. Each slot has a colour for names and swatches, and a see-through `-soft` one for highlighting the text of their Comments. Overlapping highlights darken, so keep the soft colours see-through. The Colours Mod uses the same eight colours for the names of Works and folders in the Vault browser and Find in Vault, so each must read well as text on `--panel` too.
 
 | Variable | |
 |---|---|

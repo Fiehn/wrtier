@@ -24,6 +24,12 @@
     changes: 1,
     /** Mods each Work has (the Chapter list is on Rain). */
     mods: { Rain: ["chapters", "counts"] },
+    /** The Vault Mods the Vault has (none unless a test adds one). */
+    vaultMods: [],
+    /** The Vault's folders, besides those its Works are in (none unless a test adds some). */
+    vaultFolders: [],
+    /** The colours of Works and folders (vault/colours.rs). */
+    colours: { works: {}, folders: {} },
     /** Vault themes: file → { name, dark, css }. A test adds some before the page loads. */
     themes: {},
     settings: null,
@@ -121,7 +127,32 @@
       settings[name] = name === "fontSize" ? Number(value) : value === "on" ? true : value === "off" ? false : value;
       return settings;
     },
-    list_works: () => ({ entries: Object.keys(fake.texts).map((id) => ({ id, name: id, kind: "work" })), problems: fake.problems, folders: [], hidden: [] }),
+    list_works: () => {
+      const ids = Object.keys(fake.texts);
+      // Every folder a Work is in, and the folders those are in.
+      const inFolders = ids.flatMap((id) => id.split("/").slice(0, -1).map((_, i, parts) => parts.slice(0, i + 1).join("/")));
+      return {
+        entries: ids.map((id) => ({ id, name: id.split("/").pop(), kind: "work" })),
+        problems: fake.problems, folders: [...new Set([...fake.vaultFolders, ...inFolders])].sort(), hidden: [], colours: fake.colours,
+      };
+    },
+    rename_work: ({ id, name }) => {
+      fake.texts[name] = fake.texts[id];
+      delete fake.texts[id];
+      return name;
+    },
+    rename_folder: ({ path, name }) => {
+      const moved = (p) => (p === path || p.startsWith(`${path}/`) ? name + p.slice(path.length) : p);
+      for (const id of Object.keys(fake.texts)) {
+        const to = moved(id);
+        if (to !== id) {
+          fake.texts[to] = fake.texts[id];
+          delete fake.texts[id];
+        }
+      }
+      fake.vaultFolders = fake.vaultFolders.map(moved);
+      return [];
+    },
     list_trash: () => [],
     get_library: () => ({
       items: [{ kind: "style", name: "Courier voice", title: "Courier voice", path: "styles/Courier voice.typ", description: "", problems: [], writtenAs: null, shownAs: null, docx: null, styles: [] }],
@@ -138,7 +169,16 @@
     },
     leave_work: () => null,
     close_work: () => null,
-    get_mods: ({ id }) => ({ work: fake.mods[id] ?? [], newWorks: [], hidden: [] }),
+    get_mods: ({ id }) => ({ work: fake.mods[id] ?? [], newWorks: [], vault: fake.vaultMods, hidden: [] }),
+    set_vault_mod: ({ name, on }) => {
+      fake.vaultMods = on ? [...new Set([...fake.vaultMods, name])] : fake.vaultMods.filter((m) => m !== name);
+      return { work: [], newWorks: [], vault: fake.vaultMods, hidden: [] };
+    },
+    set_work_colour: ({ id, colour }) => {
+      if (colour) fake.colours.works[id] = colour;
+      else delete fake.colours.works[id];
+      return null;
+    },
     get_reviewers: () => [],
     get_preamble: () => ({ preamble: { looks: ["Paperback"], styles: [], elements: [], title: "Rain", author: "", language: "en", raw: "" }, rawOther: null }),
     get_milestones: () => fake.milestones ?? [],

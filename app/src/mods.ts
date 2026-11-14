@@ -39,8 +39,20 @@ export const MODS: Mod[] = [
   },
 ];
 
-/** Which Mods a Work has, which new Works get, and which this Device hides (vault/mods.rs). */
-export type ModsState = { work: string[]; newWorks: string[]; hidden: string[] };
+/**
+ * Vault Mods: added once to the whole Vault, since they're about the Vault and not about any
+ * one Work. Never offered in a Work's Mods, or for new Works.
+ */
+export const VAULT_MODS: Mod[] = [
+  {
+    id: "colours",
+    name: "Colours",
+    about: "Colour Works and folders in the Vault browser and Find in Vault. Right-click one and choose Colour…. Switching this off keeps the colours for later.",
+  },
+];
+
+/** Which Mods a Work has, which new Works get, which Vault Mods the Vault has, and which this Device hides (vault/mods.rs). */
+export type ModsState = { work: string[]; newWorks: string[]; vault: string[]; hidden: string[] };
 
 export function modNamed(id: string): Mod | undefined {
   return MODS.find((m) => m.id === id);
@@ -54,6 +66,16 @@ export function inUse(state: ModsState): Mod[] {
 /** The names in `list` this app has no Mod for (they come from a newer version). */
 export function unknownMods(list: string[]): string[] {
   return list.filter((id) => !modNamed(id));
+}
+
+/** The Vault Mods in `list` this app has no Vault Mod for. */
+export function unknownVaultMods(list: string[]): string[] {
+  return list.filter((id) => !VAULT_MODS.some((m) => m.id === id));
+}
+
+/** Is a Vault Mod at work on this Device: the Vault has it, and this Device doesn't hide it? */
+export function vaultModInUse(state: ModsState, id: string): boolean {
+  return (state.vault ?? []).includes(id) && !state.hidden.includes(id);
 }
 
 /** What a Work's Mods add to its editor. */

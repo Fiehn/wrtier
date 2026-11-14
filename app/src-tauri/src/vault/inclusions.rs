@@ -609,13 +609,19 @@ impl Vault {
         index
     }
 
-    /// A `.db`'s Work ID (`storage::identity`), read once and kept.
-    fn identity_of(&mut self, db: &Path) -> Option<String> {
-        if let Some(known) = self.identities.get(db) {
-            return known.clone();
+    /// A `.db`'s Work ID (`storage::identity`), read once and kept while the file is unchanged.
+    /// A different Work can come to have the same path (one renamed away, another made or moved
+    /// there), and an empty one gets its ID with its first Change: either way the file's time
+    /// differs, so it's read again.
+    pub(super) fn identity_of(&mut self, db: &Path) -> Option<String> {
+        let stamp = std::fs::metadata(db).and_then(|m| m.modified()).ok();
+        if let Some((at, known)) = self.identities.get(db) {
+            if stamp.is_some() && *at == stamp {
+                return known.clone();
+            }
         }
         let read = storage::identity(db).ok().flatten();
-        self.identities.insert(db.to_path_buf(), read.clone());
+        self.identities.insert(db.to_path_buf(), (stamp, read.clone()));
         read
     }
 
