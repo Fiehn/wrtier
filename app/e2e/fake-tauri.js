@@ -51,7 +51,7 @@
     theme: "light", fontSize: 17, themeHere: false, fontSizeHere: false,
     lineNumbers: false, lineNumbersHere: false, highlightLine: false, highlightLineHere: false,
     previewFollows: true, previewFollowsHere: false, commentHighlights: true, commentHighlightsHere: false,
-    shortcuts: {}, shortcutsHere: false,
+    shortcuts: {}, shortcutsHere: false, hiddenFoldersHere: false,
   };
 
   /** Applies one of the editor's edit ops to a Work's text (positions are UTF-16, as JS counts). */
@@ -121,7 +121,7 @@
       settings[name] = name === "fontSize" ? Number(value) : value === "on" ? true : value === "off" ? false : value;
       return settings;
     },
-    list_works: () => ({ entries: Object.keys(fake.texts).map((id) => ({ id, name: id, kind: "work" })), problems: fake.problems, folders: [] }),
+    list_works: () => ({ entries: Object.keys(fake.texts).map((id) => ({ id, name: id, kind: "work" })), problems: fake.problems, folders: [], hidden: [] }),
     list_trash: () => [],
     get_library: () => ({
       items: [{ kind: "style", name: "Courier voice", title: "Courier voice", path: "styles/Courier voice.typ", description: "", problems: [], writtenAs: null, shownAs: null, docx: null, styles: [] }],

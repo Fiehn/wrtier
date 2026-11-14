@@ -52,7 +52,7 @@ fn free_id(base: &Path, id: &str) -> Result<String, String> {
 }
 
 /// A folder's path under `base` from its ID ("Short stories/Old"), staying inside `base`.
-fn folder_under(base: &Path, path: &str) -> Result<PathBuf, String> {
+pub(super) fn folder_under(base: &Path, path: &str) -> Result<PathBuf, String> {
     let parts: Vec<&str> = path.split('/').collect();
     if parts.iter().any(|p| p.is_empty() || *p == "." || *p == ".." || p.contains(['\\', ':'])) {
         return Err(format!("not a folder in this Vault: {path:?}"));
@@ -78,7 +78,7 @@ impl Vault {
 
     /// Checks a folder name the Author typed (each part must be a valid folder name everywhere,
     /// and not one the Vault browser skips). Returns it tidied.
-    fn checked_folder(&self, path: &str) -> Result<String, String> {
+    pub(super) fn checked_folder(&self, path: &str) -> Result<String, String> {
         let parts: Vec<&str> = path.split('/').map(str::trim).collect();
         for (i, part) in parts.iter().enumerate() {
             check_name(part, i == 0, false).map_err(|e| e.replace("A Work needs", "A folder needs"))?;
@@ -103,9 +103,9 @@ impl Vault {
         self.works.keys().filter(|id| id.starts_with(&prefix)).cloned().collect()
     }
 
-    /// Renames (or moves) a folder with everything in it. Works open in it keep their tabs.
-    /// Returns, for each of those, its old and new ID.
-    pub fn rename_folder(&mut self, path: &str, new_path: &str) -> Result<Vec<(String, String)>, String> {
+    /// Renames (or moves) a folder with everything in it. Works open in it keep their tabs, and
+    /// Hidden folders at or inside it stay hidden. Returns, for each open Work, its old and new ID.
+    pub fn rename_folder(&mut self, path: &str, new_path: &str, now_ms: u64) -> Result<Vec<(String, String)>, String> {
         let from = folder_under(&self.root, path)?;
         if !from.is_dir() {
             return Err(format!("{path} isn't a folder in the Vault anymore."));
@@ -141,6 +141,9 @@ impl Vault {
             self.aliases.insert(id.clone(), new_id.clone());
             moved.push((id, new_id));
         }
+        // The folder has moved already: if the mark can't be saved, it shows again, which is
+        // the safe way round (nothing is hidden by mistake).
+        let _ = self.hidden_folders_follow(path, &new_path, now_ms);
         Ok(moved)
     }
 
@@ -367,13 +370,13 @@ mod tests {
         let mut vault = open(root);
         vault.create_work("Short stories/Rain", 1000).unwrap();
         vault.edit("Short stories/Rain", vec![typing(0, "abc")], 2000).unwrap(); // a burst is open
-        let moved = vault.rename_folder("Short stories", "Stories").unwrap();
+        let moved = vault.rename_folder("Short stories", "Stories", 2500).unwrap();
         assert_eq!(moved, vec![("Short stories/Rain".to_string(), "Stories/Rain".to_string())]);
         vault.edit("Short stories/Rain", vec![typing(3, "d")], 2100).unwrap(); // still on its way under the old ID
         vault.close_work("Stories/Rain", 3000);
         assert_eq!(storage::load(&root.join("Stories/Rain.db"), ME).unwrap().1.text(), "abcd");
         assert!(!root.join("Short stories").exists(), "never recreated at the old place");
-        assert!(vault.rename_folder("Stories", "Stories/Inside").is_err(), "not inside itself");
+        assert!(vault.rename_folder("Stories", "Stories/Inside", 2600).is_err(), "not inside itself");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTree, foldersOf, type Folder } from "./tree";
+import { buildTree, folderOf, foldersOf, hiddenFolderAt, withoutHidden, type Folder } from "./tree";
 
 /** The tree as indented lines: folders end with a slash. */
 function lines(folder: Folder<{ id: string }>, depth = 0): string[] {
@@ -35,5 +35,28 @@ describe("the Vault browser's tree", () => {
   it("names the folders a Work is inside", () => {
     expect(foldersOf("Short stories/Old/Rain")).toEqual(["Short stories", "Short stories/Old"]);
     expect(foldersOf("Rain")).toEqual([]);
+  });
+});
+
+describe("Hidden folders", () => {
+  it("finds the outermost Hidden folder a folder is, or is inside", () => {
+    const hidden = ["Old drafts/2023", "Old drafts"];
+    expect(hiddenFolderAt("Old drafts", hidden)).toBe("Old drafts");
+    expect(hiddenFolderAt("Old drafts/2023/Spring", hidden)).toBe("Old drafts");
+    expect(hiddenFolderAt("Old drafts copy", hidden)).toBeNull();
+    expect(hiddenFolderAt("", hidden)).toBeNull();
+    expect(folderOf("Short stories/Old/Rain")).toBe("Short stories/Old");
+    expect(folderOf("Rain")).toBe("");
+  });
+
+  it("leaves out what's in them, and counts each shut one once", () => {
+    const items = ["Rain", "Old drafts/Rain v1", "Old drafts/2023/Fog", "Old drafts copy/Storm"].map((id) => ({ id }));
+    const folders = ["Old drafts", "Old drafts/2023", "Old drafts copy", "Notes"];
+    // One inside another, and one gone from the Vault: neither counted.
+    const shown = withoutHidden(items, folders, ["Old drafts", "Old drafts/2023", "Gone"]);
+    expect(shown.items.map((e) => e.id)).toEqual(["Rain", "Old drafts copy/Storm"]);
+    expect(shown.folders).toEqual(["Old drafts copy", "Notes"]);
+    expect(shown.shut).toEqual(["Old drafts"]);
+    expect(lines(buildTree(shown.items, shown.folders))).toEqual(["Notes/", "Old drafts copy/", "  Storm", "Rain"]);
   });
 });

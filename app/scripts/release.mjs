@@ -175,14 +175,27 @@ if (changesFiles) {
 git(["tag", tag]);
 console.log(`Tagged ${tag}.`);
 
+// The branch and the tag go in one push (one login, one connection), all or nothing: the tag is
+// what starts the release, so it must never be left behind by a branch push that got stuck.
+const pushBoth = `git push --atomic origin ${branch} ${tag}`;
 if (push) {
+  console.log(`\nPushing ${branch} and ${tag}…`);
   try {
-    execFileSync("git", ["push", "origin", branch], { cwd: root, stdio: "inherit" });
-    execFileSync("git", ["push", "origin", tag], { cwd: root, stdio: "inherit" });
+    execFileSync("git", ["push", "--atomic", "origin", branch, tag], { cwd: root, stdio: "inherit" });
   } catch {
-    fail(`Pushing failed (see above). The commit and tag are here; push them yourself once it's sorted:\n  git push origin ${branch}\n  git push origin ${tag}`);
+    fail(`Pushing failed (see above). The commit and tag are here, nothing reached GitHub; once it's sorted:\n  ${pushBoth}`);
   }
-  console.log(`\nPushed ${branch} and ${tag}. The release builds at https://github.com/Fiehn/Wrtier/actions`);
+  // Checked, not assumed: the release only builds if GitHub has the tag.
+  let there = "";
+  try {
+    there = git(["ls-remote", "--tags", "origin", `refs/tags/${tag}`], { quiet: true });
+  } catch {
+    // can't tell: said below
+  }
+  if (there === "") {
+    fail(`git said it pushed, but GitHub doesn't show the tag ${tag} (yet?). Check https://github.com/Fiehn/Wrtier/tags, and if it's missing:\n  git push origin ${tag}`);
+  }
+  console.log(`\nGitHub has ${branch} and ${tag}. The release builds at https://github.com/Fiehn/Wrtier/actions`);
 } else {
-  console.log(`\nNothing pushed. When ready:\n  git push origin ${branch}\n  git push origin ${tag}`);
+  console.log(`\nNothing pushed. When ready:\n  ${pushBoth}`);
 }

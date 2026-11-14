@@ -757,7 +757,19 @@ fn create_folder(state: State<AppState>, path: String) -> Result<String, String>
 /// Renames (or moves) a folder. Returns the old and new ID of each Work open in it.
 #[tauri::command]
 fn rename_folder(state: State<AppState>, path: String, name: String) -> Result<Vec<(String, String)>, String> {
-    with_app(&state, |app| open_vault_of(app)?.rename_folder(&path, &name))
+    with_app(&state, |app| open_vault_of(app)?.rename_folder(&path, &name, now_ms()))
+}
+
+/// Hides a folder in the Vault browser, or shows it again. Returns the folders hidden now.
+#[tauri::command]
+fn set_folder_hidden(state: State<AppState>, path: String, hidden: bool) -> Result<Vec<String>, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_folder_hidden(&path, hidden, now_ms()))
+}
+
+/// This Device keeps its own list of hidden folders, or goes back to the Vault's.
+#[tauri::command]
+fn set_hidden_folders_here(state: State<AppState>, here: bool) -> Result<vault::Settings, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_hidden_folders_here(here, now_ms()))
 }
 
 /// Moves a folder, with everything in it, to the Vault's trash.
@@ -1141,6 +1153,8 @@ pub fn run() {
             empty_trash,
             create_folder,
             rename_folder,
+            set_folder_hidden,
+            set_hidden_folders_here,
             trash_folder,
             discard_work,
             save_as_new,

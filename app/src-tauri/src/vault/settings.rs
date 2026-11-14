@@ -37,6 +37,8 @@ pub struct Settings {
     pub shortcuts: BTreeMap<String, String>,
     /// This Device has its own shortcuts (for a different keyboard), instead of the Vault's.
     pub shortcuts_here: bool,
+    /// This Device keeps its own list of Hidden folders (hidden.rs), instead of the Vault's.
+    pub hidden_folders_here: bool,
 }
 
 /// A shortcut is the field "shortcut.<command>" of the shared record, or of this Device's own
@@ -107,6 +109,7 @@ impl Vault {
             comment_highlights_here,
             shortcuts: self.shortcuts(),
             shortcuts_here: self.shortcuts_here(),
+            hidden_folders_here: self.hidden_folders_here(),
         }
     }
 
@@ -217,7 +220,7 @@ mod tests {
             line_numbers: false, line_numbers_here: false, highlight_line: false, highlight_line_here: false,
             preview_follows: true, preview_follows_here: false,
             comment_highlights: true, comment_highlights_here: false,
-            shortcuts: BTreeMap::new(), shortcuts_here: false,
+            shortcuts: BTreeMap::new(), shortcuts_here: false, hidden_folders_here: false,
         });
         vault.set_setting("commentHighlights", "off", false, 400).unwrap();
         assert!(!vault.settings().comment_highlights);

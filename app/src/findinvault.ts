@@ -80,8 +80,10 @@ export function summary(total: number, works: number): string {
 // ---- The panel ----
 
 export type FindInVaultHooks = {
-  /** The Works, in the Works list's order (folders first, as it shows them). */
+  /** The Works, in the Works list's order (folders first, as it shows them), without those in Hidden folders. */
   works(): VaultWork[];
+  /** How many Hidden folders its Works leave out (each counted once, nested ones not). */
+  hiddenFolders?(): number;
   /** The text of a Work open in a tab, as it is in the editor; null if it isn't open. */
   openText(id: string): Text | null;
   /** A Work's text from its History, unless it still has the stamp `known`. */
@@ -363,8 +365,9 @@ export class FindInVault {
     this.status.textContent = line;
     this.status.hidden = !line;
 
+    const hidden = this.input.value ? this.hooks.hiddenFolders?.() ?? 0 : 0;
     const signature = JSON.stringify([listed.map(({ group, matches }) => [group.work.id, group.total, matches.map((m) => [m.from, m.to, m.snippet])]),
-      unreadable.map((g) => [g.work.id, g.unreadable]), total]);
+      unreadable.map((g) => [g.work.id, g.unreadable]), total, hidden]);
     if (signature === this.drawn) return;
     this.drawn = signature;
     if (this.current && !this.matchAt(this.current)) this.current = null;
@@ -393,6 +396,12 @@ export class FindInVault {
         box.append(p);
       }
       this.list.append(box);
+    }
+    if (hidden > 0) {
+      const note = document.createElement("p");
+      note.className = "vf-cap vf-hidden muted";
+      note.textContent = hidden === 1 ? "1 hidden folder wasn't searched." : `${hidden} hidden folders weren't searched.`;
+      this.list.append(note);
     }
     this.list.scrollTop = scrolled;
   }

@@ -447,6 +447,12 @@ kbd {
   font-size: 12px;
 }
 
+/* The Work in front is in a Hidden folder, so it isn't in the list: where it is, and Unhide. */
+.hidden-note {
+  font-size: 12px;
+  margin: 0 0 6px;
+}
+
 #works,
 #works ul,
 #trash-list {
@@ -2595,6 +2601,26 @@ dialog#licenses {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+/* Settings' Hidden folders: each path, with Unhide (or a note and Remove, for one that's gone). */
+.hidden-folders {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.hidden-folders li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.hidden-folders small {
+  color: var(--muted);
 }
 
 .mod-row {

@@ -101,6 +101,7 @@ pub struct PreambleView {
 const DEFAULTS_RECORD: &str = "defaults";
 
 mod find;
+mod hidden;
 mod history;
 mod inclusions;
 mod mods;
@@ -191,6 +192,8 @@ pub struct Listing {
     pub problems: Vec<SyncProblem>,
     /// Every folder Works can be in ("Short stories", "Short stories/Old"), empty ones too.
     pub folders: Vec<String>,
+    /// The Folders hidden on this Device (hidden.rs), ones gone from the Vault too.
+    pub hidden: Vec<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -501,7 +504,7 @@ impl Vault {
         entries.sort_by_key(|e| e.id.to_lowercase());
         let mut folders: Vec<String> = files.folders.iter().map(|dir| self.relative(dir)).collect();
         folders.sort_by_key(|f| f.to_lowercase());
-        Listing { entries, problems, folders }
+        Listing { entries, problems, folders, hidden: self.hidden_folders() }
     }
 
     /// Absorbs the Conflict copies of a Work that isn't open, into a History loaded just for

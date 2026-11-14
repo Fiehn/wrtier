@@ -39,6 +39,7 @@
           <p id="vault-find-summary" class="muted" aria-live="polite" hidden></p>
           <div id="vault-find-results" tabindex="0" aria-label="Matches"></div>
         </div>
+        <p id="hidden-note" class="hidden-note muted" hidden></p>
         <ul id="works"></ul>
         <details id="library" hidden>
           <summary>Style library</summary>
@@ -511,6 +512,9 @@
           <button type="button" id="open-reviewers" title="The people whose feedback you record as Comments">Reviewers…</button>
           <button type="button" id="open-shortcuts">Keyboard shortcuts…</button>
         </p>
+        <h3>Hidden folders</h3>
+        <ul id="hidden-folders" class="hidden-folders"></ul>
+        <label class="here"><input type="checkbox" id="hidden-folders-here" /> Only on this device</label>
         <h3>Mods for new Works</h3>
         <ul id="new-work-mods" class="mod-list"></ul>
         <p class="muted">Settings are kept in the Vault, so every device that opens it uses them, unless it has its own.</p>

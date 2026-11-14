@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { type WorkState } from "./sync";
 import { Tabs, type Layout, type OpenedWork } from "./tabs";
-import { buildTree, foldersOf, type Folder } from "./tree";
+import { buildTree, folderOf, foldersOf, hiddenFolderAt, withoutHidden, type Folder } from "./tree";
 import { showMenu, type MenuItem } from "./menu";
 import { PagePreview, type Milestone } from "./preview";
 import { LibraryPanel, type LibraryItem } from "./library";
@@ -46,7 +46,8 @@ type EntryKind =
 type Entry = { id: string; name: string } & EntryKind;
 /** `newer`: made by a newer version of the app, so updating this Device is the fix. */
 type SyncProblem = { path: string; reason: string; newer?: boolean };
-type Listing = { entries: Entry[]; problems: SyncProblem[]; folders: string[] };
+/** `hidden`: the Hidden folders on this Device (vault/hidden.rs), ones gone from the Vault too. */
+type Listing = { entries: Entry[]; problems: SyncProblem[]; folders: string[]; hidden: string[] };
 type TrashedWork = { id: string; name: string };
 type Settings = {
   /** "system", "light", "dark", or "vault:<file>" for a theme in the Vault's `themes/`. */
@@ -65,6 +66,8 @@ type Settings = {
   /** Shortcuts changed from the defaults: command → key, or "none". */
   shortcuts: Record<string, string>;
   shortcutsHere: boolean;
+  /** This Device keeps its own list of Hidden folders. */
+  hiddenFoldersHere: boolean;
 };
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -943,6 +946,8 @@ void listen<{ id: string; state: WorkState }>("work-status", (event) => tabs.sta
 let vaultOpen = false;
 let entries: Entry[] = [];
 let folders: string[] = [];
+/** The Hidden folders on this Device: they and everything in them are left out of the Vault browser. */
+let hiddenFolders: string[] = [];
 
 async function askDeviceName(suggested: string) {
   const input = $<HTMLInputElement>("name-input");
@@ -1135,23 +1140,35 @@ function fillList(list: HTMLElement, folder: Folder<Entry>) {
   }
 }
 
+/** The tree the Vault browser shows: everything but what's in Hidden folders. */
+function shownTree(): Folder<Entry> {
+  const shown = withoutHidden(entries, folders, hiddenFolders);
+  return buildTree(shown.items, shown.folders);
+}
+
 async function refreshList() {
   const listing = await invoke<Listing>("list_works");
   entries = listing.entries;
   folders = listing.folders;
+  hiddenFolders = listing.hidden ?? [];
   showProblems(listing.problems);
   const list = $("works");
   list.replaceChildren();
-  fillList(list, buildTree(entries, folders));
+  fillList(list, shownTree());
   showPicked();
   highlightOpen();
   await refreshTrash();
 }
 
-/** Marks the Work in front, and opens the folders it's in so it can be seen. */
+/**
+ * Marks the Work in front, and opens the folders it's in so it can be seen. One in a Hidden
+ * folder can't be: a line above the list says where it is instead.
+ */
 function highlightOpen() {
   const active = tabs.active;
-  if (active) {
+  const shutIn = active && tabs.activeIsWork ? hiddenFolderAt(folderOf(active), hiddenFolders) : null;
+  showHiddenNote(active, shutIn);
+  if (active && !shutIn) {
     const hidden = foldersOf(active).filter((f) => !openFolders.has(f));
     if (hidden.length > 0) {
       hidden.forEach((f) => openFolders.add(f));
@@ -1163,6 +1180,24 @@ function highlightOpen() {
   for (const item of $("works").querySelectorAll<HTMLElement>("li.work-entry")) {
     item.classList.toggle("open", item.dataset.id === active);
   }
+}
+
+/** "Rain v1 is in a hidden folder (Old drafts) · Unhide Old drafts", or nothing. */
+function showHiddenNote(active: string | null, shutIn: string | null) {
+  const note = $("hidden-note");
+  note.hidden = !active || !shutIn;
+  if (!active || !shutIn) return;
+  const text = document.createElement("span");
+  text.textContent = `${active.split("/").pop()} is in a hidden folder (${shutIn}).`;
+  note.replaceChildren(text, document.createTextNode(" "),
+    actionButton(`Unhide ${shutIn.split("/").pop()}`, `Show ${shutIn} in the Vault browser again, on every device`, () => setFolderHidden(shutIn, false)));
+}
+
+/** Hides a folder in the Vault browser (on every Device, unless this one keeps its own list), or shows it again. */
+async function setFolderHidden(path: string, hidden: boolean) {
+  await invoke<string[]>("set_folder_hidden", { path, hidden });
+  await refreshList();
+  void findInVault.refresh(); // its Works are searched again, or no longer
 }
 
 async function newWork(name?: string, folder?: string) {
@@ -1263,6 +1298,7 @@ $("sidebar-vault").addEventListener("contextmenu", (e) => {
       { label: "New folder here…", run: run(() => newFolder(path)) },
       "separator",
       { label: "Rename folder…", run: run(() => renameFolder(path)) },
+      { label: "Hide folder", run: run(() => setFolderHidden(path, true)) },
       { label: "Move folder to trash", run: run(() => trashFolder(path)) },
     ];
   } else {
@@ -1374,7 +1410,7 @@ function vaultWorks(): VaultWork[] {
       // A leftover or blocked Text file isn't a Work.
     }
   };
-  walk(buildTree(entries, folders));
+  walk(shownTree());
   return out;
 }
 
@@ -1394,6 +1430,7 @@ async function showFound(id: string, from: number, to: number, focus: boolean) {
 
 const findInVault = new FindInVault({
   works: vaultWorks,
+  hiddenFolders: () => withoutHidden(entries, folders, hiddenFolders).shut.length,
   openText: (id) => tabs.docOf(id),
   read: (id, known) => invoke<TextForFinding>("text_for_finding", { id, known }),
   elements: () => library.items.filter((i) => i.kind === "storyElement").map((i) => ({ name: i.name, title: i.title, shownAs: i.shownAs ?? "block", inWork: true })),
@@ -1714,6 +1751,7 @@ function applySettings(settings: Settings) {
   $<HTMLInputElement>("preview-follows-here").checked = settings.previewFollowsHere;
   $<HTMLInputElement>("comment-highlights").checked = settings.commentHighlights;
   $<HTMLInputElement>("comment-highlights-here").checked = settings.commentHighlightsHere;
+  $<HTMLInputElement>("hidden-folders-here").checked = settings.hiddenFoldersHere;
   tabs.setOptions({ lineNumbers: settings.lineNumbers, highlightLine: settings.highlightLine });
   tabs.setCommentOptions({ ...tabs.commentOptions, highlights: settings.commentHighlights });
   setBindings(bindingsFrom(settings.shortcuts));
@@ -1762,8 +1800,47 @@ $("open-reviewers").addEventListener("click", () => act(async () => {
   tabs.refreshMarks();
 }));
 
+/** Settings' list of Hidden folders, each with Unhide (or Remove, for one that's gone from the Vault). */
+function fillHiddenFolders() {
+  const list = $("hidden-folders");
+  list.replaceChildren();
+  if (hiddenFolders.length === 0) {
+    const none = document.createElement("li");
+    none.className = "muted";
+    none.textContent = "None. Right-click a folder in the Vault browser to hide it.";
+    list.append(none);
+  }
+  for (const path of hiddenFolders) {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = path;
+    item.append(name);
+    if (folders.includes(path)) {
+      item.append(actionButton("Unhide", `Show ${path} in the Vault browser again`, async () => {
+        await setFolderHidden(path, false);
+        fillHiddenFolders();
+      }));
+    } else {
+      item.append(small("not in the Vault now"), actionButton("Remove", `Take ${path} off the list`, async () => {
+        await setFolderHidden(path, false);
+        fillHiddenFolders();
+      }));
+    }
+    list.append(item);
+  }
+}
+
+$("hidden-folders-here").addEventListener("change", () => act(async () => {
+  applySettings(await invoke<Settings>("set_hidden_folders_here", { here: $<HTMLInputElement>("hidden-folders-here").checked }));
+  await refreshList();
+  void findInVault.refresh();
+  fillHiddenFolders();
+}));
+
 $("open-settings").addEventListener("click", () => act(async () => {
   applySettings(await invoke<Settings>("get_settings")); // another Device may have changed them
+  await refreshList(); // and the Hidden folders with them
+  fillHiddenFolders();
   await fillNewWorkMods($("new-work-mods"));
   await ask($<HTMLDialogElement>("settings"));
 }));
