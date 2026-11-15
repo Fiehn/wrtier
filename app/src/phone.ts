@@ -1,6 +1,7 @@
 // The phone layout (v1 plan, "On the phone"): one screen at a time, switched with a bar at the
-// bottom: Works · Write · Pages · Comments · History. Works is the sidebar, Write the editor, and
-// the other three are the side panel's tabs, each a whole screen. Any narrow window gets it, so
+// bottom: Works · Write · Read · Pages · Comments · History. Works is the sidebar, Write the
+// editor, Read the Reading panel (only while a Work is being read), and the other three are the
+// side panel's tabs, each a whole screen. Any narrow window gets it, so
 // it can be tried at phone width on desktop and in the tests.
 //
 // The Chapter list (a Mod) opens as a sheet from a button above the text. The bar hides while
@@ -8,7 +9,8 @@
 
 import type { PanelTab, SidePanel } from "./sidepanel";
 
-export type Screen = "works" | "write" | PanelTab;
+/** "read": the Reading panel, only while a Work is being read. */
+export type Screen = "works" | "write" | "read" | PanelTab;
 
 /** Narrower than this is a phone. */
 const PHONE_WIDTH = "(max-width: 700px)";
@@ -84,7 +86,7 @@ export class PhoneLayout {
       else button.removeAttribute("aria-current");
     }
     // The panel's tabs are screens here: the pages compile, and the History loads, only while showing.
-    if (this.screen === "works" || this.screen === "write") this.panel.setShown(false);
+    if (this.screen === "works" || this.screen === "write" || this.screen === "read") this.panel.setShown(false);
     else this.panel.setTab(this.screen);
   }
 

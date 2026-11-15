@@ -1,5 +1,7 @@
 // The Find and replace bar at the top of the editor (find.ts does the matching). It works in the
-// tab in front: a Work, or a Style library file. Ctrl+F opens it on Find, Ctrl+H with Replace
+// tab in front: a Work, or a Style library file; or, while the focus is in the Reading panel, in
+// the Work being read there, where it moves to the top of that panel and only finds (never
+// replaces). Each of the two remembers its own search. Ctrl+F opens it on Find, Ctrl+H with Replace
 // showing; Enter and Shift+Enter step through the matches, Escape closes it with the current
 // match selected. The search stays for the session and is run again in another tab or view.
 
@@ -9,9 +11,17 @@ import { unfoldInclusion } from "./inclusions";
 import { replacing } from "./sync";
 import { keyLabel } from "./keys";
 
+/** Where the bar finds: the editor in front, or the Reading panel. */
+type Place = "front" | "reading";
+
 export type FindHooks = {
-  /** The editor in front, and its Work's ID (null: a Style library file); null if no tab is open. */
-  target(): { view: EditorView; work: string | null } | null;
+  /**
+   * The editor to find in, and its Work's ID (null: a Style library file); null if no tab is
+   * open. `reading`: the Reading panel's, which is only found in.
+   */
+  target(): { view: EditorView; work: string | null; reading?: boolean } | null;
+  /** Where the bar goes while it finds in the Reading panel. */
+  readingSlot(): HTMLElement;
   /** "Open Rain" on a match in included text: opens that Work near it. */
   openWork(work: string, at: number): void;
 };
@@ -38,6 +48,14 @@ export class FindBar {
   private scope: { from: number; to: number } | null = null;
   /** What Replace all said, until the search changes. */
   private said: string | null = null;
+  /** Where it's finding now, and the other place's search, kept while it finds here. */
+  private place: Place = "front";
+  private saved: Record<Place, { text: string; matchCase: boolean; wholeWords: boolean }> = {
+    front: { text: "", matchCase: false, wholeWords: false },
+    reading: { text: "", matchCase: false, wholeWords: false },
+  };
+  /** Where the bar is in the page above the editor, to go back to. */
+  private readonly home = { parent: this.bar.parentElement!, next: this.bar.nextSibling };
 
   constructor(private readonly hooks: FindHooks) {
     this.input.addEventListener("input", () => this.run());
@@ -84,6 +102,8 @@ export class FindBar {
   open(withReplace: boolean, query?: Query) {
     const target = this.hooks.target();
     if (!target) return;
+    this.moveTo(target.reading ? "reading" : "front");
+    if (this.place === "reading") withReplace = false;
     this.switchTo(target.view);
     const { state } = target.view;
     const selection = state.selection.main;
@@ -103,6 +123,8 @@ export class FindBar {
     this.scopeBox.checked = !!this.scope;
     this.bar.hidden = false;
     if (withReplace) this.setReplace(true);
+    if (this.place === "reading") this.setReplace(false);
+    this.toggle.hidden = this.place === "reading";
     this.showKeys();
     this.run();
     const field = withReplace && this.input.value ? this.replaceInput : this.input;
@@ -127,7 +149,8 @@ export class FindBar {
 
   /** Another tab came to the front (or none): the search runs again there. */
   attach() {
-    if (this.bar.hidden) return;
+    // Finding in the Reading panel: that goes on, whichever tab is in front.
+    if (this.bar.hidden || this.place === "reading") return;
     const target = this.hooks.target();
     if (!target) {
       this.close(false);
@@ -145,6 +168,27 @@ export class FindBar {
   showKeys() {
     const replaceKey = keyLabel("replace");
     this.toggle.title = replaceKey ? `Replace (${replaceKey})` : "Replace";
+  }
+
+  /** Stops finding in an editor that's going away or emptied (the Reading panel closing). */
+  forget(view: EditorView) {
+    if (this.view === view) this.close(false);
+  }
+
+  /**
+   * Puts the bar where it finds now: above the editor, or at the top of the Reading panel. The
+   * place it leaves keeps its search for next time.
+   */
+  private moveTo(place: Place) {
+    if (place === this.place) return;
+    this.saved[this.place] = { text: this.input.value, matchCase: this.matchCase.checked, wholeWords: this.wholeWords.checked };
+    this.place = place;
+    const next = this.saved[place];
+    this.input.value = next.text;
+    this.matchCase.checked = next.matchCase;
+    this.wholeWords.checked = next.wholeWords;
+    if (place === "reading") this.hooks.readingSlot().append(this.bar);
+    else this.home.parent.insertBefore(this.bar, this.home.next);
   }
 
   private switchTo(view: EditorView) {
@@ -246,7 +290,7 @@ export class FindBar {
   private replace() {
     const view = this.view;
     const query = this.query();
-    if (!view || !query) return;
+    if (!view || !query || this.place === "reading") return;
     const { matches, current, reading } = findState(view.state);
     const match = matches[current];
     if (!match || match.included || !reading) return;
@@ -272,7 +316,7 @@ export class FindBar {
   private replaceEverything() {
     const view = this.view;
     const query = this.query();
-    if (!view || !query) return;
+    if (!view || !query || this.place === "reading") return;
     const { matches, reading } = findState(view.state);
     const own = matches.filter((m) => !m.included);
     if (!reading || own.length === 0) return;

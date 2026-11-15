@@ -31,6 +31,21 @@ pub struct Layout {
     /// Work ID → cursor position (UTF-16, as the editor counts).
     #[serde(default)]
     pub cursors: HashMap<String, usize>,
+    /// The Work in the Reading panel, if one is being read.
+    #[serde(default)]
+    pub reading: Option<ReadingPlace>,
+}
+
+/// The Work being read in the Reading panel, and where it's scrolled to.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingPlace {
+    /// Its ID in the Vault when last seen.
+    pub work: String,
+    /// Its Work ID, which follows it through renames and moves (none for a Text file only).
+    pub identity: Option<String>,
+    /// The first position shown (UTF-16).
+    pub top: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -141,7 +156,7 @@ mod tests {
         std::fs::write(dir.path().join(FILE), r#"{ "device_id": "0000002a", "last_vault": null }"#).unwrap();
         let mut state = DeviceState::load_or_create(dir.path()).unwrap();
         assert_eq!(state.device, DeviceId(42));
-        let layout = Layout { tabs: vec!["Rain".into()], active: Some("Rain".into()), cursors: [("Rain".to_string(), 12)].into() };
+        let layout = Layout { tabs: vec!["Rain".into()], active: Some("Rain".into()), cursors: [("Rain".to_string(), 12)].into(), reading: Some(ReadingPlace { work: "Ash".into(), identity: Some("ab12".into()), top: 40 }) };
         state.layouts.insert("C:/Writing".into(), layout.clone());
         state.window = Some(WindowPlace { x: 10, y: 20, width: 1200, height: 800, maximized: false });
         state.save().unwrap();

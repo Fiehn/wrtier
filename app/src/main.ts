@@ -30,6 +30,8 @@ import { UpdateDialog } from "./updates";
 import { UninstallDialog } from "./uninstall";
 import { FindBar } from "./findbar";
 import { FindInVault, type TextForFinding, type VaultWork } from "./findinvault";
+import { ReadingPanel, type ReadingPlace } from "./reading";
+import type { ElementInfo } from "./elements";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -202,7 +204,8 @@ function act(run: () => Promise<unknown>) {
 // ---- Find and replace (in the tab in front) ----
 
 const findBar = new FindBar({
-  target: () => tabs.frontEditor(),
+  target: () => (readingPanel.hasFocus() ? { view: readingPanel.view, work: readingPanel.work, reading: true } : tabs.frontEditor()),
+  readingSlot: () => readingPanel.findSlot,
   openWork: (work, at) => act(async () => {
     await openWork(work, at);
     await tabs.reveal(work, at, at); // also when it was open already
@@ -227,6 +230,8 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     showModViews();
     rememberSoon();
     highlightOpen();
+    // The Work being read got a tab: the Reading panel mirrors it from now on.
+    if (readingPanel.work && tabs.has(readingPanel.work)) readingPanel.tabOpened(readingPanel.work);
   },
   error: showError,
   askName: (question, initial) => askText(question, initial),
@@ -245,7 +250,14 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
   closed: (id) => {
     preview.forget(id);
     modsOf.delete(id);
+    readingPanel.tabClosed(id);
   },
+  renamed: (from, to) => readingPanel.renamed(from, to),
+  tabMenu: (id, x, y) => showMenu(x, y, [
+    { label: "Read beside", run: () => readBeside(id, tabs.cursorOf(id) ?? 0) },
+    "separator",
+    { label: withKey("Close", "closeTab"), run: () => act(() => tabs.close(id)) },
+  ]),
   addElement: (id, name) => act(() => addElement(id, name)),
   openComments: (_id, ids) => {
     openTab("comments");
@@ -287,6 +299,41 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     await tabs.reveal(id, at, at); // also when it was open already
   }),
 });
+
+// ---- The Reading panel: one Work's text, read beside the one being written ----
+
+const readingPanel = new ReadingPanel({
+  tabView: (id) => tabs.viewOf(id),
+  tabMarks: (id) => tabs.marksOf(id),
+  elements: async (id, names) => elementInfos(names ?? (await invoke<{ preamble: Preamble }>("get_preamble", { id })).preamble.elements),
+  writeIn: (id, at) => act(async () => {
+    await openWork(id, at);
+    await tabs.reveal(id, at, at); // also when it was open already
+  }),
+  openComments: (id, ids) => act(async () => {
+    await openWork(id);
+    openTab("comments");
+    commentsPanel.focus(ids);
+  }),
+  changed: () => rememberSoon(),
+  shown: (on) => {
+    $("phone-read").hidden = !on;
+    if (!on) {
+      findBar.forget(readingPanel.view);
+      if (phone.screen === "read") phone.show("write");
+    }
+  },
+  error: showError,
+});
+tabs.watch((id, update) => readingPanel.tabUpdated(id, update));
+
+/** "Read beside": a Work in the Reading panel, at `top` (on the phone, its screen). */
+function readBeside(id: string, top = 0) {
+  act(async () => {
+    await readingPanel.open(id, null, top);
+    phone.show("read");
+  });
+}
 
 // ---- The side panel (Ctrl+Shift+P): the Page preview and the Comments ----
 
@@ -532,7 +579,7 @@ function rememberSoon() {
 }
 function remember() {
   if (!vaultOpen) return;
-  invoke("save_layout", { layout: tabs.layout() }).catch(showError);
+  invoke("save_layout", { layout: { ...tabs.layout(), reading: readingPanel.place() } }).catch(showError);
 }
 
 // ---- The Style library ----
@@ -880,22 +927,28 @@ async function preambleChanged(id: string) {
   await preview.preambleChanged(id);
 }
 
+/** The Story elements the library has, and whether a Work with these of the Author's own has each. */
+function elementInfos(own: string[]): ElementInfo[] {
+  return library.items.filter((i) => i.kind === "storyElement").map((i) => ({
+    name: i.name,
+    title: i.title,
+    shownAs: i.shownAs ?? "block",
+    inWork: library.builtIn.includes(i.name) || own.includes(i.name),
+  }));
+}
+
 /** Tells each open Work's editor (or just `only`) which Story elements it has. */
 async function refreshElements(only?: string) {
   for (const id of tabs.works) {
     if (only && id !== only) continue;
     try {
       const { preamble } = await invoke<{ preamble: Preamble }>("get_preamble", { id });
-      tabs.setElements(id, library.items.filter((i) => i.kind === "storyElement").map((i) => ({
-        name: i.name,
-        title: i.title,
-        shownAs: i.shownAs ?? "block",
-        inWork: library.builtIn.includes(i.name) || preamble.elements.includes(i.name),
-      })));
+      tabs.setElements(id, elementInfos(preamble.elements));
     } catch {
       // gone or unreadable right now: it keeps what it had
     }
   }
+  if (!only || only === readingPanel.work) await readingPanel.elementsChanged();
 }
 
 /** "Add it?": a Story element from the library goes into the Work's Preamble. */
@@ -1006,6 +1059,7 @@ async function askDeviceName(suggested: string) {
 async function openVault(path: string) {
   clearError();
   await tabs.closeAll();
+  readingPanel.close(false);
   findInVault.reset();
   vaultOpen = false;
   let opened = await invoke<VaultOpened>("open_vault", { path, create: false });
@@ -1026,7 +1080,7 @@ async function openVault(path: string) {
   $("library").hidden = false;
   await library.refresh();
   // The tabs that were open here last time, each with its cursor where it was.
-  const layout = await invoke<Layout>("get_layout");
+  const layout = await invoke<Layout & { reading?: ReadingPlace | null }>("get_layout");
   for (const id of layout.tabs) {
     try {
       await openWork(id, layout.cursors[id], true);
@@ -1035,6 +1089,7 @@ async function openVault(path: string) {
     }
   }
   if (layout.active && tabs.has(layout.active)) await tabs.activate(layout.active);
+  if (layout.reading) await readingPanel.open(layout.reading.work, layout.reading.identity, layout.reading.top);
   // On the phone: writing, if a Work was open last time.
   phone.show(tabs.active ? "write" : "works");
   vaultOpen = true;
@@ -1223,6 +1278,7 @@ async function refreshList() {
   showPicked();
   highlightOpen();
   await refreshTrash();
+  void readingPanel.refresh(); // synced in, renamed, trashed or restored
 }
 
 /**
@@ -1332,6 +1388,7 @@ $("sidebar-vault").addEventListener("contextmenu", (e) => {
     items =
       entry.kind === "work" ? [
         { label: "Open", run: run(() => openWork(entry.id)) },
+        { label: "Read beside", run: () => readBeside(entry.id) },
         ...(into ? [{ label: `Include in ${into.split("/").pop()}…`, run: run(() => includeIn(into, entry.id, at)) }] : []),
         {
           label: picked.includes(entry.id) ? "Deselect" : "Select for a Collection",
@@ -1350,7 +1407,10 @@ $("sidebar-vault").addEventListener("contextmenu", (e) => {
         "separator",
         { label: folder ? "New Work in this folder…" : "New Work…", run: run(() => newWork(undefined, folder)) },
       ]
-      : entry.kind === "newWork" ? [{ label: "Open (starts its History)", run: run(() => openWork(entry.id)) }]
+      : entry.kind === "newWork" ? [
+        { label: "Open (starts its History)", run: run(() => openWork(entry.id)) },
+        { label: "Read beside", run: () => readBeside(entry.id) },
+      ]
       : entry.kind === "leftover" ? [{ label: "Delete the leftover Text file", run: run(() => deleteLeftover(entry.id)) }]
       : [];
   } else if (folderEl) {
@@ -1772,6 +1832,15 @@ new PanelSizes({
     shown: () => !$("app").classList.contains("sidebar-hidden"),
     setShown: setSidebar,
   },
+  reading: {
+    element: $("reading-panel"),
+    handle: $("reading-resizer"),
+    shown: () => readingPanel.isReading,
+    // Never hidden by dragging (panelsizes.ts): it's only closed, with its ×.
+    setShown: (shown) => {
+      if (!shown) readingPanel.close();
+    },
+  },
   side: {
     element: $("side-panel"),
     handle: $("panel-resizer"),
@@ -1785,6 +1854,7 @@ new PanelSizes({
 
 function setFormatted(on: boolean) {
   tabs.setFormatted(on);
+  readingPanel.setFormatted(on);
   $("view-mode").textContent = on ? "Raw view" : "Formatted view";
   $("toolbar-view").textContent = on ? "Raw" : "Formatted";
   try {
@@ -1989,6 +2059,7 @@ function applySettings(settings: Settings) {
   $<HTMLInputElement>("hidden-folders-here").checked = settings.hiddenFoldersHere;
   tabs.setOptions({ lineNumbers: settings.lineNumbers, highlightLine: settings.highlightLine });
   tabs.setCommentOptions({ ...tabs.commentOptions, highlights: settings.commentHighlights });
+  readingPanel.setCommentHighlights(settings.commentHighlights);
   setBindings(bindingsFrom(settings.shortcuts));
   preview.setFollows(settings.previewFollows);
 }

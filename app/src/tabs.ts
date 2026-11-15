@@ -4,7 +4,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { Compartment, EditorState, Transaction, type Text } from "@codemirror/state";
-import { EditorView, dropCursor, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from "@codemirror/view";
+import { EditorView, dropCursor, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers, type ViewUpdate } from "@codemirror/view";
 import { history, historyKeymap, standardKeymap } from "@codemirror/commands";
 import { LibraryFile, fromDisk, libraryId } from "./libraryfile";
 import { storyElements, type ElementInfo } from "./elements";
@@ -46,6 +46,10 @@ export type TabEvents = {
   cursor(id: string, at: number): void;
   /** A Work's tab closed, or it now goes by another ID. */
   closed(id: string): void;
+  /** A Work's tab now goes by another ID (renamed or moved, here or on another Device). */
+  renamed(from: string, to: string): void;
+  /** Right-click on a Work's tab: its menu, at (x, y). */
+  tabMenu(id: string, x: number, y: number): void;
   /** "Add it?" was clicked on a Story element the Work doesn't have yet. */
   addElement(id: string, name: string): void;
   /** Highlighted text was clicked: these Comments (by ID) are on it. */
@@ -75,8 +79,8 @@ export type TabEvents = {
 const historyCompartment = new Compartment();
 /** The Formatted view, or the Raw view's Typst colouring. */
 const viewCompartment = new Compartment();
-/** What goes in it: in the Raw view, Inclusions are their one `#inclusion(…)` line too. */
-const viewExtension = (formatted: boolean) => (formatted ? formattedView() : [typstColouring(false), rawInclusions.of(true)]);
+/** What goes in it: in the Raw view, Inclusions are their one `#inclusion(…)` line too. (The Reading panel's too.) */
+export const viewExtension = (formatted: boolean) => (formatted ? formattedView() : [typstColouring(false), rawInclusions.of(true)]);
 /** Line numbers and the shaded cursor line (settings). */
 const linesCompartment = new Compartment();
 /** The Story elements the Work has (from its Preamble and the Style library). */
@@ -279,6 +283,7 @@ class Tab {
           modsCompartment.of([]),
           EditorView.updateListener.of((update) => {
             for (const tr of update.transactions) this.sync.track(tr);
+            tabs.updated(this.sync.id, update);
             // Written in by the Author (not a merge or a change from elsewhere): it stays open.
             if (this.passing && update.transactions.some((tr) => tr.docChanged && tr.annotation(Transaction.userEvent) !== undefined)) {
               this.setPassing(false);
@@ -319,6 +324,10 @@ class Tab {
       tabs.events.openWork(work, at);
     });
     this.rename(work.id, work.name);
+    this.label.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      tabs.events.tabMenu(this.id, e.clientX, e.clientY);
+    });
     this.sync.requestMarks();
     this.sync.setTinting(tabs.tinting);
 
@@ -688,6 +697,19 @@ export class Tabs {
     }
   }
 
+  /** Who follows every change in the Works' editors (the Reading panel mirrors one). */
+  private watchers: ((id: string, update: ViewUpdate) => void)[] = [];
+
+  /** Follows every change in the Works' editors (typing, and what Rust sends). */
+  watch(watcher: (id: string, update: ViewUpdate) => void) {
+    this.watchers.push(watcher);
+  }
+
+  /** A Work's editor changed. */
+  updated(id: string, update: ViewUpdate) {
+    for (const watcher of this.watchers) watcher(id, update);
+  }
+
   constructor(
     readonly bar: HTMLElement,
     readonly panes: HTMLElement,
@@ -833,6 +855,7 @@ export class Tabs {
     if (!tab) return;
     tab.rename(to, to.split("/").pop() ?? to);
     this.events.closed(id);
+    this.events.renamed(id, to);
     this.events.changed();
   }
 

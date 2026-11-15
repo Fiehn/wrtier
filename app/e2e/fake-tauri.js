@@ -172,7 +172,7 @@
       items: [{ kind: "style", name: "Courier voice", title: "Courier voice", path: "styles/Courier voice.typ", description: "", problems: [], writtenAs: null, shownAs: null, docx: null, styles: [] }],
       conflicts: [], builtIn: [],
     }),
-    get_layout: () => ({ tabs: ["Rain"], active: "Rain", cursors: {} }),
+    get_layout: () => ({ tabs: ["Rain"], active: "Rain", cursors: {}, reading: fake.reading ?? null }),
     save_layout: () => null,
     open_work: ({ id }) => ({ id, name: id, text: fake.texts[id], problems: [], notice: null }),
     /** Find in Vault: a Work's text, stamped with how many edits the fake has had. */
@@ -180,6 +180,15 @@
       if (!(id in fake.texts)) return { kind: "unreadable", reason: "isn't in the Vault any more" };
       const stamp = String(fake.changes);
       return known === stamp ? { kind: "unchanged" } : { kind: "text", stamp, text: fake.texts[id] };
+    },
+    /** The Reading panel: a Work's text, read without opening it (vault/reading.rs). */
+    read_work: ({ work, known }) => {
+      const name = work.split("/").pop();
+      if (!(work in fake.texts)) return { kind: "unreadable", id: work, name, identity: null, reason: `${name} isn't in the Vault any more.` };
+      const marks = fake.readingMarks?.[work] ?? [];
+      const stamp = `${fake.changes}:${JSON.stringify(marks)}`;
+      if (known === stamp) return { kind: "unchanged" };
+      return { kind: "text", id: work, name, identity: `id-${name}`, stamp, text: fake.texts[work], inclusions: [], marks, elements: [] };
     },
     leave_work: () => null,
     close_work: () => null,

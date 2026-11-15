@@ -708,7 +708,7 @@ test.describe("at phone width", () => {
     await selectLine(app, "She walked home.");
     await app.locator('#write-toolbar [data-command="strong"]').click();
     await expect.poll(() => textOf(app)).toContain("*She walked home.*");
-    await expect(app.locator(".cm-content")).toBeFocused();
+    await expect(app.locator("#panes .cm-content")).toBeFocused();
 
     // Comment: a new Comment on the selection, on the Comments screen.
     await selectLine(app, "Morning came slowly.");
@@ -1015,4 +1015,99 @@ test("the Style library and the trash are pinned under the Works, above the Chap
   const before = await app.locator("#sidebar-shelf").boundingBox();
   await app.locator("#sidebar-vault").evaluate((el) => (el.scrollTop = 1000));
   expect(await app.locator("#sidebar-shelf").boundingBox()).toEqual(before);
+});
+
+// ---- The Reading panel (reading.ts) ----
+
+const reading = (page: Page) => page.locator("#reading-panel");
+const readLine = (page: Page, text: string): Locator => reading(page).locator(".cm-line", { hasText: text }).first();
+const savedReading = (page: Page) =>
+  page.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd === "save_layout").map((e: any) => e.args.layout.reading).pop());
+
+test("another Work is read beside the one being written: read-only, found in, and closed", async ({ app }) => {
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Read beside" }).click();
+  await expect(reading(app).locator("#reading-name")).toHaveText("Zampanò");
+  await expect(readLine(app, "The hallway was not there before.")).toBeVisible();
+  // The Work in front is still the one being written.
+  await expect(app.locator("#tabbar .tab.active")).toHaveText(/Rain/);
+  await expect(app.locator("#tabbar .tab")).toHaveCount(1);
+  // Nothing can be typed in it.
+  await readLine(app, "The hallway was not there before.").click();
+  await app.keyboard.type("Nope");
+  await expect(readLine(app, "The hallway was not there before.")).toHaveText("The hallway was not there before.");
+  expect(await app.evaluate(() => (window as any).__fake.texts["Zampanò"])).not.toContain("Nope");
+  // Its Chapters, to go to.
+  await expect(app.locator("#reading-chapters option")).toHaveText(["Go to Chapter…", "Exploration A", "The Navidson Record"]);
+  // Find finds in it, at its top, and never replaces there.
+  await app.keyboard.press("Control+f");
+  await expect(reading(app).locator("#find-bar")).toBeVisible();
+  await expect(app.locator("#find-toggle-replace")).toBeHidden();
+  await app.keyboard.type("quarter inch");
+  await expect(app.locator("#find-count")).toHaveText("1 of 1");
+  await app.keyboard.press("Control+h");
+  await expect(app.locator("#find-replace-row")).toBeHidden();
+  await app.keyboard.press("Escape");
+  await expect(app.locator("#find-bar")).toBeHidden();
+  // Remembered on this Device, then closed.
+  await expect.poll(() => savedReading(app)).toMatchObject({ work: "Zampanò" });
+  await app.locator("#reading-close").click();
+  await expect(reading(app)).toBeHidden();
+  await expect.poll(() => savedReading(app)).toBeNull();
+  // Find is back above the editor, for the Work in front.
+  await line(app, "She walked home.").click();
+  await app.keyboard.press("Control+f");
+  await expect(app.locator("main #find-bar")).toBeVisible();
+  await expect(app.locator("#find-toggle-replace")).toBeVisible();
+});
+
+test("the Work in front, read beside itself, follows the typing at once", async ({ app }) => {
+  await app.locator("#tabbar .tab", { hasText: "Rain" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Read beside" }).click();
+  await expect(readLine(app, "Morning came slowly.")).toBeVisible();
+  await endOf(app, "The end.");
+  await app.keyboard.type(" Really, the end.");
+  await expect(readLine(app, "The end. Really, the end.")).toBeVisible();
+});
+
+test("a Comment in the Work being read shows as a card, and opens in its Comments panel", async ({ app }) => {
+  await app.evaluate(() => {
+    const fake = (window as any).__fake;
+    const text: string = fake.texts["Zampanò"];
+    const from = text.indexOf("hallway");
+    fake.readingMarks = { "Zampanò": [{
+      id: "c1", ranges: [[from, from + 7]], onWork: false, sender: "reviewer/anna", name: "Anna", colour: "teal",
+      body: "Which hallway?", resolved: false, quote: "hallway", timeMs: 0, otherBody: null,
+      replies: [{ id: "r1", sender: "author", name: "Author", colour: "author", body: "The one on Ash Tree Lane.", timeMs: 0, otherBody: null }],
+    }] };
+  });
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Read beside" }).click();
+  const highlight = reading(app).locator(".cm-comment", { hasText: "hallway" });
+  await expect(highlight).toBeVisible();
+  await highlight.click();
+  const card = app.locator("#reading-card");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Which hallway?");
+  await expect(card).toContainText("The one on Ash Tree Lane.");
+  await card.locator("button", { hasText: "Open in the Comments panel" }).click();
+  await expect(app.locator("#tabbar .tab.active")).toHaveText(/Zampanò/);
+  await expect(app.locator("#comments-pane")).toBeVisible();
+  // It's open in a tab now: the panel shows the tab's text from here on.
+  await expect(readLine(app, "The hallway was not there before.")).toBeVisible();
+});
+
+test("the Work being read is back after a restart, and a Work dragged onto the panel is read there", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+  await page.addInitScript(() => {
+    (window as any).__fake.reading = { work: "Rain", identity: null, top: 0 };
+  });
+  await page.goto("/");
+  await expect(readLine(page, "Morning came slowly.")).toBeVisible();
+  await page.locator("#works li.work-entry", { hasText: "Zampanò" }).locator(".entry").dragTo(readLine(page, "Morning came slowly."));
+  await expect(page.locator("#reading-name")).toHaveText("Zampanò");
+  await expect(readLine(page, "The hallway was not there before.")).toBeVisible();
+  expect(errors, "errors in the page").toEqual([]);
 });

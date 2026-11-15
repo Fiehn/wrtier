@@ -140,7 +140,7 @@ pub(super) struct Ctx<'a> {
 }
 
 /// An included Work: the open one, or one read from disk.
-enum DocRef<'a> {
+pub(super) enum DocRef<'a> {
     Open(&'a Doc),
     Read(Arc<Doc>),
 }
@@ -157,7 +157,7 @@ impl std::ops::Deref for DocRef<'_> {
 
 impl<'a> Ctx<'a> {
     /// An included Work, as it is now or at `version`.
-    fn doc(&mut self, located: &Located, version: Option<&[(DeviceId, u32)]>) -> Result<DocRef<'a>, String> {
+    pub(super) fn doc(&mut self, located: &Located, version: Option<&[(DeviceId, u32)]>) -> Result<DocRef<'a>, String> {
         let works = self.works;
         if version.is_none() {
             if let Some(open) = works.values().find(|w| w.db == located.db) {
@@ -343,7 +343,7 @@ fn committed_at(doc: &Doc, at: usize) -> usize {
 
 /// The included Work's Comments on its own text in `plain` (`runs` says where that is), with
 /// their ranges in `plain` (UTF-16). A Comment none of whose text is shown there is left out.
-fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]) -> Vec<crate::work::Mark> {
+pub(super) fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]) -> Vec<crate::work::Mark> {
     let comments = doc.comments();
     if comments.is_empty() || runs.is_empty() {
         return Vec::new();
@@ -759,7 +759,7 @@ impl Vault {
     }
 
     /// The name and colour of a Comment's sender in an included Work (`author`: its author name).
-    fn included_sender(&self, author: &str, sender: &str) -> (String, String) {
+    pub(super) fn included_sender(&self, author: &str, sender: &str) -> (String, String) {
         match sender.strip_prefix("reviewer/") {
             None => (if author.trim().is_empty() { "Author".into() } else { author.to_string() }, "author".into()),
             Some(id) => match self.reviewer(id) {

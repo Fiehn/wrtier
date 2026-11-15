@@ -955,6 +955,108 @@ main > :not(#panes) {
   font-size: 13px;
 }
 
+/* ---- The Reading panel (reading.ts): one Work's text to read, between the editor and the
+   Side panel. Its width is set by panelsizes.ts, which has the same default. ---- */
+
+#reading-panel {
+  width: min(34%, 600px);
+  min-width: 260px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: var(--bg);
+  border-left: 1px solid var(--line);
+}
+
+#reading-panel[hidden],
+#reading-panel [hidden] {
+  display: none;
+}
+
+.reading-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.reading-header strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reading-header .spacer {
+  flex: 1;
+}
+
+#reading-chapters {
+  max-width: 9em;
+  min-width: 0;
+}
+
+.reading-header button {
+  flex: none;
+  white-space: nowrap;
+}
+
+#reading-close {
+  font-size: 17px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+#reading-find-slot #find-bar {
+  margin: 8px 12px 0;
+}
+
+#reading-why {
+  margin: 0;
+  padding: 16px;
+}
+
+#reading-text {
+  flex: 1;
+  min-height: 0;
+}
+
+#reading-panel .editor .cm-scroller {
+  padding: 0 16px;
+}
+
+/* A Comment's card, by the highlight clicked: read-only. */
+.reading-card {
+  position: absolute;
+  z-index: 20;
+  max-height: 50%;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+}
+
+.reading-card-comment + .reading-card-comment {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.reading-card p {
+  margin: 4px 0 8px;
+  white-space: pre-wrap;
+}
+
+.reading-card .reading-card-reply {
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+}
+
 /* ---- The Page preview ---- */
 
 #preview header {
@@ -3060,9 +3162,19 @@ body.phone #app {
 
 body.phone #app > #sidebar,
 body.phone #app > main,
+body.phone #app > #reading-panel,
 body.phone #app > #side-panel,
 body.phone #app > .resizer {
   display: none;
+}
+
+body.phone #app[data-screen="read"] > #reading-panel:not([hidden]) {
+  display: flex;
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  min-height: 0;
+  border-left: none;
 }
 
 body.phone #app[data-screen="works"] > #sidebar {

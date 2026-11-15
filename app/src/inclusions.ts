@@ -57,6 +57,12 @@ export const includedFinds = Facet.define<Map<number, IncludedFind>, Map<number,
   compare: (a, b) => a.size === b.size && [...a].every(([at, f]) => JSON.stringify(f) === JSON.stringify(b.get(at))),
 });
 
+/**
+ * In the Reading panel (reading.ts): Inclusions are only read there, so their bar has no
+ * "Styles" and no note about a split Chapter, and "Go to" reads the included Work there.
+ */
+export const readOnlyInclusions = Facet.define<boolean, boolean>({ combine: (values) => values.some(Boolean) });
+
 type Shown = { views: InclusionView[]; folded: number[] };
 
 /** Only Inclusions whose character is still where they say. */
@@ -96,6 +102,7 @@ class IncludedText extends WidgetType {
 
   toDOM(view: EditorView) {
     const v = this.v;
+    const readOnly = view.state.facet(readOnlyInclusions);
     const box = document.createElement("div");
     box.className = "cm-inclusion" + (v.missing ? " missing" : "") + (this.folded ? " folded" : "");
     box.contentEditable = "false";
@@ -141,13 +148,13 @@ class IncludedText extends WidgetType {
     styles.addEventListener("click", (e) => {
       box.dispatchEvent(new CustomEvent("wrtier-inclusion-styles", { bubbles: true, detail: { at: v.at, styles: v.styles ?? [], x: e.clientX, y: e.clientY } }));
     });
-    bar.append(styles);
+    if (!readOnly) bar.append(styles);
     if (v.work) {
       const go = document.createElement("button");
       go.type = "button";
       go.className = "cm-inclusion-go";
       go.textContent = "Go to";
-      go.title = `Open ${v.work} to change this text`;
+      go.title = readOnly ? `Read ${v.work} here` : `Open ${v.work} to change this text`;
       go.addEventListener("mousedown", (e) => e.preventDefault());
       go.addEventListener("click", () => {
         box.dispatchEvent(new CustomEvent("wrtier-open-work", { bubbles: true, detail: { work: v.work, at: v.starts } }));
@@ -155,7 +162,7 @@ class IncludedText extends WidgetType {
       bar.append(go);
     }
     box.append(bar);
-    if (v.split) box.append(this.splitNote(v, v.split));
+    if (v.split && !readOnly) box.append(this.splitNote(v, v.split));
     if (v.missing) {
       const why = document.createElement("p");
       why.className = "cm-inclusion-missing";
@@ -422,6 +429,11 @@ export function startWorkDrag(event: DragEvent, work: string) {
   window.clearTimeout(forgetDrag);
   event.dataTransfer?.setData(WORK_DRAG, work);
   if (event.dataTransfer) event.dataTransfer.effectAllowed = "copyMove";
+}
+
+/** The Work (its ID) being dragged from the Vault browser in this drag, if one is. */
+export function workBeingDragged(event: DragEvent): string | null {
+  return (event.dataTransfer?.types.includes(WORK_DRAG) ? event.dataTransfer.getData(WORK_DRAG) : "") || draggedWork;
 }
 
 /** The drag ended (dropped, or let go elsewhere). */

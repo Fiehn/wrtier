@@ -1,16 +1,23 @@
-// How wide the Vault browser and the Side panel are (v2 plan, "Resizable panels"). Each is
-// dragged by its edge next to the editor, and its width is Device state, kept in this Device's
-// local storage; a panel never dragged has today's default width. The editor is what's
+// How wide the Vault browser, the Reading panel and the Side panel are (v2 plan, "Resizable
+// panels"). Each is dragged by its edge nearer the editor, and its width is Device state, kept in
+// this Device's local storage; a panel never dragged has its default width. The editor is what's
 // protected: it keeps at least EDITOR_MIN while the window allows it, the Side panel giving way
-// first, then the Vault browser. The phone layout has no handles (each panel is a whole screen).
+// first, then the Reading panel, then the Vault browser. The phone layout has no handles (each
+// panel is a whole screen). The Reading panel is never hidden by dragging: hiding it is closing it.
 
-export type PanelName = "vault" | "side";
+export type PanelName = "vault" | "reading" | "side";
+
+const PANELS: readonly PanelName[] = ["vault", "reading", "side"];
+
+/** Which give way first when the window is too narrow for them all. */
+const GIVING_WAY: readonly PanelName[] = ["side", "reading", "vault"];
 
 /** The narrowest the editor gets while the panels can still give way. */
 export const EDITOR_MIN = 400;
 
 export const LIMITS = {
   vault: { min: 180, max: 480 },
+  reading: { min: 260, max: Infinity },
   side: { min: 260, max: Infinity },
 } as const;
 
@@ -18,11 +25,13 @@ export const LIMITS = {
 export const STEP = 16;
 export const BIG_STEP = 64;
 
-const STORAGE_KEYS: Record<PanelName, string> = { vault: "sidebar-width", side: "panel-width" };
+const STORAGE_KEYS: Record<PanelName, string> = { vault: "sidebar-width", reading: "reading-width", side: "panel-width" };
 
-/** A panel's width when it was never dragged on this Device: what the layout always had. */
+/** A panel's width when it was never dragged on this Device. */
 export function defaultWidth(panel: PanelName, windowWidth: number): number {
-  return panel === "vault" ? 280 : Math.max(LIMITS.side.min, Math.min(windowWidth * 0.42, 640));
+  if (panel === "vault") return 280;
+  if (panel === "reading") return Math.max(LIMITS.reading.min, Math.min(windowWidth * 0.34, 600));
+  return Math.max(LIMITS.side.min, Math.min(windowWidth * 0.42, 640));
 }
 
 /** What this Device remembered: a width within the panel's own limits, or null for the default. */
@@ -33,49 +42,50 @@ export function readWidth(panel: PanelName, get: (key: string) => string | null)
 }
 
 /** The widths wanted, null for a hidden panel. */
-export type Widths = { vault: number | null; side: number | null };
+export type Widths = { vault: number | null; reading: number | null; side: number | null };
 
 /**
  * The widths the panels are shown at in a window this wide. While the remembered widths leave
  * the editor less than EDITOR_MIN, the Side panel is shown narrower, down to its minimum, then
- * the Vault browser down to its own; past that the editor gets narrower. Nothing remembered
- * changes, and no panel is hidden.
+ * the Reading panel and then the Vault browser down to theirs; past that the editor gets
+ * narrower. Nothing remembered changes, and no panel is hidden.
  */
 export function fit(windowWidth: number, wanted: Widths): Widths {
-  let { vault, side } = wanted;
-  let over = (vault ?? 0) + (side ?? 0) - (windowWidth - EDITOR_MIN);
-  if (over > 0 && side !== null) {
-    const cut = Math.min(over, Math.max(0, side - LIMITS.side.min));
-    side -= cut;
+  const out = { ...wanted };
+  let over = PANELS.reduce((sum, name) => sum + (out[name] ?? 0), 0) - (windowWidth - EDITOR_MIN);
+  for (const name of GIVING_WAY) {
+    const width = out[name];
+    if (over <= 0 || width === null) continue;
+    const cut = Math.min(over, Math.max(0, width - LIMITS[name].min));
+    out[name] = width - cut;
     over -= cut;
   }
-  if (over > 0 && vault !== null) {
-    vault -= Math.min(over, Math.max(0, vault - LIMITS.vault.min));
-  }
-  return { vault, side };
+  return out;
 }
 
 /**
- * The widest a panel can be dragged in a window this wide, given the other panel (its width
- * as shown, null while hidden). The Side panel can grow until the editor is down to
- * EDITOR_MIN. The Vault browser has a cap of its own, and leaves room for the Side panel at
- * its minimum, which then gives way (see `fit`).
+ * The widest a panel can be dragged in a window this wide, given the others (their widths as
+ * shown, null while hidden). It can grow until the editor is down to EDITOR_MIN, leaving each
+ * panel that gives way before it (see `fit`) its minimum, since that one then gets narrower.
+ * The Vault browser has a cap of its own.
  */
-export function maxWidth(panel: PanelName, windowWidth: number, other: number | null): number {
+export function maxWidth(panel: PanelName, windowWidth: number, shown: Widths): number {
   const { min, max } = LIMITS[panel];
-  const room = windowWidth - EDITOR_MIN - (other === null ? 0 : panel === "vault" ? LIMITS.side.min : other);
-  return Math.max(min, Math.min(max, room));
+  const before = (other: PanelName) => GIVING_WAY.indexOf(other) < GIVING_WAY.indexOf(panel);
+  const others = PANELS.filter((other) => other !== panel && shown[other] !== null)
+    .reduce((sum, other) => sum + (before(other) ? LIMITS[other].min : shown[other]!), 0);
+  return Math.max(min, Math.min(max, windowWidth - EDITOR_MIN - others));
 }
 
 /**
  * Where a drag puts a panel: the width it started at plus how far the edge moved (outwards,
  * so wider), kept within its limits. Dragged on past its minimum by more than half the minimum,
- * the panel is hidden instead.
+ * the panel is hidden instead; the Reading panel stays at its minimum (it's only ever closed).
  */
 export function dragTo(panel: PanelName, start: number, moved: number, max: number): number | "hidden" {
   const { min } = LIMITS[panel];
   const wanted = start + moved;
-  if (wanted < min / 2) return "hidden";
+  if (wanted < min / 2 && panel !== "reading") return "hidden";
   return clamp(Math.round(wanted), min, max);
 }
 
@@ -93,10 +103,10 @@ export type PanelHooks = {
   setShown: (shown: boolean) => void;
 };
 
-/** The two handles, and the panels' widths. */
+/** The handles, and the panels' widths. */
 export class PanelSizes {
   /** The widths remembered on this Device, null for the default. */
-  private readonly remembered: Record<PanelName, number | null> = { vault: null, side: null };
+  private readonly remembered: Record<PanelName, number | null> = { vault: null, reading: null, side: null };
   /** The panel being dragged, and how the drag began. */
   private drag: {
     panel: PanelName;
@@ -109,7 +119,7 @@ export class PanelSizes {
   } | null = null;
 
   constructor(private readonly panels: Record<PanelName, PanelHooks>) {
-    for (const name of ["vault", "side"] as const) {
+    for (const name of PANELS) {
       try {
         this.remembered[name] = readWidth(name, (key) => localStorage.getItem(key));
       } catch {
@@ -140,22 +150,21 @@ export class PanelSizes {
   private shownWidths(): Widths {
     const want = (name: PanelName) =>
       this.panels[name].shown() ? (this.remembered[name] ?? defaultWidth(name, this.windowWidth)) : null;
-    return fit(this.windowWidth, { vault: want("vault"), side: want("side") });
+    return fit(this.windowWidth, { vault: want("vault"), reading: want("reading"), side: want("side") });
   }
 
   /** Puts each panel at its width, and each handle on its edge (or away, with its panel). */
   layout() {
-    const widths = this.phone ? { vault: null, side: null } : this.shownWidths();
-    for (const name of ["vault", "side"] as const) {
+    const widths: Widths = this.phone ? { vault: null, reading: null, side: null } : this.shownWidths();
+    for (const name of PANELS) {
       const { element, handle } = this.panels[name];
       const width = widths[name];
       // The phone layout's own CSS sizes the panels there.
       element.style.width = this.phone || width === null ? "" : `${width}px`;
       // While dragging, the handle stays even if its panel is hidden, so it can be dragged back.
       handle.hidden = this.phone || (width === null && this.drag?.panel !== name);
-      const other = widths[name === "vault" ? "side" : "vault"];
       handle.setAttribute("aria-valuemin", String(LIMITS[name].min));
-      handle.setAttribute("aria-valuemax", String(maxWidth(name, this.windowWidth, other)));
+      handle.setAttribute("aria-valuemax", String(maxWidth(name, this.windowWidth, widths)));
       if (width !== null) handle.setAttribute("aria-valuenow", String(width));
     }
   }
@@ -172,15 +181,15 @@ export class PanelSizes {
     this.layout();
   }
 
-  /** The widest this panel can go now, with the other one as shown. */
+  /** The widest this panel can go now, with the others as shown. */
   private maxNow(name: PanelName): number {
-    return maxWidth(name, this.windowWidth, this.shownWidths()[name === "vault" ? "side" : "vault"]);
+    return maxWidth(name, this.windowWidth, this.shownWidths());
   }
 
   private listen(name: PanelName) {
     const { handle } = this.panels[name];
-    // The Vault browser's edge is on its right, the Side panel's on its left: moving the edge
-    // away from the panel's own side of the window widens it.
+    // The Vault browser's edge is on its right, the Reading panel's and the Side panel's on
+    // their left: moving the edge away from the panel's own side of the window widens it.
     const outwards = name === "vault" ? 1 : -1;
 
     handle.addEventListener("pointerdown", (e) => {

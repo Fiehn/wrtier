@@ -124,6 +124,25 @@
         <p id="empty" class="muted">Open a Vault, then choose a Work on the left, or press Ctrl+O.</p>
       </main>
 
+      <!-- The Reading panel (reading.ts): one Work's text to read beside the one being written.
+           Nothing is typed in it. Shown only while a Work is being read; × closes it. -->
+      <div id="reading-resizer" class="resizer" role="separator" aria-orientation="vertical" aria-controls="reading-panel" aria-label="Width of the Reading panel" tabindex="0" title="Drag to change the width. Double-click for the default width." hidden></div>
+      <aside id="reading-panel" aria-label="Reading panel" hidden>
+        <header class="reading-header">
+          <span class="reading-kind muted">Reading</span>
+          <strong id="reading-name"></strong>
+          <span class="spacer"></span>
+          <select id="reading-chapters" aria-label="Go to a Chapter of the Work being read"></select>
+          <button id="reading-write" type="button" class="link" title="Write in this Work: bring it to the front, at the place being read">Write in it</button>
+          <button id="reading-close" type="button" class="link" title="Close the Reading panel" aria-label="Close the Reading panel">×</button>
+        </header>
+        <!-- Find and replace's bar comes here while it finds in the Work being read. -->
+        <div id="reading-find-slot"></div>
+        <p id="reading-why" class="muted" hidden></p>
+        <div id="reading-text" class="editor"></div>
+        <div id="reading-card" class="reading-card" role="dialog" aria-label="Comments" hidden></div>
+      </aside>
+
       <!-- The panel beside the editor: the Page preview, the Comments and the History, one tab
            at a time. Shown and hidden as a whole. -->
       <div id="panel-resizer" class="resizer" role="separator" aria-orientation="vertical" aria-controls="side-panel" aria-label="Width of the side panel" tabindex="0" title="Drag to change the width, or drag all the way to hide. Double-click for the default width." hidden></div>
@@ -167,6 +186,7 @@
       <nav id="phone-bar" aria-label="Screens">
         <button type="button" data-screen="works">Works</button>
         <button type="button" data-screen="write">Write</button>
+        <button type="button" data-screen="read" id="phone-read" hidden>Read</button>
         <button type="button" data-screen="pages">Pages</button>
         <button type="button" data-screen="comments">Comments</button>
         <button type="button" data-screen="history">History</button>

@@ -166,6 +166,21 @@ async fn text_for_finding(handle: AppHandle, id: String, known: Option<String>) 
     .map_err(|e| e.to_string())?
 }
 
+/// A Work for the Reading panel (vault/reading.rs), unless it still has the stamp `known`: found
+/// by its Work ID (`identity`) if it has one, else by `work`. It's never opened, and nothing is
+/// recorded. The file is read without the app's lock, as for Find in Vault.
+#[tauri::command]
+async fn read_work(handle: AppHandle, work: String, identity: Option<String>, known: Option<String>) -> Result<vault::Reading, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<AppState>();
+        let source = with_app(&state, |app| Ok(open_vault_of(app)?.reading_source(&work, identity.as_deref())))?;
+        let loaded = source.load();
+        with_app(&state, |app| Ok(open_vault_of(app)?.reading(source, loaded, known.as_deref())))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Makes a new, empty Work and opens it.
 #[tauri::command]
 fn create_work(state: State<AppState>, id: String) -> Result<OpenedWork, String> {
@@ -1162,6 +1177,7 @@ pub fn run() {
             get_inclusions,
             chapters_of,
             text_for_finding,
+            read_work,
             check_inclusion,
             create_collection,
             missing_inclusions,
