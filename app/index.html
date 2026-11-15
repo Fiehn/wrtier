@@ -17,7 +17,7 @@
         <header id="sidebar-top">
           <div class="row">
             <button id="choose-vault" type="button">Open Vault…</button>
-            <button id="open-settings" type="button" title="Settings, Reviewers and keyboard shortcuts" hidden>Settings</button>
+            <button id="open-settings" type="button" title="The editor, Reviewers, the Vault, keyboard shortcuts and the app">Settings</button>
           </div>
           <div id="vault-root" class="muted"></div>
           <button id="sync-status" type="button" class="sync-status" hidden></button>
@@ -382,43 +382,6 @@
       </form>
     </dialog>
 
-    <dialog id="reviewers">
-      <form method="dialog" class="reviewers-form">
-        <h2>Reviewers</h2>
-        <p class="muted">The people whose feedback you record as Comments. They belong to the Vault, so they can comment on any Work, and their colour is the same everywhere.</p>
-        <p id="reviewers-error" class="dialog-error" hidden></p>
-        <ul id="reviewers-list" class="reviewer-list"></ul>
-        <p id="reviewers-none" class="muted" hidden>No Reviewers yet.</p>
-        <div class="row reviewer-add">
-          <input id="reviewer-name" maxlength="100" placeholder="Name" autocomplete="off" />
-          <input id="reviewer-role" maxlength="60" placeholder="Role, e.g. editor" autocomplete="off" />
-          <button type="button" id="reviewer-add">Add</button>
-        </div>
-        <details id="reviewers-removed-box" hidden>
-          <summary>Removed</summary>
-          <p class="muted">No longer offered when adding a Comment. Their Comments keep their name and colour.</p>
-          <ul id="reviewers-removed" class="reviewer-list"></ul>
-        </details>
-        <menu>
-          <button value="done">Done</button>
-        </menu>
-      </form>
-    </dialog>
-
-    <dialog id="shortcuts">
-      <form method="dialog">
-        <h2>Keyboard shortcuts</h2>
-        <p class="muted">Click a key, then press the new one. Esc keeps the old key; Backspace leaves the command without one.</p>
-        <label class="check"><input type="checkbox" id="shortcuts-here" /> Only on this device (for a different keyboard). Otherwise every device that opens the Vault uses these.</label>
-        <p id="shortcuts-error" class="dialog-error" hidden></p>
-        <div id="shortcuts-list"></div>
-        <menu>
-          <button type="button" id="shortcuts-reset">Reset all…</button>
-          <button value="done">Done</button>
-        </menu>
-      </form>
-    </dialog>
-
     <dialog id="switcher">
       <form method="dialog">
         <input id="switcher-input" placeholder="Open a Work…" autocomplete="off" />
@@ -484,54 +447,130 @@
       </form>
     </dialog>
 
+    <!-- Settings (main.ts): five tabs by topic. With no Vault open, only the App tab. -->
     <dialog id="settings">
-      <form method="dialog">
+      <form method="dialog" class="settings-form">
         <h2>Settings</h2>
-        <label>Theme
-          <select id="theme">
-            <option value="system">Follow the system</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
-        </label>
-        <label class="here"><input type="checkbox" id="theme-here" /> Only on this device</label>
-        <p id="theme-missing" class="theme-line" hidden></p>
-        <p id="theme-problems" class="theme-line" hidden></p>
-        <p class="row">
-          <button type="button" id="import-theme" title="Copy a theme's .css file into the Vault's themes folder">Import theme…</button>
-        </p>
-        <label>Editor font size
-          <input id="font-size" type="number" min="10" max="40" />
-        </label>
-        <label class="here"><input type="checkbox" id="font-size-here" /> Only on this device</label>
-        <label class="check"><input type="checkbox" id="line-numbers" /> Line numbers</label>
-        <label class="here"><input type="checkbox" id="line-numbers-here" /> Only on this device</label>
-        <label class="check"><input type="checkbox" id="highlight-line" /> Shade the line the cursor is on</label>
-        <label class="here"><input type="checkbox" id="highlight-line-here" /> Only on this device</label>
-        <label class="check"><input type="checkbox" id="preview-follows" /> The Page preview follows the cursor</label>
-        <label class="here"><input type="checkbox" id="preview-follows-here" /> Only on this device</label>
-        <label class="check"><input type="checkbox" id="comment-highlights" /> Show Comment highlights in the text</label>
-        <label class="here"><input type="checkbox" id="comment-highlights-here" /> Only on this device</label>
-        <p class="row">
-          <button type="button" id="open-reviewers" title="The people whose feedback you record as Comments">Reviewers…</button>
-          <button type="button" id="open-shortcuts">Keyboard shortcuts…</button>
-        </p>
-        <h3>Hidden folders</h3>
-        <ul id="hidden-folders" class="hidden-folders"></ul>
-        <label class="here"><input type="checkbox" id="hidden-folders-here" /> Only on this device</label>
-        <h3>Mods for the whole Vault</h3>
-        <ul id="vault-mods" class="mod-list"></ul>
-        <h3>Mods for new Works</h3>
-        <ul id="new-work-mods" class="mod-list"></ul>
-        <p class="muted">Settings are kept in the Vault, so every device that opens it uses them, unless it has its own.</p>
-        <h3>App</h3>
-        <p class="row app-row">
-          <span id="app-version" class="muted"></span>
-          <button type="button" id="check-updates" title="Look for a newer version of the app on GitHub">Check for updates…</button>
-          <button type="button" id="open-uninstall" title="Remove the app from this PC. Your Vault stays." hidden>Uninstall…</button>
-        </p>
+        <div id="settings-tabs" class="settings-tabs" role="tablist" aria-label="Settings">
+          <button id="settings-tab-editor" type="button" role="tab" aria-controls="settings-editor" data-tab="editor">Editor</button>
+          <button id="settings-tab-reviewers" type="button" role="tab" aria-controls="settings-reviewers" data-tab="reviewers">Reviewers</button>
+          <button id="settings-tab-vault" type="button" role="tab" aria-controls="settings-vault" data-tab="vault">Vault</button>
+          <button id="settings-tab-shortcuts" type="button" role="tab" aria-controls="settings-shortcuts" data-tab="shortcuts">Shortcuts</button>
+          <button id="settings-tab-app" type="button" role="tab" aria-controls="settings-app" data-tab="app">App</button>
+        </div>
+        <div class="settings-body">
+          <section id="settings-editor" role="tabpanel" aria-labelledby="settings-tab-editor">
+            <p class="muted tab-note">Kept in the Vault for every device that opens it, unless ticked for this one.</p>
+            <div class="setting-row setting-head">
+              <span></span>
+              <span>This device only</span>
+            </div>
+            <div class="setting-row">
+              <div>
+                <label class="setting-field">Theme
+                  <select id="theme">
+                    <option value="system">Follow the system</option>
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                  </select>
+                </label>
+                <p id="theme-other" class="setting-other" hidden></p>
+                <p id="theme-missing" class="theme-line" hidden></p>
+                <p id="theme-problems" class="theme-line" hidden></p>
+                <p class="row">
+                  <button type="button" id="import-theme" title="Copy a theme's .css file into the Vault's themes folder">Import theme…</button>
+                </p>
+              </div>
+              <input type="checkbox" id="theme-here" aria-label="Theme only on this device" />
+            </div>
+            <div class="setting-row">
+              <div>
+                <label class="setting-field">Editor font size
+                  <input id="font-size" type="number" min="10" max="40" />
+                </label>
+                <p id="font-size-other" class="setting-other" hidden></p>
+              </div>
+              <input type="checkbox" id="font-size-here" aria-label="Editor font size only on this device" />
+            </div>
+            <div class="setting-row">
+              <div>
+                <label class="check"><input type="checkbox" id="line-numbers" /> Line numbers</label>
+                <p id="line-numbers-other" class="setting-other" hidden></p>
+              </div>
+              <input type="checkbox" id="line-numbers-here" aria-label="Line numbers only on this device" />
+            </div>
+            <div class="setting-row">
+              <div>
+                <label class="check"><input type="checkbox" id="highlight-line" /> Shade the line the cursor is on</label>
+                <p id="highlight-line-other" class="setting-other" hidden></p>
+              </div>
+              <input type="checkbox" id="highlight-line-here" aria-label="Shading the cursor's line only on this device" />
+            </div>
+            <div class="setting-row">
+              <div>
+                <label class="check"><input type="checkbox" id="preview-follows" /> The Page preview follows the cursor</label>
+                <p id="preview-follows-other" class="setting-other" hidden></p>
+              </div>
+              <input type="checkbox" id="preview-follows-here" aria-label="The Page preview following the cursor only on this device" />
+            </div>
+            <div class="setting-row">
+              <div>
+                <label class="check"><input type="checkbox" id="comment-highlights" /> Show Comment highlights in the text</label>
+                <p id="comment-highlights-other" class="setting-other" hidden></p>
+              </div>
+              <input type="checkbox" id="comment-highlights-here" aria-label="Comment highlights only on this device" />
+            </div>
+          </section>
+
+          <section id="settings-reviewers" role="tabpanel" aria-labelledby="settings-tab-reviewers" hidden>
+            <p class="muted tab-note">The people whose feedback you record as Comments. They belong to the Vault, so they can comment on any Work, and their colour is the same everywhere.</p>
+            <p id="reviewers-error" class="dialog-error" hidden></p>
+            <ul id="reviewers-list" class="reviewer-list"></ul>
+            <p id="reviewers-none" class="muted" hidden>No Reviewers yet.</p>
+            <div class="row reviewer-add">
+              <input id="reviewer-name" maxlength="100" placeholder="Name" autocomplete="off" />
+              <input id="reviewer-role" maxlength="60" placeholder="Role, e.g. editor" autocomplete="off" />
+              <button type="button" id="reviewer-add">Add</button>
+            </div>
+            <details id="reviewers-removed-box" hidden>
+              <summary>Removed</summary>
+              <p class="muted">No longer offered when adding a Comment. Their Comments keep their name and colour.</p>
+              <ul id="reviewers-removed" class="reviewer-list"></ul>
+            </details>
+          </section>
+
+          <section id="settings-vault" role="tabpanel" aria-labelledby="settings-tab-vault" hidden>
+            <p class="muted tab-note">How this Vault is organised, for every device that opens it.</p>
+            <h3>Hidden folders</h3>
+            <label class="here"><input type="checkbox" id="hidden-folders-here" /> Only on this device</label>
+            <ul id="hidden-folders" class="hidden-folders"></ul>
+            <h3>Mods for the whole Vault</h3>
+            <ul id="vault-mods" class="mod-list"></ul>
+            <h3>Mods for new Works</h3>
+            <ul id="new-work-mods" class="mod-list"></ul>
+          </section>
+
+          <section id="settings-shortcuts" role="tabpanel" aria-labelledby="settings-tab-shortcuts" hidden>
+            <p class="muted tab-note">Click a key, then press the new one. Esc keeps the old key; Backspace leaves the command without one.</p>
+            <div class="shortcuts-top">
+              <label class="check"><input type="checkbox" id="shortcuts-here" /> Only on this device (for a different keyboard). Otherwise every device that opens the Vault uses these.</label>
+              <button type="button" id="shortcuts-reset">Reset all…</button>
+            </div>
+            <p id="shortcuts-error" class="dialog-error" hidden></p>
+            <div id="shortcuts-list"></div>
+          </section>
+
+          <section id="settings-app" role="tabpanel" aria-labelledby="settings-tab-app" hidden>
+            <p class="muted tab-note">This device's copy of the app. Nothing here is kept in the Vault.</p>
+            <p id="app-version"></p>
+            <p class="row app-row">
+              <button type="button" id="check-updates" title="Look for a newer version of the app on GitHub">Check for updates…</button>
+              <button type="button" id="open-uninstall" title="Remove the app from this PC. Your Vault stays." hidden>Uninstall…</button>
+              <button type="button" id="open-licenses" title="The open-source libraries and fonts the app is built with">Licenses…</button>
+            </p>
+          </section>
+        </div>
         <menu>
-          <button type="button" id="open-licenses" class="link licenses-link" title="The open-source libraries and fonts the app is built with">Licenses</button>
           <button value="done">Done</button>
         </menu>
       </form>

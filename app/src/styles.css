@@ -921,7 +921,8 @@ main > :not(#panes) {
   border-bottom: 1px solid var(--line);
 }
 
-.panel-tabs [role="tab"] {
+.panel-tabs [role="tab"],
+.settings-tabs [role="tab"] {
   border: none;
   border-bottom: 2px solid transparent;
   border-radius: 0;
@@ -931,7 +932,8 @@ main > :not(#panes) {
   margin-bottom: -1px; /* the selected tab's line sits on the row's own */
 }
 
-.panel-tabs [role="tab"][aria-selected="true"] {
+.panel-tabs [role="tab"][aria-selected="true"],
+.settings-tabs [role="tab"][aria-selected="true"] {
   color: var(--text);
   border-bottom-color: var(--accent);
   font-weight: 600;
@@ -1516,22 +1518,128 @@ dialog h2 {
   margin: 0 0 12px;
 }
 
-#settings label {
-  display: block;
-  margin-top: 10px;
-}
+/* ---- Settings: five tabs (main.ts), along the top as the Side panel's ---- */
 
-/* ---- The Reviewers dialog ---- */
-
-dialog#reviewers {
+/* One size whichever tab shows, so switching never resizes it; the tab scrolls inside. With
+   no Vault open there's only the App tab, and the dialog is as tall as that. */
+dialog#settings {
   max-width: 560px;
   max-height: calc(100vh - 32px);
 }
 
-.reviewers-form > p.muted {
+dialog#settings:not(.app-only) {
+  height: min(640px, calc(100vh - 32px));
+}
+
+dialog#settings[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.settings-tabs {
+  display: flex;
+  flex: none;
+  overflow-x: auto; /* sideways on a narrow screen, never on two lines */
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-tabs[hidden] {
+  display: none;
+}
+
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 2px 0;
+}
+
+#settings p.tab-note {
   font-size: 13px;
   margin: 0 0 12px;
 }
+
+/* The Editor tab: each setting on the left, its "This device only" box in a column on the right. */
+.setting-row {
+  display: grid;
+  grid-template-columns: 1fr 7.5em;
+  gap: 8px;
+  align-items: start;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.setting-row > input[type="checkbox"] {
+  justify-self: center;
+  margin-top: 8px;
+}
+
+.setting-row.setting-head {
+  padding: 0 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.setting-row.setting-head > span:last-child {
+  text-align: center;
+}
+
+#settings .setting-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+
+#settings .setting-field > select,
+#settings .setting-field > input {
+  flex: 0 1 14em;
+  min-width: 8em;
+}
+
+#settings-editor label.check {
+  display: block;
+  padding-top: 6px;
+}
+
+#settings .setting-row p.row {
+  margin: 8px 0 0;
+}
+
+/* What the other Devices use, under a setting this Device has its own value of. */
+.setting-other {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* The Shortcuts tab: its "Only on this device" box beside Reset all. */
+.shortcuts-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.shortcuts-top label.check {
+  flex: 1;
+  font-size: 13px;
+}
+
+#settings-app p {
+  margin: 0 0 10px;
+}
+
+/* ---- The Reviewers tab ---- */
 
 /* App updates: the download's progress in the Updates dialog. Only while downloading: without
    a value it's an indeterminate bar, moving back and forth, so it must really be gone when hidden
@@ -1654,14 +1762,14 @@ dialog#reviewers {
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 
-#settings label.here {
-  margin-top: 4px;
-  font-size: 13px;
-  color: var(--muted);
+#settings-vault label {
+  display: block;
 }
 
-#settings label.check {
-  margin-top: 14px;
+#settings-vault > label.here {
+  margin: 4px 0;
+  font-size: 13px;
+  color: var(--muted);
 }
 
 /* A chosen theme that's missing, and files in themes/ that aren't themes. */
@@ -2145,25 +2253,9 @@ dialog#reviewers {
   margin: 0 0 8px;
 }
 
-/* ---- The Keyboard shortcuts dialog ---- */
+/* ---- The Shortcuts tab in Settings ---- */
 
-dialog#shortcuts {
-  max-width: 520px;
-  max-height: calc(100vh - 32px);
-}
-
-#shortcuts p.muted {
-  font-size: 13px;
-  margin: 0 0 10px;
-}
-
-#shortcuts label.check {
-  display: block;
-  font-size: 13px;
-  margin-bottom: 10px;
-}
-
-#shortcuts h3 {
+#shortcuts-list h3 {
   font-size: 13px;
   color: var(--muted);
   margin: 14px 0 4px;
@@ -2195,10 +2287,6 @@ dialog#shortcuts {
 .shortcut-key.recording {
   border-color: var(--accent);
   outline: 2px solid var(--accent);
-}
-
-#shortcuts menu {
-  justify-content: space-between;
 }
 
 /* ---- The History tab ---- */
@@ -2631,13 +2719,6 @@ button.folder-row small {
   white-space: nowrap;
 }
 
-/* Bottom left of Settings, on the line with Done. */
-button.licenses-link {
-  margin-right: auto;
-  padding: 0;
-  align-self: center;
-}
-
 dialog#licenses {
   max-width: 640px;
   max-height: calc(100vh - 32px);
@@ -2706,6 +2787,10 @@ dialog#licenses {
   gap: 4px 10px;
   padding: 4px 0;
   overflow-wrap: anywhere;
+}
+
+.hidden-folders li.muted {
+  font-size: 13px;
 }
 
 .hidden-folders small {
@@ -3097,6 +3182,31 @@ dialog#chapters-sheet {
 
 #chapters-sheet menu {
   margin-top: 8px;
+}
+
+/* Settings fills the screen; each Editor row puts its label above its control, the box column
+   still on the right. */
+body.phone dialog#settings {
+  max-width: none;
+  width: calc(100% - 32px);
+}
+
+body.phone dialog#settings:not(.app-only) {
+  height: calc(100vh - 32px);
+}
+
+body.phone #settings .setting-field {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+body.phone #settings .setting-field > select,
+body.phone #settings .setting-field > input {
+  flex: none;
+}
+
+body.phone .setting-row {
+  grid-template-columns: 1fr 5.5em;
 }
 
 /* No keyboard keys to show on the phone; the toolbar does what they do. */

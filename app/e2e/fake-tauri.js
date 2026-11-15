@@ -33,6 +33,8 @@
     /** Vault themes: file → { name, dark, css }. A test adds some before the page loads. */
     themes: {},
     settings: null,
+    /** The Vault the app opens at the start (null: none, as on a first start). */
+    lastVault: "C:/Fake Vault",
     /** Android's shared storage, for the folder browser: each folder and the folders in it. */
     folders: {
       "/storage/emulated/0": ["Download", "Sync"],
@@ -58,6 +60,7 @@
     lineNumbers: false, lineNumbersHere: false, highlightLine: false, highlightLineHere: false,
     previewFollows: true, previewFollowsHere: false, commentHighlights: true, commentHighlightsHere: false,
     shortcuts: {}, shortcutsHere: false, hiddenFoldersHere: false,
+    shared: { theme: "light", fontSize: 17, lineNumbers: false, highlightLine: false, previewFollows: true, commentHighlights: true },
   };
 
   /** Applies one of the editor's edit ops to a Work's text (positions are UTF-16, as JS counts). */
@@ -120,11 +123,22 @@
   }
 
   const handlers = {
-    startup: () => ({ lastVault: "C:/Fake Vault" }),
+    startup: () => ({ lastVault: fake.lastVault }),
     open_vault: ({ path }) => ({ status: "opened", root: path, deviceName: "Laptop", suggestedName: "Laptop" }),
     get_settings: () => settings,
-    set_setting: ({ name, value }) => {
-      settings[name] = name === "fontSize" ? Number(value) : value === "on" ? true : value === "off" ? false : value;
+    set_setting: ({ name, value, here }) => {
+      const v = name === "fontSize" ? Number(value) : value === "on" ? true : value === "off" ? false : value;
+      settings[name] = v;
+      if (!here) {
+        settings.shared[name] = v;
+        settings[`${name}Here`] = false;
+      }
+      return settings;
+    },
+    // Ticking keeps the value in use; unticking goes back to the shared one (vault/settings.rs).
+    set_setting_here: ({ name, here }) => {
+      settings[`${name}Here`] = here;
+      if (!here) settings[name] = settings.shared[name];
       return settings;
     },
     list_works: () => {

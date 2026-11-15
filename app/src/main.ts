@@ -9,12 +9,12 @@ import { PagePreview, type Milestone } from "./preview";
 import { LibraryPanel, type LibraryItem } from "./library";
 import { libraryId, libraryPath } from "./libraryfile";
 import { PreambleDialog, type Preamble } from "./preambledialog";
-import { colourOf, COLOURS, openReviewers, type Reviewer } from "./reviewers";
+import { colourOf, COLOURS, reviewersTab, type Reviewer } from "./reviewers";
 import { SidePanel, type PanelTab } from "./sidepanel";
 import { CommentsPanel } from "./commentspanel";
 import { HistoryPanel, type ComparisonView, type HistoryView, type RestorePreview, type ReturnPreview, type RevertPreview, type SnippetsView } from "./historypanel";
 import { bindingsFrom, COMMANDS, isCommand, keyLabel, onBindingsChanged, setBindings, withKey, type CommandId } from "./keys";
-import { openShortcuts } from "./shortcutsdialog";
+import { shortcutsTab } from "./shortcutsdialog";
 import { openLicenses } from "./licensesdialog";
 import { browseForVault, ensureFilesAccess, onAndroid } from "./android";
 import { PhoneLayout } from "./phone";
@@ -71,6 +71,8 @@ type Settings = {
   shortcutsHere: boolean;
   /** This Device keeps its own list of Hidden folders. */
   hiddenFoldersHere: boolean;
+  /** What the other Devices use, for the settings this Device overrides. */
+  shared: { theme: string; fontSize: number; lineNumbers: boolean; highlightLine: boolean; previewFollows: boolean; commentHighlights: boolean };
 };
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -80,8 +82,8 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 function showError(e: unknown) {
   const el = $("error");
   el.textContent = String(e);
-  // A Vault or Work set up by a newer version of the app (vault.rs): updating is the fix, and
-  // with the Vault shut, Settings can't be reached.
+  // A Vault or Work set up by a newer version of the app (vault.rs): updating is the fix, so
+  // it's offered right here as well as in Settings' App tab.
   if (String(e).includes("newer version of the app")) el.append(" ", updateButton());
   el.hidden = false;
 }
@@ -1017,7 +1019,6 @@ async function openVault(path: string) {
   vaultRoot = opened.root;
   loadOpenFolders();
   $("vault-actions").hidden = false;
-  $("open-settings").hidden = false;
   syncPanel.start();
   if (opened.deviceName === null) await askDeviceName(opened.suggestedName);
   applySettings(await invoke<Settings>("get_settings"));
@@ -1947,22 +1948,44 @@ function showThemes() {
 
 const themes = new ThemeApplier(showThemes);
 
+/** The Editor tab's single settings: the name Rust knows each by, and its elements' id. */
+const SINGLE_SETTINGS = [
+  { name: "theme", id: "theme" },
+  { name: "fontSize", id: "font-size" },
+  { name: "lineNumbers", id: "line-numbers" },
+  { name: "highlightLine", id: "highlight-line" },
+  { name: "previewFollows", id: "preview-follows" },
+  { name: "commentHighlights", id: "comment-highlights" },
+] as const;
+
+/** How a shared value reads under a setting this Device overrides ("Other devices: 17"). */
+function sharedValueText(name: (typeof SINGLE_SETTINGS)[number]["name"], shared: Settings["shared"]): string {
+  const value = shared[name];
+  if (typeof value === "boolean") return value ? "on" : "off";
+  if (name === "theme") {
+    const option = [...$<HTMLSelectElement>("theme").options].find((o) => o.value === value);
+    return option?.textContent ?? String(value).replace(VAULT_PREFIX, "");
+  }
+  return String(value);
+}
+
 function applySettings(settings: Settings) {
   const root = document.documentElement;
   themeSetting = settings.theme;
   void themes.apply(settings.theme);
   root.style.setProperty("--editor-font-size", `${settings.fontSize}px`);
-  $<HTMLInputElement>("theme-here").checked = settings.themeHere;
   $<HTMLInputElement>("font-size").value = String(settings.fontSize);
-  $<HTMLInputElement>("font-size-here").checked = settings.fontSizeHere;
   $<HTMLInputElement>("line-numbers").checked = settings.lineNumbers;
-  $<HTMLInputElement>("line-numbers-here").checked = settings.lineNumbersHere;
   $<HTMLInputElement>("highlight-line").checked = settings.highlightLine;
-  $<HTMLInputElement>("highlight-line-here").checked = settings.highlightLineHere;
   $<HTMLInputElement>("preview-follows").checked = settings.previewFollows;
-  $<HTMLInputElement>("preview-follows-here").checked = settings.previewFollowsHere;
   $<HTMLInputElement>("comment-highlights").checked = settings.commentHighlights;
-  $<HTMLInputElement>("comment-highlights-here").checked = settings.commentHighlightsHere;
+  for (const { name, id } of SINGLE_SETTINGS) {
+    const here = settings[`${name}Here`];
+    $<HTMLInputElement>(`${id}-here`).checked = here;
+    const other = $(`${id}-other`);
+    other.hidden = !here;
+    other.textContent = here ? `Other devices: ${sharedValueText(name, settings.shared)}` : "";
+  }
   $<HTMLInputElement>("hidden-folders-here").checked = settings.hiddenFoldersHere;
   tabs.setOptions({ lineNumbers: settings.lineNumbers, highlightLine: settings.highlightLine });
   tabs.setCommentOptions({ ...tabs.commentOptions, highlights: settings.commentHighlights });
@@ -1970,23 +1993,29 @@ function applySettings(settings: Settings) {
   preview.setFollows(settings.previewFollows);
 }
 
-/** An on/off setting's two checkboxes: the setting itself, and "only on this device". */
-function onOff(name: string, box: string, here: string) {
-  const send = () => setting(name, $<HTMLInputElement>(box).checked ? "on" : "off", $<HTMLInputElement>(here).checked);
-  $(box).addEventListener("change", send);
-  $(here).addEventListener("change", send);
-}
-onOff("lineNumbers", "line-numbers", "line-numbers-here");
-onOff("highlightLine", "highlight-line", "highlight-line-here");
-onOff("previewFollows", "preview-follows", "preview-follows-here");
-onOff("commentHighlights", "comment-highlights", "comment-highlights-here");
-
+/** Sets a setting: for this Device only while its "This device only" box is ticked, else for every Device. */
 function setting(name: string, value: string, here: boolean) {
   act(async () => applySettings(await invoke<Settings>("set_setting", { name, value, here })));
 }
 
+// Ticking "This device only" keeps the value in use, as this Device's own; unticking goes back
+// to the value the other Devices use, and never changes theirs.
+for (const { name, id } of SINGLE_SETTINGS) {
+  $(`${id}-here`).addEventListener("change", () => act(async () => {
+    applySettings(await invoke<Settings>("set_setting_here", { name, here: $<HTMLInputElement>(`${id}-here`).checked }));
+  }));
+}
+
+/** An on/off setting's checkbox. */
+function onOff(name: string, box: string) {
+  $(box).addEventListener("change", () => setting(name, $<HTMLInputElement>(box).checked ? "on" : "off", $<HTMLInputElement>(`${box}-here`).checked));
+}
+onOff("lineNumbers", "line-numbers");
+onOff("highlightLine", "highlight-line");
+onOff("previewFollows", "preview-follows");
+onOff("commentHighlights", "comment-highlights");
+
 $("theme").addEventListener("change", () => setting("theme", $<HTMLSelectElement>("theme").value, $<HTMLInputElement>("theme-here").checked));
-$("theme-here").addEventListener("change", () => setting("theme", $<HTMLSelectElement>("theme").value, $<HTMLInputElement>("theme-here").checked));
 // Importing copies a theme's file into the Vault's themes folder, then uses it.
 $("import-theme").addEventListener("click", () => act(async () => {
   type Imported = { status: "imported"; file: string; name: string } | { status: "exists"; name: string };
@@ -2005,12 +2034,6 @@ $("import-theme").addEventListener("click", () => act(async () => {
 void listen("themes-changed", () => void themes.apply(themeSetting));
 
 $("font-size").addEventListener("change", () => setting("fontSize", $<HTMLInputElement>("font-size").value, $<HTMLInputElement>("font-size-here").checked));
-$("font-size-here").addEventListener("change", () => setting("fontSize", $<HTMLInputElement>("font-size").value, $<HTMLInputElement>("font-size-here").checked));
-// Afterwards the highlights take any new names and colours.
-$("open-reviewers").addEventListener("click", () => act(async () => {
-  await openReviewers(confirmAsk);
-  tabs.refreshMarks();
-}));
 
 /** Settings' list of Hidden folders, each with Unhide (or Remove, for one that's gone from the Vault). */
 function fillHiddenFolders() {
@@ -2049,27 +2072,83 @@ $("hidden-folders-here").addEventListener("change", () => act(async () => {
   fillHiddenFolders();
 }));
 
-$("open-settings").addEventListener("click", () => act(async () => {
-  applySettings(await invoke<Settings>("get_settings")); // another Device may have changed them
-  await refreshList(); // and the Hidden folders with them
-  fillHiddenFolders();
-  await fillVaultMods($("vault-mods"), (state) => {
-    vaultMods = state;
-    act(async () => {
-      await refreshList(); // the colours come or go
-      void findInVault.refresh();
-    });
+// ---- Settings' tabs ----
+
+type SettingsTab = "editor" | "reviewers" | "vault" | "shortcuts" | "app";
+const SETTINGS_TABS: SettingsTab[] = ["editor", "reviewers", "vault", "shortcuts", "app"];
+const settingsDialog = $<HTMLDialogElement>("settings");
+
+/** The tab Settings opens on: the one last shown in this run of the app. */
+let settingsTab: SettingsTab = "editor";
+
+// The highlights take any new names and colours.
+const reviewersSettings = reviewersTab(confirmAsk, () => tabs.refreshMarks());
+const shortcutsSettings = shortcutsTab<Settings>(settingsDialog, { apply: applySettings, confirm: confirmAsk });
+
+/** The tabs Settings has now: with no Vault open, only App. */
+function settingsTabs(): SettingsTab[] {
+  return vaultOpen ? SETTINGS_TABS : ["app"];
+}
+
+function showSettingsTab(tab: SettingsTab, remember = true) {
+  if (tab !== "shortcuts") shortcutsSettings.hide();
+  if (remember) settingsTab = tab;
+  for (const t of SETTINGS_TABS) {
+    const button = $(`settings-tab-${t}`);
+    const selected = t === tab;
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    $(`settings-${t}`).hidden = !selected;
+  }
+}
+
+for (const tab of SETTINGS_TABS) {
+  const button = $(`settings-tab-${tab}`);
+  button.addEventListener("click", () => showSettingsTab(tab));
+  // Left and right arrows move between the tabs, as in any tab list.
+  button.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const i = SETTINGS_TABS.indexOf(tab);
+    const next = SETTINGS_TABS[(i + (e.key === "ArrowRight" ? 1 : SETTINGS_TABS.length - 1)) % SETTINGS_TABS.length];
+    showSettingsTab(next);
+    $(`settings-tab-${next}`).focus();
   });
-  await fillNewWorkMods($("new-work-mods"));
-  await ask($<HTMLDialogElement>("settings"));
-}));
+}
 
-$("open-shortcuts").addEventListener("click", () => act(async () => {
-  const settings = await invoke<Settings>("get_settings");
-  applySettings(settings);
-  await openShortcuts(settings, { apply: applySettings, confirm: confirmAsk });
-}));
+/**
+ * Opens Settings, at `tab` if given, else at the tab last shown. Each tab is filled in afresh,
+ * since another Device may have changed what's in it.
+ */
+async function openSettings(tab?: SettingsTab) {
+  const available = settingsTabs();
+  const appOnly = available.length === 1;
+  settingsDialog.classList.toggle("app-only", appOnly);
+  $("settings-tabs").hidden = appOnly;
+  if (vaultOpen) {
+    const settings = await invoke<Settings>("get_settings");
+    applySettings(settings);
+    await refreshList(); // and the Hidden folders with them
+    fillHiddenFolders();
+    await fillVaultMods($("vault-mods"), (state) => {
+      vaultMods = state;
+      act(async () => {
+        await refreshList(); // the colours come or go
+        void findInVault.refresh();
+      });
+    });
+    await fillNewWorkMods($("new-work-mods"));
+    await reviewersSettings.show();
+    shortcutsSettings.show(settings);
+  }
+  const wanted = tab ?? settingsTab;
+  // With only App, the tab to come back to stays as it was.
+  showSettingsTab(available.includes(wanted) ? wanted : available[0], !appOnly);
+  await ask(settingsDialog);
+  shortcutsSettings.hide();
+}
 
+$("open-settings").addEventListener("click", () => act(() => openSettings()));
 $("open-licenses").addEventListener("click", () => act(openLicenses));
 
 // ---- App updates (ADR 0014) ----

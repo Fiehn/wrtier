@@ -1,4 +1,4 @@
-// The Keyboard shortcuts dialog (from Settings): every command the app has a key for, and the
+// Settings' Shortcuts tab: every command the app has a key for, and the
 // key it has. Click a key, then press the new one. Shortcuts are a Vault setting, so every
 // Device has the same, unless one has its own (a different keyboard).
 
@@ -27,8 +27,12 @@ const GROUPS: { title: string; has: (c: Command) => boolean }[] = [
   ...MODS.map((m) => ({ title: `${m.name} (a Mod)`, has: (c: Command) => c.mod === m.id })),
 ];
 
-export async function openShortcuts<S extends ShortcutSettings>(settings: S, hooks: ShortcutsHooks<S>): Promise<void> {
-  const dialog = $<HTMLDialogElement>("shortcuts");
+/**
+ * Sets up the tab, once, inside `dialog` (Settings). `show` fills it in with the settings as they
+ * are; `hide` stops any recording, when another tab is shown or Settings closes.
+ */
+export function shortcutsTab<S extends ShortcutSettings>(dialog: HTMLDialogElement, hooks: ShortcutsHooks<S>): { show(settings: S): void; hide(): void } {
+  let settings: S;
   const list = $("shortcuts-list");
   const error = $("shortcuts-error");
   const here = $<HTMLInputElement>("shortcuts-here");
@@ -152,7 +156,7 @@ export async function openShortcuts<S extends ShortcutSettings>(settings: S, hoo
       await give(command, key);
     });
   };
-  // Escape closes a dialog; while recording it only stops recording.
+  // Escape closes Settings; while recording it only stops recording.
   const onCancel = (e: Event) => {
     if (recording) e.preventDefault();
   };
@@ -171,14 +175,17 @@ export async function openShortcuts<S extends ShortcutSettings>(settings: S, hoo
   dialog.addEventListener("cancel", onCancel);
   here.addEventListener("change", onHere);
   $("shortcuts-reset").addEventListener("click", onReset);
-  showError(null);
-  render();
-  dialog.returnValue = "";
-  dialog.showModal();
-  await new Promise<void>((resolve) => dialog.addEventListener("close", () => resolve(), { once: true }));
-  stopRecording();
-  window.removeEventListener("keydown", onKey, { capture: true });
-  dialog.removeEventListener("cancel", onCancel);
-  here.removeEventListener("change", onHere);
-  $("shortcuts-reset").removeEventListener("click", onReset);
+
+  return {
+    show(now: S) {
+      settings = now;
+      showError(null);
+      render();
+    },
+    hide() {
+      if (!recording) return;
+      stopRecording();
+      render();
+    },
+  };
 }

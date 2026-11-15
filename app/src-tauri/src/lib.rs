@@ -851,6 +851,12 @@ fn set_setting(state: State<AppState>, name: String, value: String, here: bool) 
     with_app(&state, |app| open_vault_of(app)?.set_setting(&name, &value, here, now_ms()))
 }
 
+/// This Device gets its own value of a Vault setting, or goes back to the shared one.
+#[tauri::command]
+fn set_setting_here(state: State<AppState>, name: String, here: bool) -> Result<vault::Settings, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_setting_here(&name, here, now_ms()))
+}
+
 /// Gives commands keyboard shortcuts: [command, key] pairs; key "none" for no key, "" for the default.
 #[tauri::command]
 fn set_shortcuts(state: State<AppState>, keys: Vec<(String, String)>) -> Result<vault::Settings, String> {
@@ -1181,6 +1187,7 @@ pub fn run() {
             save_as_new,
             get_settings,
             set_setting,
+            set_setting_here,
             get_mods,
             set_mod,
             set_new_work_mod,

@@ -1,4 +1,4 @@
-// The Reviewers dialog: the Vault's Reviewers, each with a name, a role label and a colour slot.
+// Settings' Reviewers tab: the Vault's Reviewers, each with a name, a role label and a colour slot.
 // Every change is saved at once (to vault.db); removing one only hides them as a sender.
 
 import { invoke } from "@tauri-apps/api/core";
@@ -34,11 +34,11 @@ function capital(s: string): string {
 }
 
 /**
- * Opens the dialog. `confirm` asks a yes/no question (for bringing back a removed Reviewer who
- * has the name being added).
+ * Sets up the tab, once. `confirm` asks a yes/no question (for bringing back a removed Reviewer
+ * who has the name being added); `changed` runs after each change (the highlights take any new
+ * names and colours). `show` fills it in afresh, each time Settings shows it.
  */
-export async function openReviewers(confirm: (text: string, yes: string) => Promise<boolean>): Promise<void> {
-  const dialog = $<HTMLDialogElement>("reviewers");
+export function reviewersTab(confirm: (text: string, yes: string) => Promise<boolean>, changed: () => void): { show(): Promise<void> } {
   const error = $("reviewers-error");
   const showError = (e: unknown) => {
     error.textContent = String(e);
@@ -46,7 +46,7 @@ export async function openReviewers(confirm: (text: string, yes: string) => Prom
   };
   const run = (job: () => Promise<unknown>) => {
     error.hidden = true;
-    job().catch(showError);
+    job().then(changed, showError);
   };
 
   async function update(r: Reviewer, change: Partial<Reviewer>) {
@@ -74,7 +74,7 @@ export async function openReviewers(confirm: (text: string, yes: string) => Prom
     role.addEventListener("change", () => run(async () => {
       try { await update(r, { role: role.value }); } finally { await render(); }
     }));
-    // Enter saves the box (by leaving it) instead of closing the dialog.
+    // Enter saves the box (by leaving it) instead of closing Settings.
     for (const box of [name, role]) {
       box.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
@@ -165,25 +165,22 @@ export async function openReviewers(confirm: (text: string, yes: string) => Prom
     await render();
     nameInput.focus();
   }
-  const addButton = $("reviewer-add");
   const onAdd = () => run(add);
-  // Enter in the boxes adds, instead of closing the dialog.
+  // Enter in the boxes adds, instead of closing Settings.
   const onKey = (e: KeyboardEvent) => {
     if (e.key === "Enter") {
       e.preventDefault();
       onAdd();
     }
   };
-  addButton.addEventListener("click", onAdd);
+  $("reviewer-add").addEventListener("click", onAdd);
   nameInput.addEventListener("keydown", onKey);
   roleInput.addEventListener("keydown", onKey);
 
-  error.hidden = true;
-  await render();
-  dialog.returnValue = "";
-  dialog.showModal();
-  await new Promise<void>((resolve) => dialog.addEventListener("close", () => resolve(), { once: true }));
-  addButton.removeEventListener("click", onAdd);
-  nameInput.removeEventListener("keydown", onKey);
-  roleInput.removeEventListener("keydown", onKey);
+  return {
+    async show() {
+      error.hidden = true;
+      await render();
+    },
+  };
 }

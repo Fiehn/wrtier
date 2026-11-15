@@ -467,6 +467,7 @@ test("Settings shows the App version, and an update found is saved for, download
     (window as any).__fake.update = { kind: "available", current: "0.1.2", version: "0.2.0" };
   });
   await app.locator("#open-settings").click();
+  await app.locator("#settings-tab-app").click();
   await expect(app.locator("#app-version")).toHaveText("Wrtier 0.1.2");
   await app.locator("#check-updates").click();
 
@@ -490,6 +491,7 @@ test("Settings shows the App version, and an update found is saved for, download
 
 test("with no newer version, the dialog says so and offers nothing to install", async ({ app }) => {
   await app.locator("#open-settings").click();
+  await app.locator("#settings-tab-app").click();
   await app.locator("#check-updates").click();
   await expect(app.locator("#update-message")).toHaveText("You have the newest version (0.1.2).");
   await expect(app.locator("#update-progress")).toBeHidden(); // the check is over: nothing moving
@@ -504,6 +506,7 @@ test("Uninstall names writing that would be lost, saves first, and only goes on 
     (window as any).__fake.uninstallCheck = { problem: null, unsaved: [{ vault: "C:/Fake Vault", work: "Rain" }] };
   });
   await app.locator("#open-settings").click();
+  await app.locator("#settings-tab-app").click();
   await app.locator("#open-uninstall").click();
   const dialog = app.locator("#uninstall");
   await expect(app.locator("#uninstall-unsaved-list")).toHaveText("Rain (in C:/Fake Vault)");
@@ -527,10 +530,69 @@ test("Uninstall says why when the app can't delete itself, and offers no button"
     (window as any).__fake.uninstallCheck = { problem: "The app can't change its own folder.", unsaved: [] };
   });
   await app.locator("#open-settings").click();
+  await app.locator("#settings-tab-app").click();
   await app.locator("#open-uninstall").click();
   await expect(app.locator("#uninstall-error")).toHaveText("The app can't change its own folder.");
   await expect(app.locator("#uninstall-go")).toBeHidden();
   await expect(app.locator("#uninstall-unsaved")).toBeHidden();
+});
+
+test("Settings has its tabs, and opens again on the one last shown", async ({ app }) => {
+  const dialog = app.locator("#settings");
+  await app.locator("#open-settings").click();
+  await expect(app.locator("#settings-tab-editor")).toHaveAttribute("aria-selected", "true");
+  await expect(app.locator("#settings-editor")).toBeVisible();
+  await expect(app.locator("#settings-vault")).toBeHidden();
+  // Switching tabs never resizes the dialog.
+  const height = (await dialog.boundingBox())!.height;
+  await app.locator("#settings-tab-shortcuts").click();
+  await expect(app.locator("#shortcuts-list h3").first()).toBeVisible();
+  await app.locator("#settings-tab-reviewers").focus();
+  await app.keyboard.press("ArrowRight");
+  await expect(app.locator("#settings-tab-vault")).toBeFocused();
+  await expect(app.locator("#settings-vault")).toBeVisible();
+  expect((await dialog.boundingBox())!.height).toBe(height);
+  await app.locator("#settings button[value=done]").click();
+  await expect(dialog).toBeHidden();
+  await app.locator("#open-settings").click();
+  await expect(app.locator("#settings-vault")).toBeVisible();
+});
+
+test("a setting only on this device shows what the others use, and unticking goes back to that", async ({ app }) => {
+  await app.locator("#open-settings").click();
+  const other = app.locator("#font-size-other");
+  await expect(other).toBeHidden();
+  await app.locator("#font-size-here").check();
+  await expect(other).toHaveText("Other devices: 17");
+  await app.locator("#font-size").fill("20");
+  await app.locator("#font-size").press("Tab");
+  await expect(other).toHaveText("Other devices: 17");
+  const asked = () => app.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd.startsWith("set_setting")).map((e: any) => [e.cmd, e.args]));
+  expect(await asked()).toContainEqual(["set_setting", { name: "fontSize", value: "20", here: true }]);
+  // Unticking: back on the shared 17, without setting it for every device.
+  await app.locator("#font-size-here").uncheck();
+  await expect(other).toBeHidden();
+  await expect(app.locator("#font-size")).toHaveValue("17");
+  expect(await asked()).toContainEqual(["set_setting_here", { name: "fontSize", here: false }]);
+  expect(await asked()).not.toContainEqual(["set_setting", { name: "fontSize", value: "20", here: false }]);
+});
+
+test("with no Vault open, Settings has only the App tab", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+  await page.addInitScript(() => {
+    (window as any).__fake.lastVault = null;
+  });
+  await page.goto("/");
+  await page.locator("#open-settings").click();
+  await expect(page.locator("#settings-app")).toBeVisible();
+  await expect(page.locator("#settings-tabs")).toBeHidden();
+  await expect(page.locator("#settings-editor")).toBeHidden();
+  await expect(page.locator("#check-updates")).toBeVisible();
+  const cmds = await page.evaluate(() => (window as any).__fake.log.map((e: any) => e.cmd) as string[]);
+  expect(cmds).not.toContain("get_settings");
+  expect(errors, "errors in the page").toEqual([]);
 });
 
 test("a Sync problem from a newer version of the app offers Check for updates", async ({ page }) => {
@@ -874,6 +936,7 @@ test("with the Colours Vault Mod, a Work is coloured from its right-click menu",
   await app.keyboard.press("Escape");
   // Switched on in Settings, for the whole Vault.
   await app.locator("#open-settings").click();
+  await app.locator("#settings-tab-vault").click();
   await app.locator("#vault-mods label", { hasText: "Colours" }).locator("input").check();
   await expect.poll(() => app.evaluate(() => (window as any).__fake.vaultMods)).toEqual(["colours"]);
   await app.locator("#settings button[value=done]").click();
