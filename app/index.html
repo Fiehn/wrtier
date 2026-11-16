@@ -48,6 +48,7 @@
           <details id="library" hidden>
             <summary>Style library</summary>
             <div id="library-conflicts"></div>
+            <div id="library-offers"></div>
             <div id="library-list"></div>
             <div class="row library-new">
               <button type="button" class="link" id="new-style">New Style…</button>
@@ -273,6 +274,20 @@
         <menu>
           <button type="button" data-close="cancel">Cancel</button>
           <button value="ok" id="ask-text-ok">OK</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <!-- A newer version of a default against the Vault's copy (ADR 0012). -->
+    <dialog id="compare-default">
+      <form method="dialog">
+        <h2 id="compare-default-title"></h2>
+        <p class="muted">Lines marked − are only in yours; lines marked + are only in the newer one. Using the newer one puts yours in the Vault's .trash folder.</p>
+        <div id="compare-default-lines" class="compare-lines"></div>
+        <menu>
+          <button type="button" data-close="cancel">Close</button>
+          <button value="keep">Keep mine</button>
+          <button value="use">Use the newer one</button>
         </menu>
       </form>
     </dialog>

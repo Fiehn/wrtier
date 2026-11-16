@@ -18,6 +18,10 @@ export type LibraryItem = {
   styles: string[];
 };
 type Conflict = { path: string; copy: string };
+/** A newer version of a default than the Vault was given (ADR 0012). */
+export type Offer = { path: string; kind: Kind; title: string };
+/** A line of a default's two versions: in both, only in the Vault's copy, or only in the newer one. */
+export type CompareLine = { kind: "same" | "mine" | "newer"; text: string };
 type Library = { items: LibraryItem[]; conflicts: Conflict[]; builtIn: string[] };
 export type NewElement = { title: string; shownAs: string; docx: string; description: string };
 
@@ -27,6 +31,12 @@ export type LibraryHooks = {
   open(path: string, title: string): Promise<void>;
   /** Right-click on a file: what can be done with it (rename, remove), at (x, y). */
   menu(item: LibraryItem, x: number, y: number): void;
+  /** Shows a default's two versions; the Author's choice, or null if they just closed it. */
+  compare(offer: Offer, lines: CompareLine[]): Promise<"use" | "keep" | null>;
+  /** Saves what's typed in open tabs, before a file is replaced. */
+  settle(): Promise<void>;
+  /** How many newer defaults are on offer, to mark the library with. */
+  offered(count: number): void;
   error(message: string): void;
 };
 
@@ -57,6 +67,7 @@ export class LibraryPanel {
   constructor(
     private readonly list: HTMLElement,
     private readonly conflicts: HTMLElement,
+    private readonly offers: HTMLElement,
     private readonly hooks: LibraryHooks,
   ) {}
 
@@ -70,6 +81,7 @@ export class LibraryPanel {
     this.items = library.items;
     this.builtIn = library.builtIn;
     this.showConflicts(library.conflicts);
+    this.showOffers(await invoke<Offer[]>("default_offers"));
     this.list.replaceChildren();
     for (const group of GROUPS) {
       const items = library.items.filter((i) => i.kind === group.kind);
@@ -163,6 +175,40 @@ export class LibraryPanel {
           await this.hooks.open(c.copy, `${this.titleOf(c.path)} (other version)`);
         }));
       this.conflicts.append(box);
+    }
+  }
+
+  /** Newer versions of the app's defaults: the Author compares, uses or keeps their own. */
+  private showOffers(offers: Offer[]) {
+    this.offers.replaceChildren();
+    this.hooks.offered(offers.length);
+    const kinds: Record<Kind, string> = { style: "Style", look: "Look", storyElement: "Story element" };
+    for (const offer of offers) {
+      const box = document.createElement("div");
+      box.className = "library-offer";
+      const text = document.createElement("p");
+      text.textContent = `A newer version of the ${kinds[offer.kind]} ${offer.title} is available.`;
+      const button = (label: string, run: () => Promise<unknown>) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = label;
+        b.addEventListener("click", () => run().then(() => this.refresh()).catch((e) => this.hooks.error(String(e))));
+        return b;
+      };
+      const use = async () => {
+        await this.hooks.settle(); // what's typed in its tab goes to the trash with it
+        await invoke("use_newer_default", { path: offer.path });
+      };
+      const keep = () => invoke("keep_default", { path: offer.path });
+      box.append(text,
+        button("Compare", async () => {
+          const choice = await this.hooks.compare(offer, await invoke<CompareLine[]>("compare_default", { path: offer.path }));
+          if (choice === "use") await use();
+          else if (choice === "keep") await keep();
+        }),
+        button("Use it", use),
+        button("Keep mine", keep));
+      this.offers.append(box);
     }
   }
 

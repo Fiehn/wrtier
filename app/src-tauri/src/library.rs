@@ -25,27 +25,27 @@ const ELEMENTS: &str = "elements";
 /// How a Story element looks in the Formatted view.
 pub const SHOWN_AS: &[&str] = &["chip", "block"];
 
-/// The version of the defaults below. A later app with better versions of them offers those
-/// (never applies them), and adds the ones a Vault has never had.
-pub const DEFAULTS_VERSION: &str = "1";
-
-/// The defaults, as paths inside `styles/` and their contents.
-pub const DEFAULTS: &[(&str, &str)] = &[
-    ("Paperback page.typ", include_str!("../defaults/styles/Paperback page.typ")),
-    ("A4 page.typ", include_str!("../defaults/styles/A4 page.typ")),
-    ("Book text.typ", include_str!("../defaults/styles/Book text.typ")),
-    ("Chapter openings.typ", include_str!("../defaults/styles/Chapter openings.typ")),
-    ("Page numbers.typ", include_str!("../defaults/styles/Page numbers.typ")),
-    ("Manuscript.typ", include_str!("../defaults/styles/Manuscript.typ")),
-    ("Inclusion titles.typ", include_str!("../defaults/styles/Inclusion titles.typ")),
-    ("Paperback.look", include_str!("../defaults/styles/Paperback.look")),
-    ("Manuscript.look", include_str!("../defaults/styles/Manuscript.look")),
-    ("A4 draft.look", include_str!("../defaults/styles/A4 draft.look")),
-    ("elements/part.typ", include_str!("../defaults/styles/elements/part.typ")),
-    ("elements/scene-break.typ", include_str!("../defaults/styles/elements/scene-break.typ")),
-    ("elements/epigraph.typ", include_str!("../defaults/styles/elements/epigraph.typ")),
-    ("elements/block-text.typ", include_str!("../defaults/styles/elements/block-text.typ")),
-    ("elements/dedication.typ", include_str!("../defaults/styles/elements/dedication.typ")),
+/// The defaults: each one's path inside `styles/`, its version and its contents. A Vault's
+/// `vault.db` records the version of each it was last given; a later app with a higher version
+/// of one offers it (never applies it), and adds the ones a Vault has never had (ADR 0012).
+/// Whoever changes a default raises its version (`a_changed_default_has_a_new_version` checks).
+/// Version 1 was every default up to the `.docx` translations, all recorded as one.
+pub const DEFAULTS: &[(&str, u32, &str)] = &[
+    ("Paperback page.typ", 2, include_str!("../defaults/styles/Paperback page.typ")),
+    ("A4 page.typ", 2, include_str!("../defaults/styles/A4 page.typ")),
+    ("Book text.typ", 2, include_str!("../defaults/styles/Book text.typ")),
+    ("Chapter openings.typ", 2, include_str!("../defaults/styles/Chapter openings.typ")),
+    ("Page numbers.typ", 2, include_str!("../defaults/styles/Page numbers.typ")),
+    ("Manuscript.typ", 2, include_str!("../defaults/styles/Manuscript.typ")),
+    ("Inclusion titles.typ", 2, include_str!("../defaults/styles/Inclusion titles.typ")),
+    ("Paperback.look", 2, include_str!("../defaults/styles/Paperback.look")),
+    ("Manuscript.look", 2, include_str!("../defaults/styles/Manuscript.look")),
+    ("A4 draft.look", 2, include_str!("../defaults/styles/A4 draft.look")),
+    ("elements/part.typ", 2, include_str!("../defaults/styles/elements/part.typ")),
+    ("elements/scene-break.typ", 2, include_str!("../defaults/styles/elements/scene-break.typ")),
+    ("elements/epigraph.typ", 2, include_str!("../defaults/styles/elements/epigraph.typ")),
+    ("elements/block-text.typ", 2, include_str!("../defaults/styles/elements/block-text.typ")),
+    ("elements/dedication.typ", 2, include_str!("../defaults/styles/elements/dedication.typ")),
 ];
 
 #[derive(Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,7 +246,7 @@ pub fn look_styles(text: &str) -> Vec<String> {
 
 /// The built-in Story elements: the ones the app ships, which every Work has.
 pub fn built_in_elements() -> impl Iterator<Item = (&'static str, &'static str)> {
-    DEFAULTS.iter().filter_map(|(path, text)| Some((path.strip_prefix("elements/")?.strip_suffix(".typ")?, *text)))
+    DEFAULTS.iter().filter_map(|(path, _, text)| Some((path.strip_prefix("elements/")?.strip_suffix(".typ")?, *text)))
 }
 
 /// Does the file define a function (or value) called `name`?
@@ -462,7 +462,7 @@ pub fn resolve(root: &Path, copy: &str, keep: Keep) -> Result<(), String> {
 /// file the Author had already made, which is left as it is).
 pub fn write_defaults(root: &Path, had: impl Fn(&str) -> bool) -> Result<Vec<&'static str>, String> {
     let mut written = Vec::new();
-    for &(path, text) in DEFAULTS {
+    for &(path, _, text) in DEFAULTS {
         if had(path) {
             continue;
         }
@@ -478,28 +478,120 @@ pub fn write_defaults(root: &Path, had: impl Fn(&str) -> bool) -> Result<Vec<&'s
     Ok(written)
 }
 
+/// The same text, whatever its line endings (a checkout or an editor on Windows).
+fn same_text(a: &str, b: &str) -> bool {
+    a.replace("\r\n", "\n") == b.replace("\r\n", "\n")
+}
+
+/// Puts one default (`path` in `styles/`) back as this app version ships it: the file there, if
+/// it differs, goes to the trash folder first. Whether anything was written.
+fn put_back(root: &Path, trash: &Path, path: &str, text: &str) -> Result<bool, String> {
+    let file = root.join(FOLDER).join(path);
+    match std::fs::read_to_string(&file) {
+        Ok(now) if same_text(&now, text) => return Ok(false),
+        Ok(_) => to_trash(trash, &file, &format!("{FOLDER}/{path}"))?,
+        Err(_) if file.exists() => return Err(format!("{FOLDER}/{path} can't be read, so it's left as it is.")),
+        Err(_) => {}
+    }
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(err)?;
+    }
+    std::fs::write(&file, text).map_err(err)?;
+    Ok(true)
+}
+
 /// Puts every default back as this app version ships it, when the Author asks: one that's
 /// missing is written again, and one that differs is first moved to the trash folder, so
 /// nothing is lost. The Author's own files are left alone. Returns the paths (as in `styles/`)
 /// it wrote; a default that's already the same isn't among them.
 pub fn restore_defaults(root: &Path, trash: &Path) -> Result<Vec<&'static str>, String> {
     let mut restored = Vec::new();
-    for &(path, text) in DEFAULTS {
-        let file = root.join(FOLDER).join(path);
-        match std::fs::read_to_string(&file) {
-            // Line endings may differ (a checkout or an editor on Windows) without anything else.
-            Ok(now) if now.replace("\r\n", "\n") == text.replace("\r\n", "\n") => continue,
-            Ok(_) => to_trash(trash, &file, &format!("{FOLDER}/{path}"))?,
-            Err(_) if file.exists() => return Err(format!("{FOLDER}/{path} can't be read, so it's left as it is.")),
-            Err(_) => {}
+    for &(path, _, text) in DEFAULTS {
+        if put_back(root, trash, path, text)? {
+            restored.push(path);
         }
-        if let Some(dir) = file.parent() {
-            std::fs::create_dir_all(dir).map_err(err)?;
-        }
-        std::fs::write(&file, text).map_err(err)?;
-        restored.push(path);
     }
     Ok(restored)
+}
+
+/// A newer version of a default than the Vault was given, offered to the Author (ADR 0012).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Offer {
+    /// Its file, as library items give theirs (`styles/Manuscript.typ`).
+    pub path: String,
+    pub kind: Kind,
+    /// The name the Vault's copy goes by.
+    pub title: String,
+}
+
+/// A default by its path in the Vault (`styles/…`): its path in `styles/`, version and text.
+fn default_at(path: &str) -> Option<(&'static str, u32, &'static str)> {
+    let inside = path.strip_prefix(&format!("{FOLDER}/"))?;
+    DEFAULTS.iter().copied().find(|(p, _, _)| *p == inside)
+}
+
+/// The defaults with a newer version than `recorded(path)` (what `vault.db` says the Vault was
+/// last given), to offer; and those it can simply record as given, being the same already.
+/// One the Vault never had is `write_defaults`'s, and one the Author deleted stays deleted.
+pub fn newer_defaults(root: &Path, recorded: impl Fn(&str) -> Option<u32>) -> (Vec<Offer>, Vec<(&'static str, u32)>) {
+    let (mut offers, mut same) = (Vec::new(), Vec::new());
+    let items = list(root).items;
+    for &(path, version, text) in DEFAULTS {
+        if recorded(path).is_none_or(|r| r >= version) {
+            continue;
+        }
+        let Ok(now) = std::fs::read_to_string(root.join(FOLDER).join(path)) else { continue };
+        if same_text(&now, text) {
+            same.push((path, version));
+            continue;
+        }
+        let at = format!("{FOLDER}/{path}");
+        if let Some(item) = items.iter().find(|i| i.path == at) {
+            offers.push(Offer { path: at, kind: item.kind, title: item.title.clone() });
+        }
+    }
+    (offers, same)
+}
+
+/// A line of a comparison between the Vault's copy of a default and the newer one.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Line {
+    /// "same", "mine" (only in the Vault's copy) or "newer" (only in the newer one).
+    pub kind: &'static str,
+    pub text: String,
+}
+
+/// The Vault's copy of the default at `path` (`styles/…`) against the one this app ships, line
+/// by line.
+pub fn compare_default(root: &Path, path: &str) -> Result<Vec<Line>, String> {
+    let (_, _, text) = default_at(path).ok_or_else(|| format!("{path} isn't one of the app's defaults."))?;
+    let mine = std::fs::read_to_string(file(root, path)?).map_err(err)?.replace("\r\n", "\n");
+    let newer = text.replace("\r\n", "\n");
+    let diff = similar::TextDiff::from_lines(&mine, &newer);
+    Ok(diff.iter_all_changes().map(|c| Line {
+        kind: match c.tag() {
+            similar::ChangeTag::Equal => "same",
+            similar::ChangeTag::Delete => "mine",
+            similar::ChangeTag::Insert => "newer",
+        },
+        text: c.value().trim_end_matches('\n').to_string(),
+    }).collect())
+}
+
+/// Uses the newer version of the default at `path` (`styles/…`): the Vault's copy goes to the
+/// trash folder. Returns its path in `styles/` and version, to record.
+pub fn use_newer(root: &Path, trash: &Path, path: &str) -> Result<(&'static str, u32), String> {
+    let (inside, version, text) = default_at(path).ok_or_else(|| format!("{path} isn't one of the app's defaults."))?;
+    put_back(root, trash, inside, text)?;
+    Ok((inside, version))
+}
+
+/// The default at `path` (`styles/…`) as this app ships it: its path in `styles/` and version,
+/// to record when the Author keeps their own.
+pub fn shipped(path: &str) -> Result<(&'static str, u32), String> {
+    default_at(path).map(|(p, v, _)| (p, v)).ok_or_else(|| format!("{path} isn't one of the app's defaults."))
 }
 
 #[cfg(test)]
@@ -581,12 +673,12 @@ mod tests {
         std::fs::remove_file(styles.join("elements/epigraph.typ")).unwrap();
         std::fs::write(styles.join("Mine.typ"), "// Style: Mine\n").unwrap();
         // Only line endings differ: the same.
-        let crlf = DEFAULTS.iter().find(|(p, _)| *p == "A4 page.typ").unwrap().1.replace('\n', "\r\n");
+        let crlf = DEFAULTS.iter().find(|(p, _, _)| *p == "A4 page.typ").unwrap().2.replace('\n', "\r\n");
         std::fs::write(styles.join("A4 page.typ"), &crlf).unwrap();
 
         let restored = restore_defaults(dir.path(), &trash).unwrap();
         assert_eq!(restored, ["Book text.typ", "elements/epigraph.typ"]);
-        for (path, text) in DEFAULTS.iter().filter(|(p, _)| *p != "A4 page.typ") {
+        for (path, _, text) in DEFAULTS.iter().filter(|(p, _, _)| *p != "A4 page.typ") {
             assert_eq!(&std::fs::read_to_string(styles.join(path)).unwrap(), text, "{path}");
         }
         assert_eq!(std::fs::read_to_string(trash.join("styles/Book text.typ")).unwrap(), "// Style: Book text\n// Mine.\n");
@@ -594,6 +686,42 @@ mod tests {
         assert_eq!(std::fs::read_to_string(styles.join("Mine.typ")).unwrap(), "// Style: Mine\n", "the Author's own stay");
         assert_eq!(std::fs::read_to_string(styles.join("A4 page.typ")).unwrap(), crlf, "left as it was");
         assert!(restore_defaults(dir.path(), &trash).unwrap().is_empty(), "nothing more to do");
+    }
+
+    /// Each default as it was at its version, by a fingerprint of its text (FNV-1a, `\n` line
+    /// endings). Changing a default means raising its version and pinning its new fingerprint
+    /// here, or Vaults with the old one would never be offered the new.
+    const PINNED: &[(&str, u32, u64)] = &[
+        ("Paperback page.typ", 2, 0x4020b0b18b3971e9),
+        ("A4 page.typ", 2, 0x61193b0b45b1f5a2),
+        ("Book text.typ", 2, 0x55892835a0da5e49),
+        ("Chapter openings.typ", 2, 0x8d578bd6c0b9eade),
+        ("Page numbers.typ", 2, 0x8229b16f4a5a8464),
+        ("Manuscript.typ", 2, 0xda0afbb0ad87ed33),
+        ("Inclusion titles.typ", 2, 0x0faf0b2b87be25e2),
+        ("Paperback.look", 2, 0x7afdbf321c56dc75),
+        ("Manuscript.look", 2, 0xd39154534bcfefe8),
+        ("A4 draft.look", 2, 0xfab82f5f2f68c6a9),
+        ("elements/part.typ", 2, 0x19bc81f4c5b6fa31),
+        ("elements/scene-break.typ", 2, 0xb038af37ed27db1d),
+        ("elements/epigraph.typ", 2, 0xcd37cd1ea6c460ba),
+        ("elements/block-text.typ", 2, 0xced392474f494742),
+        ("elements/dedication.typ", 2, 0xd956417df4a3647f),
+    ];
+
+    #[test]
+    fn a_changed_default_has_a_new_version() {
+        let fingerprint = |text: &str| text.replace("\r\n", "\n").bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        assert_eq!(PINNED.len(), DEFAULTS.len(), "every default is pinned");
+        for &(path, version, text) in DEFAULTS {
+            let &(_, pinned_version, pinned) = PINNED.iter().find(|(p, _, _)| *p == path).unwrap_or_else(|| panic!("{path} isn't pinned"));
+            let now = fingerprint(text);
+            assert!(version >= pinned_version, "{path}: a version only goes up");
+            assert!(now == pinned || version > pinned_version,
+                "{path} changed: raise its version to {} in DEFAULTS and pin ({path:?}, {}, {now:#018x}) here", pinned_version + 1, pinned_version + 1);
+            assert!(now == pinned, "{path}: pin its new version here: ({path:?}, {version}, {now:#018x})");
+        }
     }
 
     #[test]

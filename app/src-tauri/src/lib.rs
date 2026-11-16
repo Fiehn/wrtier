@@ -656,6 +656,30 @@ fn restore_library_defaults(state: State<AppState>) -> Result<Vec<&'static str>,
     })
 }
 
+/// The defaults this app has a newer version of than the Vault was given (ADR 0012).
+#[tauri::command]
+fn default_offers(state: State<AppState>) -> Result<Vec<library::Offer>, String> {
+    with_app(&state, |app| open_vault_of(app)?.default_offers(now_ms()))
+}
+
+/// The Vault's copy of a default against the newer one, line by line.
+#[tauri::command]
+fn compare_default(state: State<AppState>, path: String) -> Result<Vec<library::Line>, String> {
+    with_app(&state, |app| library::compare_default(&open_vault_of(app)?.root, &path))
+}
+
+/// Uses the newer version of a default; the Vault's copy goes to its trash folder.
+#[tauri::command]
+fn use_newer_default(state: State<AppState>, path: String) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.use_newer_default(&path, now_ms()))
+}
+
+/// Keeps the Vault's copy of a default: this newer version isn't offered again.
+#[tauri::command]
+fn keep_default(state: State<AppState>, path: String) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.keep_default(&path, now_ms()))
+}
+
 /// Keeps one version of a library file that has a Conflict copy.
 #[tauri::command]
 fn resolve_library(state: State<AppState>, copy: String, keep: library::Keep) -> Result<(), String> {
@@ -1269,6 +1293,10 @@ pub fn run() {
             create_library,
             resolve_library,
             restore_library_defaults,
+            default_offers,
+            compare_default,
+            use_newer_default,
+            keep_default,
             retitle_library,
             trash_library,
             forget_preview,

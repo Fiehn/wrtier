@@ -362,10 +362,45 @@ impl Vault {
     /// records them in `vault.db`, so one the Author deletes never comes back (ADR 0012).
     fn write_defaults(&mut self, now_ms: u64) -> Result<(), String> {
         let written = library::write_defaults(&self.root, |path| self.vault_doc.field(DEFAULTS_RECORD, path).is_some())?;
-        let changes: Vec<Change> = written.iter()
-            .map(|path| self.vault_doc.set_field_local(DEFAULTS_RECORD, path, library::DEFAULTS_VERSION, now_ms))
+        let given: Vec<(&str, u32)> = written.iter()
+            .map(|path| library::DEFAULTS.iter().find(|(p, _, _)| p == path).map_or((*path, 1), |(p, v, _)| (*p, *v)))
+            .collect();
+        self.record_defaults(&given, now_ms)
+    }
+
+    /// Records in `vault.db` which version of each default (by its path in `styles/`) the
+    /// Vault was given, or the Author decided on.
+    fn record_defaults(&mut self, given: &[(&str, u32)], now_ms: u64) -> Result<(), String> {
+        let changes: Vec<Change> = given.iter()
+            .map(|(path, version)| self.vault_doc.set_field_local(DEFAULTS_RECORD, path, &version.to_string(), now_ms))
             .collect();
         if changes.is_empty() { Ok(()) } else { self.save_vault(&changes) }
+    }
+
+    /// The version of a default the Vault was last given (by its path in `styles/`): none if
+    /// never. Recorded before defaults had versions of their own, it's 1.
+    fn default_given(&self, path: &str) -> Option<u32> {
+        self.vault_doc.field(DEFAULTS_RECORD, path).map(|v| v.parse().unwrap_or(1))
+    }
+
+    /// The defaults this app has a newer version of than the Vault was given, to offer (ADR
+    /// 0012). One whose file is the newer version already is recorded as given, without asking.
+    pub fn default_offers(&mut self, now_ms: u64) -> Result<Vec<library::Offer>, String> {
+        let (offers, same) = library::newer_defaults(&self.root, |path| self.default_given(path));
+        self.record_defaults(&same, now_ms)?;
+        Ok(offers)
+    }
+
+    /// Uses the newer version of a default (`styles/…`); the Vault's copy goes to its trash.
+    pub fn use_newer_default(&mut self, path: &str, now_ms: u64) -> Result<(), String> {
+        let given = library::use_newer(&self.root, &self.root.join(TRASH), path)?;
+        self.record_defaults(&[given], now_ms)
+    }
+
+    /// Keeps the Vault's copy of a default (`styles/…`): this version isn't offered again.
+    pub fn keep_default(&mut self, path: &str, now_ms: u64) -> Result<(), String> {
+        let given = library::shipped(path)?;
+        self.record_defaults(&[given], now_ms)
     }
 
     /// The Style library, and its Conflict copies waiting for the Author.
@@ -1367,7 +1402,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = open(dir.path());
         assert_eq!(vault.library().items.len(), library::DEFAULTS.len());
-        assert_eq!(vault.vault_doc.field(DEFAULTS_RECORD, "Paperback.look"), Some(library::DEFAULTS_VERSION));
+        assert_eq!(vault.vault_doc.field(DEFAULTS_RECORD, "Paperback.look"), Some("2"));
         assert!(!vault.library_changed(), "writing them isn't a change from outside");
         // An edit in another editor is noticed (the timer asks every second).
         std::fs::write(dir.path().join("styles/Book text.typ"), "// Style: Book text\n// Edited in vim.\n\n#set text(size: 12pt)\n").unwrap();
@@ -1381,6 +1416,54 @@ mod tests {
         assert_eq!(other.library().items.len(), library::DEFAULTS.len() - 1);
         // The library isn't listed as Works.
         assert!(!other.walk().typs.iter().any(|t| t.starts_with(dir.path().join("styles"))));
+    }
+
+    /// ADR 0012: a newer version of a default is offered, never applied; one the Vault already
+    /// has is recorded without asking; and one the Author deleted stays deleted.
+    #[test]
+    fn a_newer_default_is_offered_and_the_author_decides() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open(dir.path());
+        assert!(vault.default_offers(1000).unwrap().is_empty(), "a new Vault has the newest");
+        let styles = dir.path().join("styles");
+        let shipped = |path: &str| library::DEFAULTS.iter().find(|(p, _, _)| *p == path).unwrap().2;
+        // As if given version 1 by an older app: Book text since edited, Manuscript as shipped
+        // (line endings aside), the Part deleted.
+        let old = ["Book text.typ", "Manuscript.typ", "elements/part.typ"].map(|p| (p, 1));
+        vault.record_defaults(&old, 2000).unwrap();
+        std::fs::write(styles.join("Book text.typ"), "// Style: Book text\n// Mine.\n").unwrap();
+        std::fs::write(styles.join("Manuscript.typ"), shipped("Manuscript.typ").replace("\r\n", "\n").replace('\n', "\r\n")).unwrap();
+        std::fs::remove_file(styles.join("elements/part.typ")).unwrap();
+
+        let offers = vault.default_offers(3000).unwrap();
+        assert_eq!(offers, [library::Offer { path: "styles/Book text.typ".into(), kind: library::Kind::Style, title: "Book text".into() }]);
+        assert_eq!(vault.vault_doc.field(DEFAULTS_RECORD, "Manuscript.typ"), Some("2"), "the same already: recorded");
+        assert_eq!(vault.vault_doc.field(DEFAULTS_RECORD, "elements/part.typ"), Some("1"), "deleted: left as it was");
+        assert!(!styles.join("elements/part.typ").exists());
+
+        // Compared: the Author's lines against the newer ones.
+        let lines = library::compare_default(dir.path(), "styles/Book text.typ").unwrap();
+        assert!(lines.iter().any(|l| l.kind == "mine" && l.text == "// Mine."), "{lines:?}");
+        assert!(lines.iter().any(|l| l.kind == "newer" && l.text.starts_with("#set text")), "{lines:?}");
+
+        // Kept: not offered again, and the file is untouched.
+        vault.keep_default("styles/Book text.typ", 4000).unwrap();
+        assert!(vault.default_offers(5000).unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(styles.join("Book text.typ")).unwrap(), "// Style: Book text\n// Mine.\n");
+
+        // Used: the newer one is written, the Author's goes to the trash.
+        vault.record_defaults(&[("Book text.typ", 1)], 6000).unwrap();
+        assert_eq!(vault.default_offers(7000).unwrap().len(), 1);
+        vault.use_newer_default("styles/Book text.typ", 8000).unwrap();
+        assert_eq!(std::fs::read_to_string(styles.join("Book text.typ")).unwrap(), shipped("Book text.typ"));
+        assert_eq!(std::fs::read_to_string(dir.path().join(TRASH).join("styles/Book text.typ")).unwrap(), "// Style: Book text\n// Mine.\n");
+        assert!(vault.default_offers(9000).unwrap().is_empty());
+
+        // Given a later version by a newer app on another Device: this one has nothing newer.
+        vault.record_defaults(&[("Book text.typ", 3)], 10_000).unwrap();
+        std::fs::write(styles.join("Book text.typ"), "// Style: Book text\n// From the future.\n").unwrap();
+        assert!(vault.default_offers(11_000).unwrap().is_empty());
+        assert!(vault.use_newer_default("styles/Mine.typ", 12_000).is_err(), "not a default");
     }
 
     #[test]

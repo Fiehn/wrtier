@@ -6,7 +6,7 @@ import { buildTree, folderOf, foldersOf, hiddenFolderAt, withoutHidden, type Fol
 import { destinations, movedFolders, whereTo, type Movable, type Taken } from "./vaultmoves";
 import { showMenu, type MenuItem } from "./menu";
 import { PagePreview, type Milestone } from "./preview";
-import { LibraryPanel, type LibraryItem } from "./library";
+import { LibraryPanel, type CompareLine, type LibraryItem, type Offer } from "./library";
 import { libraryId, libraryPath } from "./libraryfile";
 import { PreambleDialog, type Preamble } from "./preambledialog";
 import { colourOf, COLOURS, reviewersTab, type Reviewer } from "./reviewers";
@@ -584,11 +584,32 @@ function remember() {
 
 // ---- The Style library ----
 
-const library: LibraryPanel = new LibraryPanel($("library-list"), $("library-conflicts"), {
+const library: LibraryPanel = new LibraryPanel($("library-list"), $("library-conflicts"), $("library-offers"), {
   open: (path, title) => openLibraryFile(path, title),
   menu: (item, x, y) => libraryMenu(item, x, y),
+  compare: compareDefault,
+  settle: () => tabs.idle(),
+  offered: (count) => {
+    const summary = $("library").querySelector("summary")!;
+    summary.classList.toggle("has-offer", count > 0);
+    summary.title = count === 0 ? "" : `${count === 1 ? "A newer version of a default is" : "Newer versions of defaults are"} available inside.`;
+  },
   error: showError,
 });
+
+/** A default's two versions, line by line: the Author uses the newer one, keeps theirs, or closes it. */
+async function compareDefault(offer: Offer, lines: CompareLine[]): Promise<"use" | "keep" | null> {
+  $("compare-default-title").textContent = `${offer.title}: yours and the newer one`;
+  const list = $("compare-default-lines");
+  list.replaceChildren(...lines.map((line) => {
+    const row = document.createElement("div");
+    row.className = line.kind;
+    row.textContent = `${line.kind === "mine" ? "−" : line.kind === "newer" ? "+" : " "} ${line.text}`;
+    return row;
+  }));
+  const answer = await ask($<HTMLDialogElement>("compare-default"));
+  return answer === "use" || answer === "keep" ? answer : null;
+}
 
 const KIND_NAMES: Record<LibraryItem["kind"], string> = { style: "Style", look: "Look", storyElement: "Story element" };
 

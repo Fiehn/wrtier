@@ -799,6 +799,54 @@ kbd {
   margin: 0 4px 4px 0;
 }
 
+/* A newer default on offer: quieter than a conflict, which needs deciding. */
+.library-offer {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  padding: 6px 8px;
+  border-radius: 5px;
+  margin-top: 8px;
+}
+
+.library-offer p {
+  margin: 0 0 6px;
+}
+
+.library-offer button {
+  margin: 0 4px 4px 0;
+}
+
+#library > summary.has-offer::after {
+  content: " •";
+  color: var(--accent);
+}
+
+/* A default's two versions, line by line. */
+.compare-lines {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  max-height: 60vh;
+  max-width: min(80ch, 90vw);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  margin-bottom: 12px;
+}
+
+.compare-lines div {
+  white-space: pre-wrap;
+  padding: 0 6px 0 1.6em;
+  text-indent: -1.2em;
+}
+
+.compare-lines .mine {
+  background: var(--reviewer-red-soft);
+}
+
+.compare-lines .newer {
+  background: var(--reviewer-green-soft);
+}
+
 /* A library file's tab: set apart from the Works' tabs. */
 .tab.library .tab-name {
   font-style: italic;
