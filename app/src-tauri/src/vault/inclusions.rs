@@ -1347,7 +1347,7 @@ mod tests {
 
         let header = crate::docx::with_probe(&input.header);
         let options = typst_docx::Options {
-            targets: crate::docx::targets(&input.header.elements),
+            targets: crate::docx::targets(&input.header.elements, &input.made),
             comments: crate::docx::comments(input.comments.clone(), header.text.len()),
             ..typst_docx::Options::default()
         };

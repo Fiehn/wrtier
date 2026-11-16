@@ -229,6 +229,10 @@ fn read_item(root: &Path, path: &Path, text: &str) -> Option<Item> {
         }
         Kind::Style => {}
     }
+    // Its `/* .docx */` translations, for a Style or a Story element (ADR 0016).
+    if kind != Kind::Look {
+        item.problems.extend(typst_docx::translate::problems(text).into_iter().map(|p| format!("its .docx translations, {p}")));
+    }
     Some(item)
 }
 
@@ -550,6 +554,17 @@ mod tests {
         assert!(dream.problems.iter().any(|p| p.contains("doesn't define #dream")));
         assert!(dream.problems.iter().any(|p| p.contains("bubble")));
         assert!(dream.problems.iter().any(|p| p.contains("\".docx: centred #\" should be one of")), "v1's values are gone");
+        // A Style's hand-written .docx translations are checked too.
+        write(dir.path(), "styles/Wordy.typ", "// Style: Wordy
+// Mine.
+#set text(size: 12pt)
+/* .docx
+Normal: <w:sz w:val=\"24\"/>
+Epigraph: <w:wobble/>
+*/
+").unwrap();
+        let wordy = list(dir.path()).items.into_iter().find(|i| i.name == "Wordy").unwrap();
+        assert_eq!(wordy.problems, ["its .docx translations, line 6: <w:wobble> isn't a paragraph or text property Word knows"]);
     }
 
     #[test]

@@ -30,6 +30,8 @@ pub(crate) struct Key {
     pub scope: Option<String>,
     /// The flush variant.
     pub first: bool,
+    /// A list item ("List Paragraph"; its indents are its list's numbering's).
+    pub list: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +50,9 @@ pub(crate) struct Props {
     pub bold: Option<bool>,
     /// Hex, without `#`, such as "000000".
     pub fill: Option<String>,
+    pub small_caps: Option<bool>,
+    pub underline: Option<bool>,
+    pub strike: Option<bool>,
     pub align: Option<Align>,
     pub left: Option<f64>,
     pub right: Option<f64>,
@@ -70,6 +75,9 @@ impl Props {
             italic: over.italic.or(self.italic),
             bold: over.bold.or(self.bold),
             fill: over.fill.clone().or(self.fill.clone()),
+            small_caps: over.small_caps.or(self.small_caps),
+            underline: over.underline.or(self.underline),
+            strike: over.strike.or(self.strike),
             align: over.align.or(self.align),
             left: over.left.or(self.left),
             right: over.right.or(self.right),
@@ -99,6 +107,9 @@ impl Props {
             italic: keep(&self.italic, &base.italic),
             bold: keep(&self.bold, &base.bold),
             fill: keep(&self.fill, &base.fill),
+            small_caps: keep(&self.small_caps, &base.small_caps),
+            underline: keep(&self.underline, &base.underline),
+            strike: keep(&self.strike, &base.strike),
             align: keep(&self.align, &base.align),
             left: keep_len(self.left, base.left),
             right: keep_len(self.right, base.right),
@@ -128,8 +139,26 @@ pub(crate) struct Style {
     pub key: Key,
 }
 
+/// A list item's place in its list, and where its marker and text start.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ListItem {
+    /// Which list (the outermost one), how deep, and whether numbered.
+    pub list: usize,
+    pub level: usize,
+    pub numbered: bool,
+    /// As shown ("•", "2.", "1.a.").
+    pub marker: String,
+    /// From the body's left edge to where its text starts, and how far before that the marker starts.
+    pub left: f64,
+    pub hanging: f64,
+}
+
 pub(crate) struct Para {
     pub style: usize,
+    /// Its place in a list, if it's a list item.
+    pub list: Option<ListItem>,
+    /// The page it starts on.
+    pub page: usize,
     pub runs: Vec<Run>,
     /// Paragraph formatting the style doesn't explain.
     pub direct: Props,
@@ -219,6 +248,9 @@ fn measured(units: &[&Unit], kind: Kind) -> Props {
         italic: Some(units.iter().filter(|u| u.italic > 0.5).count() * 2 > units.len()),
         bold: Some(units.iter().filter(|u| u.bold > 0.5).count() * 2 > units.len()),
         fill: mode_of(units.iter().map(|u| hex(&u.fill))),
+        small_caps: Some(units.iter().filter(|u| u.small_caps > 0.5).count() * 2 > units.len()),
+        underline: Some(units.iter().filter(|u| u.underline > 0.5).count() * 2 > units.len()),
+        strike: Some(units.iter().filter(|u| u.strike > 0.5).count() * 2 > units.len()),
         // One-line units that aren't centred: set left (a heading isn't justified).
         align: align.or_else(|| (left.is_some() && !clean.is_empty()).then_some(Align::Left)),
         left,
@@ -296,14 +328,14 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
     {
         // Where each group's lines start, for one-line units, whose indent is only where they start.
         let mut lefts: HashMap<(Option<usize>, Option<String>), Vec<f64>> = HashMap::new();
-        for k in &kept {
+        for k in kept.iter().filter(|k| k.unit.list.is_none()) {
             if let Some(left) = k.unit.left_indent().filter(|_| !k.unit.continues) {
                 lefts.entry((k.target, k.unit.scope.clone())).or_default().push(left);
             }
         }
         let lefts: HashMap<_, f64> = lefts.into_iter().filter_map(|(g, l)| mode(l.into_iter(), 0.1).map(|m| (g, m))).collect();
         let mut indents: HashMap<(Option<usize>, Option<String>), Vec<(Option<Option<usize>>, f64)>> = HashMap::new();
-        for (i, k) in kept.iter().enumerate() {
+        for (i, k) in kept.iter().enumerate().filter(|(_, k)| k.unit.list.is_none()) {
             let left = lefts.get(&(k.target, k.unit.scope.clone())).copied();
             if let Some(indent) = indent_of(k.unit, left) {
                 let before = i.checked_sub(1).map(|j| kept[j].target);
@@ -331,15 +363,20 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
             keys.push(keys[i - 1].clone());
             continue;
         }
+        if k.unit.list.is_some() {
+            keys.push(Key { target: None, scope: k.unit.scope.clone(), first: false, list: true });
+            continue;
+        }
         let before = i.checked_sub(1).map(|j| kept[j].target);
         let first = flush_after.get(&(k.target, k.unit.scope.clone())).is_some_and(|f| f.contains(&before));
-        keys.push(Key { target: k.target, scope: k.unit.scope.clone(), first });
+        keys.push(Key { target: k.target, scope: k.unit.scope.clone(), first, list: false });
     }
 
     // The styles, Normal first, each after the style it's based on.
     let mut laid = Laid { styles: Vec::new(), paras: Vec::new(), notes: Vec::new(), plain: false };
     let name_of = |key: &Key| -> (String, Kind) {
         let (name, kind) = match key.target {
+            None if key.list => ("List Paragraph".to_string(), Kind::Custom),
             None if key.first => ("First Paragraph".to_string(), Kind::Custom),
             None => ("Normal".to_string(), Kind::Normal),
             Some(t) => match targets[t].role {
@@ -358,14 +395,14 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
         if let Some(i) = laid.styles.iter().position(|s| s.key == *key) {
             return i;
         }
-        let normal = Key { target: None, scope: None, first: false };
+        let normal = Key { target: None, scope: None, first: false, list: false };
         let heading = key.target.and_then(primary);
         let base = if key.scope.is_some() {
             Some(Key { scope: None, ..key.clone() })
         } else if key.first {
             Some(Key { first: false, ..key.clone() })
         } else if let Some(p) = heading {
-            Some(Key { target: Some(p), scope: None, first: false })
+            Some(Key { target: Some(p), scope: None, first: false, list: false })
         } else if *key != normal {
             Some(normal)
         } else {
@@ -381,7 +418,7 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
         laid.styles.push(Style { id, name, kind, based_on, next: None, props: Props::default(), key: key.clone() });
         laid.styles.len() - 1
     }
-    style_for(&mut laid, &Key { target: None, scope: None, first: false }, &name_of, &primary);
+    style_for(&mut laid, &Key { target: None, scope: None, first: false, list: false }, &name_of, &primary);
     let style_of: Vec<usize> = keys.iter().map(|k| style_for(&mut laid, k, &name_of, &primary)).collect();
 
     // What each style's units have in common (layer 1).
@@ -391,6 +428,10 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
             continue;
         }
         let mut props = measured(&mine, laid.styles[s].kind);
+        if laid.styles[s].key.list {
+            // Where a list item's lines start is its list's numbering's to say.
+            (props.left, props.first_line) = (None, None);
+        }
         let positions: Vec<usize> = (0..kept.len()).filter(|i| style_of[*i] == s && !kept[*i].unit.continues).collect();
         if !positions.is_empty() && start_pages(&kept, &positions) && laid.styles[s].kind != Kind::Normal {
             props.page_break = Some(true);
@@ -414,6 +455,9 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
         n.family.get_or_insert_with(|| "Times New Roman".into());
         n.italic.get_or_insert(false);
         n.bold.get_or_insert(false);
+        n.small_caps.get_or_insert(false);
+        n.underline.get_or_insert(false);
+        n.strike.get_or_insert(false);
         n.fill.get_or_insert_with(|| "000000".into());
         n.left = Some(n.left.unwrap_or(0.0));
         n.right = Some(n.right.unwrap_or(0.0));
@@ -496,10 +540,10 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
         }
         let differs = |m: Option<f64>, s: Option<f64>| m.is_some_and(|m| (m - s.unwrap_or(0.0)).abs() > SAME);
         let indent = indent_of(u, r.left.or(Some(0.0)));
-        if r.align != Some(Align::Centre) && differs(indent, r.first_line) {
+        if u.list.is_none() && r.align != Some(Align::Centre) && differs(indent, r.first_line) {
             direct.first_line = indent;
         }
-        if differs(u.left_indent(), r.left) {
+        if u.list.is_none() && differs(u.left_indent(), r.left) {
             direct.left = u.left_indent();
         }
         if let Some(b) = misfit.get(&i) {
@@ -508,7 +552,14 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
         if direct != Props::default() {
             direct_count[s] += 1;
         }
-        laid.paras.push(Para { style: s, runs: u.runs.clone(), direct });
+        let list = u.list.as_ref().map(|l| {
+            let starts = u.lines.first().map_or(l.marker_left, |line| line.left);
+            ListItem {
+                list: l.list, level: l.level, numbered: l.numbered, marker: l.marker.clone(),
+                left: starts - u.area.left, hanging: (starts - l.marker_left).max(0.0),
+            }
+        });
+        laid.paras.push(Para { style: s, list, page: u.page, runs: u.runs.clone(), direct });
     }
     for (s, count) in direct_count.into_iter().enumerate() {
         if count > 0 {
@@ -539,7 +590,7 @@ pub(crate) fn make_plain(laid: &mut Laid) {
         s.props = match s.kind {
             Kind::Normal => Props {
                 family: Some("Times New Roman".into()), size: Some(12.0), italic: Some(false), bold: Some(false),
-                fill: Some("000000".into()), align: Some(Align::Left), left: Some(0.0), right: Some(0.0),
+                fill: Some("000000".into()), small_caps: None, underline: None, strike: None, align: Some(Align::Left), left: Some(0.0), right: Some(0.0),
                 first_line: Some(36.0), line: Some(1.0), before: Some(0.0), after: Some(0.0),
                 page_break: None, keep_next: None,
             },
@@ -557,4 +608,27 @@ pub(crate) fn make_plain(laid: &mut Laid) {
         };
     }
     laid.plain = true;
+}
+
+/// For each page, the latest paragraph of each heading style that starts on or before it: the
+/// style's Word name and the paragraph's text, as a `STYLEREF` field would find it.
+pub(crate) fn titles(laid: &Laid, pages: usize) -> Vec<Vec<(String, String)>> {
+    let mut latest: Vec<(String, String)> = Vec::new();
+    let mut out = Vec::with_capacity(pages);
+    let mut paras = laid.paras.iter().peekable();
+    for page in 0..pages {
+        while let Some(p) = paras.next_if(|p| p.page <= page) {
+            let style = &laid.styles[p.style];
+            if !matches!(style.kind, Kind::Heading(_)) {
+                continue;
+            }
+            let text: String = p.runs.iter().map(|r| if r.text == "\n" { " " } else { r.text.as_str() }).collect();
+            match latest.iter_mut().find(|(name, _)| *name == style.name) {
+                Some(entry) => entry.1 = text,
+                None => latest.push((style.name.clone(), text)),
+            }
+        }
+        out.push(latest.clone());
+    }
+    out
 }

@@ -7,7 +7,10 @@ use std::ops::Range;
 
 use typst_docx::{Comment, Note, Reply, Role, Selector, Target, What};
 
+use serde::Serialize;
+
 use crate::preamble::{ElementForm, Header, HEADER_END};
+use crate::vault::Made;
 use crate::work::Mark;
 
 /// What a Story element's `.docx:` line may say. With no line, its text is paragraphs in a
@@ -16,11 +19,13 @@ pub const ROLES: &[&str] = &["chapter heading", "heading above chapters", "left 
 
 /// The kinds of text in a Work. Typst's headings come first, so a Chapter is Word's own
 /// Heading 1, or Heading 2 throughout when any Story element is a `heading above chapters`
-/// (a Part); then each Story element; then what an Inclusion of a whole Work starts with.
-pub fn targets(elements: &[ElementForm]) -> Vec<Target> {
+/// (a Part); then each Story element; then what an Inclusion of a whole Work starts with. Each
+/// target's origin is the library file its look can be changed in: a Story element's own, or
+/// else the Look's (`made`).
+pub fn targets(elements: &[ElementForm], made: &Made) -> Vec<Target> {
     let parts = elements.iter().any(|e| e.docx.as_deref() == Some("heading above chapters"));
     let chapter: u8 = if parts { 2 } else { 1 };
-    let look = || Some("the Look".to_string());
+    let look = || made.look.as_ref().and_then(|l| l.path.clone());
     let mut out: Vec<Target> = (1..=6u8).map(|level| Target {
         name: if level == 1 { "Chapter".into() } else { format!("Heading {level}") },
         selector: Selector::Heading(usize::from(level)),
@@ -35,7 +40,7 @@ pub fn targets(elements: &[ElementForm]) -> Vec<Target> {
             _ => Role::Paragraph,
         };
         let name = e.title.clone().unwrap_or_else(|| e.name.clone());
-        let origin = Some(format!("the Story element {name}"));
+        let origin = made.elements.iter().find(|f| f.name == e.name).and_then(|f| f.path.clone());
         out.push(Target { name, selector: Selector::Label(e.name.clone()), role, origin });
     }
     // `inclusions::wrap`'s title and author line.
@@ -85,23 +90,51 @@ pub fn comments(found: Vec<(Mark, Vec<Range<usize>>)>, shift: usize) -> Vec<Comm
     }).collect()
 }
 
-/// The report, a line per item.
-pub fn report(notes: &[Note]) -> Vec<String> {
-    notes.iter().map(|n| match &n.what {
+/// A line of the report, and the library file to open to do something about it, if there's one.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Line {
+    pub text: String,
+    pub open: Option<String>,
+}
+
+/// The report, a line per item: what the converter noted (`notes`), and Styles whose hand-written
+/// translations were partly left out for mistakes (not for prose only, which uses none).
+pub fn report(notes: &[Note], made: &Made, plain: bool) -> Vec<Line> {
+    let look = made.look.as_ref().and_then(|l| l.path.clone());
+    let mut lines: Vec<Line> = notes.iter().map(|n| match &n.what {
         What::FormattedDirectly { paragraphs } => {
             // Word's own heading styles are named "heading 1", shown as "Heading 1".
             let style = n.style.as_deref().unwrap_or("A style");
             let mut chars = style.chars();
             let style: String = chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default();
             let many = if *paragraphs == 1 { "1 paragraph doesn't".to_string() } else { format!("{paragraphs} paragraphs don't") };
-            let from = n.origin.as_deref().map(|o| format!(", as {o} sets them") ).unwrap_or_default();
-            format!("{style}: {many} look like the rest{from}, so they're formatted directly.")
+            Line { text: format!("{style}: {many} look like the rest, so they're formatted directly."), open: n.origin.clone().or(look.clone()) }
         }
+        What::FontNotEmbedded { family, why } => Line {
+            text: format!("{family} is only named, not embedded ({why}): whoever opens it needs that font installed."), open: None,
+        },
+        What::FurnitureSimplified => Line {
+            text: "The headers and footers change from page to page in a way Word can't repeat, so only the page number is kept.".into(),
+            open: look.clone(),
+        },
         What::CommentNotPlaced { text } => {
             let by = n.origin.as_deref().unwrap_or("someone");
-            format!("A Comment by {by} (“{text}”) isn't in it: the text it's on isn't either.")
+            Line { text: format!("A Comment by {by} (“{text}”) isn't in it: the text it's on isn't either."), open: None }
         }
-    }).collect()
+    }).collect();
+    if !plain {
+        for file in &made.translations {
+            let problems = typst_docx::translate::problems(&file.content);
+            if let Some(first) = problems.first() {
+                let more = match problems.len() {
+                    1 => String::new(),
+                    n => format!(", and {} more", n - 1),
+                };
+                lines.push(Line { text: format!("{}'s .docx translations were partly left out: {first}{more}.", file.name), open: file.path.clone() });
+            }
+        }
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -115,10 +148,10 @@ mod tests {
     #[test]
     fn chapters_go_a_level_down_under_parts() {
         let role = |targets: &[Target], name: &str| targets.iter().find(|t| t.name == name).map(|t| t.role);
-        let plain = targets(&[element("epigraph", None)]);
+        let plain = targets(&[element("epigraph", None)], &Made::default());
         assert_eq!(role(&plain, "Chapter"), Some(Role::Heading(1)));
         assert_eq!(role(&plain, "EPIGRAPH"), Some(Role::Paragraph));
-        let parted = targets(&[element("part", Some("heading above chapters")), element("note", Some("left out")), element("chapter", Some("chapter heading"))]);
+        let parted = targets(&[element("part", Some("heading above chapters")), element("note", Some("left out")), element("chapter", Some("chapter heading"))], &Made::default());
         assert_eq!(role(&parted, "PART"), Some(Role::Heading(1)));
         assert_eq!(role(&parted, "Chapter"), Some(Role::Heading(2)));
         assert_eq!(role(&parted, "Heading 2"), Some(Role::Heading(3)));
@@ -135,6 +168,33 @@ mod tests {
         let probed = with_probe(&header);
         assert!(probed.text.starts_with("#show: wrtier-look-1\n#context"));
         assert!(probed.text.ends_with(HEADER_END));
+    }
+
+    #[test]
+    fn report_lines_open_the_file_to_change() {
+        use crate::vault::File;
+        let file = |name: &str, path: &str, content: &str| File { name: name.into(), path: Some(path.into()), content: content.into() };
+        let made = Made {
+            translations: vec![file("Book text", "styles/Book text.typ", "/* .docx\nNormal <w:i/>\n*/")],
+            elements: vec![file("epigraph", "styles/elements/epigraph.typ", "")],
+            look: Some(file("Paperback", "styles/Paperback.look", "")),
+        };
+        let targets = targets(&[element("epigraph", None)], &made);
+        assert_eq!(targets.iter().find(|t| t.name == "EPIGRAPH").unwrap().origin.as_deref(), Some("styles/elements/epigraph.typ"));
+        let notes = [
+            Note { style: Some("heading 1".into()), origin: Some("styles/Paperback.look".into()), what: What::FormattedDirectly { paragraphs: 2 } },
+            Note { style: Some("Normal".into()), origin: None, what: What::FormattedDirectly { paragraphs: 1 } },
+            Note { style: None, origin: Some("Anna".into()), what: What::CommentNotPlaced { text: "Hm".into() } },
+        ];
+        let lines = report(&notes, &made, false);
+        assert_eq!(lines[0], Line { text: "Heading 1: 2 paragraphs don't look like the rest, so they're formatted directly.".into(), open: Some("styles/Paperback.look".into()) });
+        assert_eq!(lines[1].open.as_deref(), Some("styles/Paperback.look"), "prose is the Look's");
+        assert_eq!(lines[2].open, None);
+        assert_eq!(lines[3], Line {
+            text: "Book text's .docx translations were partly left out: line 2: should be a style's name, a colon, then its properties.".into(),
+            open: Some("styles/Book text.typ".into()),
+        });
+        assert_eq!(report(&[], &made, true), [], "prose only uses no translations");
     }
 
     #[test]

@@ -73,14 +73,46 @@ pub struct Export<'a> {
 }
 
 impl Export<'_> {
-    /// The Preamble's header for this Export, from the Work's recorded copies.
-    fn header(&self, doc: &Doc, shelf: &Shelf) -> preamble::Header {
+    /// The Preamble's header for this Export, from the Work's recorded copies, and what a
+    /// `.docx` needs to know of the files it's made of (see `Made`).
+    fn header(&self, doc: &Doc, shelf: &Shelf) -> (preamble::Header, Made) {
         let mut uses = preamble::uses(doc, shelf, Version::Recorded);
         if self.no_look {
             uses.looks.clear();
         }
-        preamble::header(doc, uses, self.look)
+        let chosen = self.look.and_then(|name| uses.looks.iter().position(|(l, _)| l.name == name)).unwrap_or(0);
+        let file = |used: &preamble::Used| File { name: used.name.clone(), path: shelf.path(used.kind, &used.name), content: used.content.clone() };
+        let (look, styles) = match uses.looks.get(chosen) {
+            Some((look, styles)) => (Some(file(look)), styles.as_slice()),
+            None => (None, &[][..]),
+        };
+        let made = Made {
+            translations: uses.elements.iter().chain(styles).chain(&uses.styles).map(file).collect(),
+            elements: uses.elements.iter().map(file).collect(),
+            look,
+        };
+        (preamble::header(doc, uses, self.look), made)
     }
+}
+
+/// A file of the Style library an Export is made of: its name, where it is in the library (if
+/// it's there; the Export may use the Work's own copy), and the content the Export used.
+#[derive(Clone, Debug, Default)]
+pub struct File {
+    pub name: String,
+    pub path: Option<String>,
+    pub content: String,
+}
+
+/// The files an Export is made of, for a `.docx` and its report.
+#[derive(Clone, Debug, Default)]
+pub struct Made {
+    /// What hand-written translations come from, in stacking order: the Story elements, the
+    /// Look's Styles from the top, the extra Styles.
+    pub translations: Vec<File>,
+    pub elements: Vec<File>,
+    /// The Look it's in, if any.
+    pub look: Option<File>,
 }
 
 /// What an Export needs (see `Vault::export_input`).
@@ -96,6 +128,8 @@ pub struct ExportInput {
     pub header: preamble::Header,
     /// Its title, author and language, for a `.docx`'s properties.
     pub preamble: Preamble,
+    /// The files it's made of (see `Export::header`).
+    pub made: Made,
     /// The time of the Work's newest Change: the PDF's date, the same on every Device.
     pub date_ms: u64,
     /// The Work's own ID: the PDF's document ID comes from it.
@@ -998,14 +1032,14 @@ impl Vault {
         let doc = self.at_milestone(id, milestone, now_ms)?;
         let named: ChangeId = milestone.parse().map_err(|_| format!("Not a Milestone: {milestone}"))?;
         let date_ms = self.milestone_time(id, named, now_ms)?;
-        let header = look.header(&doc, &Shelf::read(&self.root));
+        let (header, made) = look.header(&doc, &Shelf::read(&self.root));
         let shown = self.shown_in_doc(&doc);
         let missing: Vec<String> = shown.iter().filter_map(|s| s.missing.as_ref().map(|m| format!("{}: {m}", s.label))).collect();
         let committed = doc.committed_text();
         let (text, _) = inclusions::typst_body(&committed, &shown);
         let (db, _) = self.paths(id)?;
         let ident = storage::identity(&db).map_err(err)?.unwrap_or_else(|| id.to_string());
-        Ok(ExportInput { text, comments: Vec::new(), header, preamble: Preamble::of(&doc), date_ms, ident, missing })
+        Ok(ExportInput { text, comments: Vec::new(), header, preamble: Preamble::of(&doc), made, date_ms, ident, missing })
     }
 
     /// When a Milestone was named.
@@ -1027,7 +1061,7 @@ impl Vault {
         let shelf = Shelf::read(&self.root);
         let generation = self.library_generation;
         let typeset = |doc: &Doc| (doc.committed_text(), look.header(doc, &shelf), Preamble::of(doc));
-        let (db, (text, header, preamble), shown, own) = if self.works.contains_key(&self.current_id(id)) {
+        let (db, (text, (header, made), preamble), shown, own) = if self.works.contains_key(&self.current_id(id)) {
             // The versions of the included Works it shows now go in first (ADR 0015).
             self.with_work(id, now_ms, |w, _| {
                 if !w.has_cut() {
@@ -1066,7 +1100,7 @@ impl Vault {
         let (text, _) = inclusions::typst_body(&text, &shown);
         let date_ms = storage::read_all(&db).map_err(err)?.iter().map(|c| c.hlc.0).max().unwrap_or(0);
         let ident = storage::identity(&db).map_err(err)?.unwrap_or_else(|| id.to_string());
-        Ok(ExportInput { text, comments, header, preamble, date_ms, ident, missing })
+        Ok(ExportInput { text, comments, header, preamble, made, date_ms, ident, missing })
     }
 
     /// A Work's Comments that go into a `.docx`: open ones on its text, and Work comments,

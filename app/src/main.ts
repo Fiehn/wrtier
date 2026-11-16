@@ -921,18 +921,26 @@ async function exportDocx(id: string, milestone: { id: string; name: string } | 
   const comments = $<HTMLInputElement>("ask-docx-comments");
   comments.checked = deviceChoice("docx-comments") === "yes";
   $("ask-docx-comments-row").hidden = milestone !== null;
+  // Prose only is in Times New Roman, which there's no need to embed.
+  const fonts = $<HTMLInputElement>("ask-docx-fonts");
+  fonts.checked = deviceChoice("docx-embed-fonts") !== "no";
+  const showFonts = () => ($("ask-docx-fonts-row").hidden = select.value === PROSE_ONLY);
+  showFonts();
+  select.onchange = showFonts;
   const what = milestone ? `“${milestone.name}” of ` : "";
   $("ask-docx-heading").textContent = `Export ${what}${id.split("/").pop()} as .docx`;
   if ((await ask($<HTMLDialogElement>("ask-docx"))) !== "export") return;
   const plain = select.value === PROSE_ONLY;
   keepDeviceChoice("docx-prose-only", plain ? "yes" : "no");
   if (!milestone) keepDeviceChoice("docx-comments", comments.checked ? "yes" : "no");
-  type Exported = { path: string; report: string[] };
+  if (!plain) keepDeviceChoice("docx-embed-fonts", fonts.checked ? "yes" : "no");
+  type Exported = { path: string; report: { text: string; open: string | null }[] };
   const done = await invoke<Exported | null>("export_docx", {
     id,
     look: plain ? null : select.value,
     plain,
     comments: !milestone && comments.checked,
+    embedFonts: !plain && fonts.checked,
     milestone: milestone?.id ?? null,
   });
   if (!done) return; // cancelled
@@ -942,12 +950,28 @@ async function exportDocx(id: string, milestone: { id: string; name: string } | 
     return;
   }
   $("docx-report-path").textContent = `${exported} Worth knowing:`;
+  const dialog = $<HTMLDialogElement>("docx-report");
+  // Each line can open the Style library file where it can be changed, if there's one.
+  let opening: string | null = null;
   $("docx-report-list").replaceChildren(...done.report.map((line) => {
     const li = document.createElement("li");
-    li.textContent = line;
+    li.append(line.text);
+    if (line.open) {
+      const path = line.open;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "link";
+      button.textContent = `Open ${library.titleOf(path)}`;
+      button.addEventListener("click", () => {
+        opening = path;
+        dialog.close("open");
+      });
+      li.append(" ", button);
+    }
     return li;
   }));
-  await ask($<HTMLDialogElement>("docx-report"));
+  await ask(dialog);
+  if (opening) await openLibraryFile(opening);
 }
 
 $("preview-docx").addEventListener("click", () => act(async () => {

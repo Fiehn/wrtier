@@ -139,6 +139,11 @@ impl Shelf {
         self.files.get(&(kind as u8, name.to_string()))
     }
 
+    /// Where a file is in the Style library, if it's there.
+    pub fn path(&self, kind: Kind, name: &str) -> Option<String> {
+        self.get(kind, name).map(|(path, _)| path.clone())
+    }
+
     /// The Story elements in the library (built-in and the Author's), for "Add it?".
     pub fn element_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.files.keys().filter(|(k, _)| *k == Kind::StoryElement as u8).map(|(_, n)| n.clone()).collect();

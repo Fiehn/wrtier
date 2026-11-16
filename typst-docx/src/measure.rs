@@ -19,6 +19,7 @@ use typst::introspection::MetadataElem;
 use typst::introspection::{Location, Tag};
 use typst::layout::{Frame, FrameItem, FrameKind, Point};
 use typst::model::{HeadingElem, ParElem};
+use typst::pdf::{PdfMarkerTag, PdfMarkerTagKind};
 use typst::syntax::Source;
 use typst::text::{FontStyle, TextItem};
 use typst::visualize::Paint;
@@ -81,9 +82,24 @@ pub struct Run {
     pub italic: bool,
     pub bold: bool,
     pub fill: String,
+    pub small_caps: bool,
+    pub underline: bool,
+    pub strike: bool,
     /// Where each of its characters came from in the main source file (byte offset), if it
     /// came from there; all `None` when not asked for (see `measure_in`).
     pub at: Vec<Option<usize>>,
+}
+
+/// Where a unit is in a list: which list (the outermost one, as the walk met them), how deep,
+/// whether numbered, and its item's marker as shown ("•", "2.") and where that starts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListPlace {
+    pub list: usize,
+    pub level: usize,
+    pub numbered: bool,
+    pub marker: String,
+    /// Where the marker starts, in points from the page's left.
+    pub marker_left: f64,
 }
 
 /// A font's vertical measures at the size a unit is set in, in points: what Word works out a
@@ -131,9 +147,13 @@ pub struct Unit {
     pub family: String,
     /// The most used size, in points.
     pub size: f64,
-    /// Share of characters set in italic, and in bold (weight ≥ 600).
+    /// Share of characters set in italic, in bold (weight ≥ 600), in small caps, underlined
+    /// and struck through.
     pub italic: f64,
     pub bold: f64,
+    pub small_caps: f64,
+    pub underline: f64,
+    pub strike: f64,
     /// The most used text colour.
     pub fill: String,
     /// Whether it's the first unit on its page.
@@ -149,6 +169,8 @@ pub struct Unit {
     pub ends_hyphenated: bool,
     /// The most used font's measures, at the unit's size.
     pub metrics: Metrics,
+    /// The first text of a list item's body: where it is in the list.
+    pub list: Option<ListPlace>,
 }
 
 /// How close two edges must be to count as the same, in points.
@@ -242,7 +264,12 @@ struct Piece {
     italic: bool,
     bold: bool,
     fill: String,
+    small_caps: bool,
+    underline: bool,
+    strike: bool,
     text: String,
+    /// The first text of a list item's body, and where its list is.
+    list: Option<ListPlace>,
     /// Where each character came from in the main source (see `Run::at`).
     sources: Vec<Option<usize>>,
 }
@@ -269,6 +296,11 @@ struct Walk<'a> {
     blocks: Vec<(usize, f64, f64)>,
     /// The main source file, when each character's place in it is wanted.
     main: Option<&'a Source>,
+    small_caps: crate::fonts::SmallCaps,
+    /// A list item's marker, read and waiting for its body's first text: its text and left edge.
+    marker: Option<(String, f64)>,
+    /// The outermost lists met so far, to number them.
+    lists: Vec<Location>,
 }
 
 impl Walk<'_> {
@@ -331,10 +363,32 @@ impl Walk<'_> {
     }
 
     fn text(&mut self, at_point: Point, item: &TextItem) {
-        // The innermost paragraph or heading is the unit; failing that, a labelled target.
+        // A list item's marker isn't text: Word numbers the list itself.
+        let tag = self.open.iter().rev().find_map(|(_, c)| c.to_packed::<PdfMarkerTag>()).map(|t| t.kind.clone());
+        if matches!(tag, Some(PdfMarkerTagKind::ListItemLabel)) {
+            match &mut self.marker {
+                Some((text, _)) => text.push_str(&item.text),
+                None => self.marker = Some((item.text.to_string(), at_point.x.to_pt())),
+            }
+            return;
+        }
+        // The innermost paragraph, heading or list item's body is the unit; failing that, a
+        // labelled target.
+        let body = |c: &Content| c.to_packed::<PdfMarkerTag>().is_some_and(|t| matches!(t.kind, PdfMarkerTagKind::ListItemBody));
         let unit = self.open.iter().rev()
-            .find(|(_, c)| c.is::<ParElem>() || c.is::<HeadingElem>() || self.target_of(c).is_some())
+            .find(|(_, c)| c.is::<ParElem>() || c.is::<HeadingElem>() || body(c) || self.target_of(c).is_some())
             .map(|(loc, _)| UnitKey::Element(*loc));
+        let lists: Vec<&(Location, Content)> = self.open.iter().filter(|(_, c)| matches!(c.elem().name(), "list" | "enum")).collect();
+        let list = match (self.marker.take(), lists.first(), lists.last()) {
+            (Some((marker, marker_left)), Some((outer, _)), Some((_, inner))) => {
+                let list = self.lists.iter().position(|l| l == outer).unwrap_or_else(|| {
+                    self.lists.push(*outer);
+                    self.lists.len() - 1
+                });
+                Some(ListPlace { list, level: lists.len() - 1, numbered: inner.elem().name() == "enum", marker: marker.trim().to_string(), marker_left })
+            }
+            _ => None,
+        };
         let unit = unit.unwrap_or_else(|| {
             let same = self.pieces.last().is_some_and(|p| matches!(p.unit, UnitKey::Loose(n) if n == self.loose));
             if !same {
@@ -362,12 +416,15 @@ impl Walk<'_> {
         }
         let cap = item.font.metrics().cap_height.at(item.size).to_pt();
         let place = self.main.map_or_else(Vec::new, |main| sources(item, main));
+        let inside = |name: &str| self.open.iter().any(|(_, c)| c.elem().name() == name);
+        let (underline, strike) = (inside("underline"), inside("strike"));
+        let small_caps = self.small_caps.of(item);
         self.pieces.push(Piece {
             unit, target, scope: self.scopes.last().cloned(), page: self.page, at: at_point, width: visible,
             cap, metrics: word_metrics(&item.font, item.size.to_pt(), cap),
             family: info.family.clone(), size: item.size.to_pt(),
             italic: info.variant.style != FontStyle::Normal, bold: info.variant.weight.to_number() >= 600,
-            fill, text: item.text.to_string(), sources: place,
+            fill, small_caps, underline, strike, text: item.text.to_string(), list, sources: place,
         });
     }
 }
@@ -398,7 +455,7 @@ fn sources(item: &TextItem, main: &Source) -> Vec<Option<usize>> {
 
 /// Word's measures for a font: the `OS/2` Windows ascent and descent, which is what Word on
 /// Windows makes a single line of, falling back to the `hhea` ones.
-fn word_metrics(font: &typst::text::FontInstance, size: f64, cap: f64) -> Metrics {
+pub(crate) fn word_metrics(font: &typst::text::FontInstance, size: f64, cap: f64) -> Metrics {
     let ttf = font.ttf();
     let per_em = f64::from(ttf.units_per_em().max(1));
     let (ascent, descent) = match ttf.tables().os2 {
@@ -412,6 +469,7 @@ fn walk<'a>(document: &PagedDocument, options: &'a Options, main: Option<&'a Sou
     let mut walk = Walk {
         targets: &options.targets, scope_labels: options.scope.as_ref(), scopes: Vec::new(),
         open: Vec::new(), pieces: Vec::new(), page: 0, loose: 0, blocks: Vec::new(), main,
+        small_caps: crate::fonts::SmallCaps::default(), marker: None, lists: Vec::new(),
     };
     for (n, page) in document.pages().iter().enumerate() {
         walk.page = n;
@@ -447,6 +505,14 @@ pub(crate) fn wraps_after(text: &str) -> bool {
     text.chars().last().is_some_and(|c| c.is_whitespace() || "-\u{2010}\u{2013}\u{2014}/".contains(c))
 }
 
+/// A run set as a piece is (its text and places left to fill in).
+fn run_of(p: &Piece) -> Run {
+    Run {
+        text: String::new(), family: p.family.clone(), size: p.size, italic: p.italic, bold: p.bold, fill: p.fill.clone(),
+        small_caps: p.small_caps, underline: p.underline, strike: p.strike, at: Vec::new(),
+    }
+}
+
 /// A piece's characters' places, one per character (`None` where not known).
 fn places(p: &Piece) -> Vec<Option<usize>> {
     let n = p.text.chars().count();
@@ -474,17 +540,17 @@ fn runs_of(pieces: &[Piece]) -> (Vec<Run>, bool) {
                 continue;
             }
             if !wrapped {
-                runs.push(Run { text: "\n".into(), family: p.family.clone(), size: p.size, italic: p.italic, bold: p.bold, fill: p.fill.clone(), at: vec![None] });
+                runs.push(Run { text: "\n".into(), at: vec![None], ..run_of(p) });
             }
         }
         hyphenated = false;
         baseline = Some(y);
         match runs.last_mut() {
-            Some(r) if r.text != "\n" && r.family == p.family && r.size == p.size && r.italic == p.italic && r.bold == p.bold && r.fill == p.fill => {
+            Some(r) if r.text != "\n" && Run { text: r.text.clone(), at: r.at.clone(), ..run_of(p) } == *r => {
                 r.text.push_str(&p.text);
                 r.at.extend(places(p));
             }
-            _ => runs.push(Run { text: p.text.clone(), family: p.family.clone(), size: p.size, italic: p.italic, bold: p.bold, fill: p.fill.clone(), at: places(p) }),
+            _ => runs.push(Run { text: p.text.clone(), at: places(p), ..run_of(p) }),
         }
     }
     (runs, hyphenated)
@@ -576,6 +642,7 @@ fn group(pieces: Vec<Piece>) -> Vec<Unit> {
         let main = most(&|p| format!("{}|{:.2}", p.family, p.size));
         let metrics = pieces.iter().find(|p| format!("{}|{:.2}", p.family, p.size) == main).map_or(Metrics::default(), |p| p.metrics);
         units.push(Unit {
+            list: pieces.iter().find_map(|p| p.list.clone()),
             runs,
             ends_hyphenated,
             metrics,
@@ -589,6 +656,9 @@ fn group(pieces: Vec<Piece>) -> Vec<Unit> {
             size: most(&|p| format!("{:.2}", p.size)).parse().unwrap_or(0.0),
             italic: pieces.iter().filter(|p| p.italic).map(chars).sum::<f64>() / total,
             bold: pieces.iter().filter(|p| p.bold).map(chars).sum::<f64>() / total,
+            small_caps: pieces.iter().filter(|p| p.small_caps).map(chars).sum::<f64>() / total,
+            underline: pieces.iter().filter(|p| p.underline).map(chars).sum::<f64>() / total,
+            strike: pieces.iter().filter(|p| p.strike).map(chars).sum::<f64>() / total,
             fill: most(&|p| p.fill.clone()),
             first_on_page,
             gap_before,

@@ -11,9 +11,13 @@ publish = false  # until it's stable; check the name doesn't pass for one of Typ
 typst.workspace = true
 typst-layout.workspace = true
 zip = { version = "9.5", default-features = false, features = ["deflate-flate2"] }  # the .docx package
+# Converting CFF faces to TrueType for embedding (the versions Typst's PDF export already uses).
+skrifa = "0.42"
+write-fonts = { version = "0.48", features = ["read"] }
+kurbo = "0.13"
+roxmltree = "0.21"  # reading hand-written translations (the same as the app's)
 
 [dev-dependencies]
 typst-kit = { workspace = true, features = ["embedded-fonts"] }  # Typst's bundled fonts, for tests
 zip = { version = "9.5", default-features = false, features = ["deflate-flate2"] }  # the font spike's sample .docx, reading packages back
 typst-pdf.workspace = true  # the samples' Typst PDFs, to compare with Word's
-roxmltree = "0.20"  # checking the parts are well-formed

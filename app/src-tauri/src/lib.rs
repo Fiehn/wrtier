@@ -375,17 +375,18 @@ async fn export_pdf(handle: AppHandle, id: String, look: Option<String>, milesto
 #[serde(rename_all = "camelCase")]
 struct ExportedDocx {
     path: String,
-    /// What the Author may want to know (see `docx::report`), and Inclusions that couldn't be
-    /// shown: a line each.
-    report: Vec<String>,
+    /// What the Author may want to know, and Inclusions that couldn't be shown: a line each,
+    /// with the library file to open to fix it, if there's one (see `docx::report`).
+    report: Vec<docx::Line>,
 }
 
 /// Exports a Work as a `.docx` in `look` (by name; None, its first), or with `plain`, in no
 /// Look, keeping only its prose and structure (ADR 0016). With `comments`, its open Comments
 /// (and those on the text it includes) go in as Word comments; never from a Milestone. Changed
-/// Styles are recorded first, as for a PDF. None if the Author cancelled the save dialog.
+/// Styles are recorded first, as for a PDF. With `embed_fonts`, the fonts its text is set in
+/// go in too, as far as their licences allow. None if the Author cancelled the save dialog.
 #[tauri::command]
-async fn export_docx(handle: AppHandle, id: String, look: Option<String>, plain: bool, comments: bool, milestone: Option<String>) -> Result<Option<ExportedDocx>, String> {
+async fn export_docx(handle: AppHandle, id: String, look: Option<String>, plain: bool, comments: bool, embed_fonts: bool, milestone: Option<String>) -> Result<Option<ExportedDocx>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (input, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
             let vault = open_vault_of(app)?;
@@ -400,13 +401,17 @@ async fn export_docx(handle: AppHandle, id: String, look: Option<String>, plain:
         let title = if input.preamble.title.trim().is_empty() { name.clone() } else { input.preamble.title.clone() };
         let header = docx::with_probe(&input.header);
         let options = typst_docx::Options {
-            targets: docx::targets(&input.header.elements),
+            targets: docx::targets(&input.header.elements, &input.made),
             scope: Some((vault::SCOPE_START.into(), vault::SCOPE_END.into())),
             metadata: typst_docx::Metadata {
                 title, author: input.preamble.author.clone(), date: docx::w3c(input.date_ms), seed: docx::seed(&input.ident),
             },
             plain,
             comments: docx::comments(input.comments, header.text.len()),
+            embed_fonts,
+            translations: input.made.translations.iter()
+                .map(|file| typst_docx::translate::Translation { origin: file.path.clone(), source: file.content.clone() })
+                .collect(),
         };
         let made = {
             let state = handle.state::<TypesetState>();
@@ -424,8 +429,8 @@ async fn export_docx(handle: AppHandle, id: String, look: Option<String>, plain:
             return Ok(None);
         };
         std::fs::write(&path, &made.bytes).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
-        let mut report = docx::report(&made.report);
-        report.extend(input.missing.iter().map(|m| format!("An Inclusion couldn't be shown: {m}")));
+        let mut report = docx::report(&made.report, &input.made, plain);
+        report.extend(input.missing.iter().map(|m| docx::Line { text: format!("An Inclusion couldn't be shown: {m}"), open: None }));
         Ok(Some(ExportedDocx { path: path.display().to_string(), report }))
     })
     .await

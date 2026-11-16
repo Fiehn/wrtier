@@ -8,20 +8,8 @@
 use std::io::Write;
 use typst::text::{FontStyle, FontWeight};
 use typst_kit::fonts::FontStore;
-
-/// The key a font is stored with: Word XORs the first 32 bytes of the font file with the 16
-/// bytes of the `w:fontKey` GUID, read from its last hex pair to its first (ECMA-376 Part 1,
-/// 17.8.1; as LibreOffice and python-docx do it).
-fn obfuscate(font: &[u8], guid: &str) -> Vec<u8> {
-    let hex: String = guid.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    let mut key: Vec<u8> = (0..16).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap()).collect();
-    key.reverse();
-    let mut out = font.to_vec();
-    for i in 0..32 {
-        out[i] ^= key[i % 16];
-    }
-    out
-}
+// Word XORs the first 32 bytes of the font file with the `w:fontKey` GUID (ECMA-376 Part 1, 17.8.1).
+use typst_docx::fonts::obfuscate;
 
 /// One face of Typst's bundled fonts, as the bytes of its file.
 fn face(store: &FontStore, family: &str, style: FontStyle, weight: FontWeight) -> Vec<u8> {

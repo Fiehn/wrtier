@@ -12,8 +12,11 @@
 
 pub mod measure;
 pub mod probe;
+pub mod fonts;
+mod furniture;
 mod ooxml;
 mod styles;
+pub mod translate;
 
 pub use measure::Selector;
 use typst::syntax::Source;
@@ -94,6 +97,12 @@ pub struct Options {
     /// formatting is italic and bold where the text differs from what's around it.
     pub plain: bool,
     pub comments: Vec<Comment>,
+    /// Embed the fonts the text is set in, as far as their licences allow (not when `plain`),
+    /// so it looks right where they aren't installed; else they're only named.
+    pub embed_fonts: bool,
+    /// Sources with hand-written translations (`translate`), in stacking order: a later one
+    /// wins. Not used when `plain`.
+    pub translations: Vec<translate::Translation>,
 }
 
 /// Something the report says.
@@ -101,6 +110,12 @@ pub struct Options {
 pub enum What {
     /// This many paragraphs didn't fit their style and were formatted directly.
     FormattedDirectly { paragraphs: usize },
+    /// The headers and footers differ from page to page in a way Word can't repeat, so only the
+    /// page number was kept, where it's most often shown.
+    FurnitureSimplified,
+    /// A font the text is set in that's only named, not embedded: the reader needs it
+    /// installed. `why`: its licence doesn't allow it, or its outlines couldn't be converted.
+    FontNotEmbedded { family: String, why: String },
     /// A comment none of whose text is in the `.docx` (it's in something left out, say); `text`
     /// is the start of the comment's own text, to recognise it by.
     CommentNotPlaced { text: String },
@@ -135,7 +150,27 @@ pub fn convert(document: &PagedDocument, main: &Source, options: &Options) -> Re
     if options.plain {
         styles::make_plain(&mut laid);
     }
-    let (parts, unplaced) = ooxml::parts(&laid, &setup, &options.metadata, &options.comments);
+    let furniture = if options.plain {
+        furniture::plain(furniture::Look { family: "Times New Roman".into(), size: 12.0, italic: false, bold: false, fill: "000000".into(), small_caps: false })
+    } else {
+        let pages = document.pages().len();
+        let areas: Vec<measure::Area> = (0..pages).map(|p| setup.area(p)).collect();
+        furniture::read(document, &areas, &ooxml::section_starts(&laid, pages), &styles::titles(&laid, pages))
+    };
+    let (families, not_embedded) = if options.embed_fonts && !options.plain {
+        fonts::collect(document, options.metadata.seed)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    for (family, why) in not_embedded {
+        let why = match why {
+            fonts::NotEmbedded::Licence => "its licence doesn't allow embedding it".to_string(),
+            fonts::NotEmbedded::Unconvertible(why) => format!("it couldn't be made TrueType: {why}"),
+        };
+        laid.notes.push(Note { style: None, origin: None, what: What::FontNotEmbedded { family, why } });
+    }
+    let hands = if options.plain { Vec::new() } else { translate::merged(&options.translations) };
+    let (parts, unplaced) = ooxml::parts(&laid, &setup, &options.metadata, &options.comments, &furniture, &families, &hands);
     laid.notes.extend(unplaced);
     let bytes = ooxml::zip(&parts)?;
     Ok(Docx { bytes, report: laid.notes })
