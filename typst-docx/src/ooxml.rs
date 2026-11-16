@@ -150,9 +150,9 @@ fn wrap(name: &str, inner: String) -> String {
     if inner.is_empty() { inner } else { format!("<w:{name}>{inner}</w:{name}>") }
 }
 
-/// A target's hand-written properties of one kind (see `translate`).
-fn hand<'a>(hand: &'a [(String, Vec<Property>)], target: &str, kind: TKind) -> Vec<&'a Property> {
-    hand.iter().filter(|(t, _)| t.eq_ignore_ascii_case(target)).flat_map(|(_, ps)| ps.iter().filter(|p| p.kind == kind)).collect()
+/// The hand-written properties of one kind (see `translate`) for the targets `named` accepts.
+fn hand<'a>(hand: &'a [(String, Vec<Property>)], named: impl Fn(&str) -> bool, kind: TKind) -> Vec<&'a Property> {
+    hand.iter().filter(|(t, _)| named(t)).flat_map(|(_, ps)| ps.iter().filter(|p| p.kind == kind)).collect()
 }
 
 /// A run's formatting beyond its paragraph's style; only italic and bold when `plain`.
@@ -523,8 +523,8 @@ fn furniture_styles(furniture: &Furniture, setup: &Setup, plain: bool, hands: &[
         ];
         let run = look.map(|l| rpr_items(&look_props(&l), None)).unwrap_or_default();
         let _ = write!(x, "<w:style w:type=\"paragraph\" w:styleId=\"{id}\"><w:name w:val=\"{name}\"/><w:basedOn w:val=\"Normal\"/>{}{}</w:style>",
-            wrap("pPr", translate::overlay(paragraph, &hand(hands, name, TKind::Paragraph), translate::PARAGRAPH)),
-            wrap("rPr", translate::overlay(run, &hand(hands, name, TKind::Run), translate::RUN)));
+            wrap("pPr", translate::overlay(paragraph, &hand(hands, |t| t.eq_ignore_ascii_case(name), TKind::Paragraph), translate::PARAGRAPH)),
+            wrap("rPr", translate::overlay(run, &hand(hands, |t| t.eq_ignore_ascii_case(name), TKind::Run), translate::RUN)));
     }
     x
 }
@@ -602,7 +602,7 @@ fn styles_xml(laid: &Laid, setup: &Setup, furniture: &Furniture, hands: &[(Strin
         let mut forced: Vec<String> = Vec::new();
         let mut base = s.based_on;
         while let Some(b) = base {
-            forced.extend(hands.iter().filter(|(t, _)| t.eq_ignore_ascii_case(&laid.styles[b].name)).flat_map(|(_, ps)| ps.iter().map(|p| p.name.clone())));
+            forced.extend(hands.iter().filter(|(t, _)| laid.answers_to(b, t)).flat_map(|(_, ps)| ps.iter().map(|p| p.name.clone())));
             base = laid.styles[b].based_on;
         }
         let default = if s.kind == Kind::Normal { " w:default=\"1\"" } else { "" };
@@ -633,8 +633,8 @@ fn styles_xml(laid: &Laid, setup: &Setup, furniture: &Furniture, hands: &[(Strin
         };
         let paragraph = with_forced(ppr_items(&own, None, outline), ppr_items(&resolved, None, outline));
         let run = with_forced(rpr_items(&own, None), rpr_items(&resolved, None));
-        x.push_str(&wrap("pPr", translate::overlay(paragraph, &hand(hands, &s.name, TKind::Paragraph), translate::PARAGRAPH)));
-        x.push_str(&wrap("rPr", translate::overlay(run, &hand(hands, &s.name, TKind::Run), translate::RUN)));
+        x.push_str(&wrap("pPr", translate::overlay(paragraph, &hand(hands, |t| laid.answers_to(i, t), TKind::Paragraph), translate::PARAGRAPH)));
+        x.push_str(&wrap("rPr", translate::overlay(run, &hand(hands, |t| laid.answers_to(i, t), TKind::Run), translate::RUN)));
         x.push_str("</w:style>");
     }
     x.push_str(&furniture_styles(furniture, setup, laid.plain, hands));
@@ -854,7 +854,7 @@ pub(crate) fn parts(laid: &Laid, setup: &Setup, meta: &Metadata, comments: &[Com
             furniture_parts.push((part, id, kind));
         }
     }
-    let page = hand(hands, "Page", TKind::Section);
+    let page = hand(hands, |t| t.eq_ignore_ascii_case("Page"), TKind::Section);
     let sections = Sections { page, refs, title_page, furniture };
 
     let embedded = families.iter().any(|f| !f.faces.is_empty());

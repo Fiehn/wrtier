@@ -17,3 +17,14 @@
   align(center, text(size: 12pt, weight: "regular", it.body))
   v(2em)
 }
+
+// In a .docx: exactly double-spaced, as Word means it, and US Letter, which Word also tells the
+// printer. No widows or orphans; Chapter titles are never split or hyphenated; the header is
+// right-aligned for anything typed into it.
+/* .docx
+Page: <w:pgSz w:w="12240" w:h="15840" w:code="1"/>
+Normal: <w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="auto"/> <w:widowControl/>
+First Paragraph: <w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="auto"/>
+Chapter: <w:keepLines/> <w:suppressAutoHyphens/>
+Header: <w:jc w:val="right"/>
+*/

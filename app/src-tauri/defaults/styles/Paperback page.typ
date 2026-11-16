@@ -2,3 +2,8 @@
 // A trade paperback page (5.5 × 8.5 in), with a wider margin on the inside for the binding.
 
 #set page(width: 5.5in, height: 8.5in, margin: (inside: 0.9in, outside: 0.65in, top: 0.75in, bottom: 0.85in))
+
+// In a .docx: the same page, which Word tells the printer is Statement paper (5.5 × 8.5 in).
+/* .docx
+Page: <w:pgSz w:w="7920" w:h="12240" w:code="6"/>
+*/

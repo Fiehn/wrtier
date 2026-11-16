@@ -418,6 +418,12 @@ pub fn trash(root: &Path, trash: &Path, path: &str) -> Result<(), String> {
     if let Some(name) = element.filter(|name| built_in_elements().any(|(n, _)| n == *name)) {
         return Err(format!("#{name} is built in: every Work has it, so it can't be removed. It can be changed, though."));
     }
+    to_trash(trash, &file, path)
+}
+
+/// Moves `file` (at `path` in the Vault) into the trash folder, under the same folders, with a
+/// number added if the trash already has one by that name.
+fn to_trash(trash: &Path, file: &Path, path: &str) -> Result<(), String> {
     let relative = Path::new(path);
     let stem = relative.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
     let ext = relative.extension().and_then(|s| s.to_str()).unwrap_or("typ");
@@ -429,7 +435,7 @@ pub fn trash(root: &Path, trash: &Path, path: &str) -> Result<(), String> {
         n += 1;
     }
     std::fs::create_dir_all(&dir).map_err(err)?;
-    std::fs::rename(&file, &target).map_err(err)
+    std::fs::rename(file, &target).map_err(err)
 }
 
 /// Which version to keep when a library file has a Conflict copy.
@@ -470,6 +476,30 @@ pub fn write_defaults(root: &Path, had: impl Fn(&str) -> bool) -> Result<Vec<&'s
         written.push(path);
     }
     Ok(written)
+}
+
+/// Puts every default back as this app version ships it, when the Author asks: one that's
+/// missing is written again, and one that differs is first moved to the trash folder, so
+/// nothing is lost. The Author's own files are left alone. Returns the paths (as in `styles/`)
+/// it wrote; a default that's already the same isn't among them.
+pub fn restore_defaults(root: &Path, trash: &Path) -> Result<Vec<&'static str>, String> {
+    let mut restored = Vec::new();
+    for &(path, text) in DEFAULTS {
+        let file = root.join(FOLDER).join(path);
+        match std::fs::read_to_string(&file) {
+            // Line endings may differ (a checkout or an editor on Windows) without anything else.
+            Ok(now) if now.replace("\r\n", "\n") == text.replace("\r\n", "\n") => continue,
+            Ok(_) => to_trash(trash, &file, &format!("{FOLDER}/{path}"))?,
+            Err(_) if file.exists() => return Err(format!("{FOLDER}/{path} can't be read, so it's left as it is.")),
+            Err(_) => {}
+        }
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir).map_err(err)?;
+        }
+        std::fs::write(&file, text).map_err(err)?;
+        restored.push(path);
+    }
+    Ok(restored)
 }
 
 #[cfg(test)]
@@ -539,6 +569,31 @@ mod tests {
         std::fs::remove_file(dir.path().join("styles/A4 page.typ")).unwrap();
         assert!(write_defaults(dir.path(), |p| written.contains(&p)).unwrap().is_empty());
         assert!(!dir.path().join("styles/A4 page.typ").exists());
+    }
+
+    #[test]
+    fn restoring_puts_the_defaults_back_and_the_changed_ones_in_the_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let trash = dir.path().join(".trash");
+        write_defaults(dir.path(), |_| false).unwrap();
+        let styles = dir.path().join(FOLDER);
+        std::fs::write(styles.join("Book text.typ"), "// Style: Book text\n// Mine.\n").unwrap();
+        std::fs::remove_file(styles.join("elements/epigraph.typ")).unwrap();
+        std::fs::write(styles.join("Mine.typ"), "// Style: Mine\n").unwrap();
+        // Only line endings differ: the same.
+        let crlf = DEFAULTS.iter().find(|(p, _)| *p == "A4 page.typ").unwrap().1.replace('\n', "\r\n");
+        std::fs::write(styles.join("A4 page.typ"), &crlf).unwrap();
+
+        let restored = restore_defaults(dir.path(), &trash).unwrap();
+        assert_eq!(restored, ["Book text.typ", "elements/epigraph.typ"]);
+        for (path, text) in DEFAULTS.iter().filter(|(p, _)| *p != "A4 page.typ") {
+            assert_eq!(&std::fs::read_to_string(styles.join(path)).unwrap(), text, "{path}");
+        }
+        assert_eq!(std::fs::read_to_string(trash.join("styles/Book text.typ")).unwrap(), "// Style: Book text\n// Mine.\n");
+        assert!(!trash.join("styles/elements/epigraph.typ").exists(), "nothing to keep of a missing one");
+        assert_eq!(std::fs::read_to_string(styles.join("Mine.typ")).unwrap(), "// Style: Mine\n", "the Author's own stay");
+        assert_eq!(std::fs::read_to_string(styles.join("A4 page.typ")).unwrap(), crlf, "left as it was");
+        assert!(restore_defaults(dir.path(), &trash).unwrap().is_empty(), "nothing more to do");
     }
 
     #[test]

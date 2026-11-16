@@ -379,15 +379,16 @@ fn the_same_input_gives_the_same_file() {
     assert_eq!(convert_text(&text, &options()).unwrap().bytes, convert_text(&text, &options()).unwrap().bytes);
 }
 
-/// Writes `Paperback.docx` and `Manuscript.docx` to the folder in SPIKE_DOCX_DIR, with Typst's
-/// own PDF of each to compare with Word's, and prints the report.
+/// Writes `Paperback.docx`, `Manuscript.docx` and `A4 draft.docx`, with the library's own
+/// translations, to the folder in SPIKE_DOCX_DIR, with Typst's own PDF of each to compare with
+/// Word's, and prints the report.
 #[test]
 #[ignore]
 fn write_samples() {
     let dir = std::path::PathBuf::from(std::env::var("SPIKE_DOCX_DIR").expect("set SPIKE_DOCX_DIR"));
-    for (name, styles) in [("Paperback", &PAPERBACK[..]), ("Manuscript", &MANUSCRIPT[..])] {
+    for (name, styles) in [("Paperback", &PAPERBACK[..]), ("Manuscript", &MANUSCRIPT[..]), ("A4 draft", &common::A4_DRAFT[..])] {
         let (document, main) = compile_source(&source(styles, &book(true), true));
-        let docx = typst_docx::convert(&document, &main, &Options { embed_fonts: true, ..options() }).unwrap();
+        let docx = typst_docx::convert(&document, &main, &Options { embed_fonts: true, translations: shipped(styles), ..options() }).unwrap();
         println!("{name}: {:#?}", docx.report);
         let pdf = typst_pdf::pdf(&document, &typst_pdf::PdfOptions::default()).map_err(|e| format!("{e:?}")).unwrap();
         std::fs::write(dir.join(format!("{name}-typst.pdf")), pdf).unwrap();
@@ -516,6 +517,85 @@ fn hand_written_translations_go_over_what_was_measured() {
     let sections = document.matches("<w:sectPr").count();
     assert!(sections > 3);
     assert_eq!(document.matches("<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\"").count(), sections, "every section's page");
+}
+
+/// A style's `<w:style>` element in styles.xml, found by its name in Word.
+fn style_named(styles: &str, name: &str) -> String {
+    let at = styles.find(&format!("<w:name w:val=\"{name}\"/>")).unwrap_or_else(|| panic!("no {name}"));
+    let start = styles[..at].rfind("<w:style ").unwrap();
+    styles[start..start + styles[start..].find("</w:style>").unwrap()].to_string()
+}
+
+/// The library's own files as translations, in the order the app gives them: the Story
+/// elements, then the Look's Styles from the top.
+fn shipped(look: &[&str]) -> Vec<typst_docx::translate::Translation> {
+    common::ELEMENTS.iter().chain(look).map(|s| typst_docx::translate::Translation { origin: None, source: s.to_string() }).collect()
+}
+
+#[test]
+fn the_shipped_translations_have_no_mistakes() {
+    for (name, source) in common::STYLES {
+        assert_eq!(typst_docx::translate::problems(source), Vec::<String>::new(), "{name}");
+    }
+    for source in common::ELEMENTS {
+        assert_eq!(typst_docx::translate::problems(source), Vec::<String>::new(), "{}", source.lines().next().unwrap());
+    }
+}
+
+#[test]
+fn the_shipped_translations_land_on_their_styles() {
+    // Manuscript: double-spaced prose, the Chapter (Word's heading 2 under the Part) by its own name.
+    let manuscript_options = Options { translations: shipped(&MANUSCRIPT), ..options() };
+    let manuscript = parts(&convert_text(&source(&MANUSCRIPT, &book(true), true), &manuscript_options).unwrap().bytes);
+    let styles = &manuscript["word/styles.xml"];
+    let normal = style_named(styles, "Normal");
+    assert!(normal.contains("<w:widowControl/>") && normal.contains("w:line=\"480\""), "{normal}");
+    assert!(style_named(styles, "First Paragraph").contains("w:line=\"480\""));
+    let chapter = style_named(styles, "heading 2");
+    assert!(chapter.contains("<w:keepLines/>") && chapter.contains("<w:suppressAutoHyphens/>"), "{chapter}");
+    assert!(style_named(styles, "heading 1").contains("<w:suppressAutoHyphens/>"), "the Part's own");
+    assert!(!style_named(styles, "heading 3").contains("<w:keepLines/>"), "not a level-2 heading");
+    let epigraph = style_named(styles, "Epigraph");
+    assert!(epigraph.contains("<w:keepNext/>") && epigraph.contains("<w:keepLines/>"), "{epigraph}");
+    assert!(!epigraph.contains("w:line=\"480\""), "its own measured line spacing: {epigraph}");
+    assert!(style_named(styles, "Scene break").contains("<w:keepNext/>"));
+    assert!(style_named(styles, "Dedication").contains("<w:keepLines/>"));
+    assert!(style_named(styles, "Inclusion title").contains("<w:suppressAutoHyphens/>"));
+    assert!(style_named(styles, "header").contains("<w:jc w:val=\"right\"/>"));
+    let document = &manuscript["word/document.xml"];
+    assert_eq!(document.matches("<w:pgSz w:w=\"12240\" w:h=\"15840\" w:code=\"1\"/>").count(), document.matches("<w:sectPr").count());
+
+    // Paperback and A4 draft: their paper, kerning and widow control, a centred footer.
+    for (look, page, paper) in [(&PAPERBACK[..], "w:w=\"7920\" w:h=\"12240\"", "6"), (&common::A4_DRAFT[..], "w:w=\"11906\" w:h=\"16838\"", "9")] {
+        let options = Options { translations: shipped(look), ..options() };
+        let converted = parts(&convert_text(&source(look, &book(true), true), &options).unwrap().bytes);
+        let document = &converted["word/document.xml"];
+        let size = format!("<w:pgSz {page} w:code=\"{paper}\"/>");
+        assert_eq!(document.matches(&size).count(), document.matches("<w:sectPr").count(), "{size}");
+        // The page written by hand is the one the probe reads.
+        let measured = parts(&convert_text(&source(look, &book(true), true), &self::options()).unwrap().bytes);
+        assert!(measured["word/document.xml"].contains(&format!("<w:pgSz {page}/>")), "{page}");
+        let styles = &converted["word/styles.xml"];
+        let normal = style_named(styles, "Normal");
+        assert!(normal.contains("<w:widowControl/>") && normal.contains("<w:kern w:val=\"2\"/>"), "{normal}");
+        assert!(style_named(styles, "footer").contains("<w:jc w:val=\"center\"/>"));
+        assert!(style_named(styles, "heading 2").contains("<w:keepLines/>"), "Chapter openings' Chapter");
+    }
+}
+
+#[test]
+fn a_translation_names_a_style_by_its_target_unless_word_has_that_name() {
+    use typst_docx::translate::Translation;
+    let hand = |source: &str| Options { translations: vec![Translation { origin: None, source: source.into() }], ..options() };
+    let styles = |options: &Options| parts(&convert_text(&source(&PAPERBACK, &book(true), true), options).unwrap().bytes)["word/styles.xml"].clone();
+    // "Chapter" is Word's heading 2 here, under the Part.
+    let by_target = styles(&hand("/* .docx\nChapter: <w:keepLines/>\n*/"));
+    assert!(style_named(&by_target, "heading 2").contains("<w:keepLines/>"));
+    assert!(!style_named(&by_target, "heading 1").contains("<w:keepLines/>"));
+    // "Heading 2" is Word's name for the Chapter, so it isn't the level-2 heading's (Word's heading 3).
+    let by_word = styles(&hand("/* .docx\nHeading 2: <w:keepLines/>\n*/"));
+    assert!(style_named(&by_word, "heading 2").contains("<w:keepLines/>"));
+    assert!(!style_named(&by_word, "heading 3").contains("<w:keepLines/>"));
 }
 
 #[test]

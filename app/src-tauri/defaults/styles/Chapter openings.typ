@@ -7,3 +7,8 @@
   align(center, text(size: 1.5em, weight: "regular", it.body))
   v(3em)
 }
+
+// In a .docx: a Chapter title is never split across pages or hyphenated.
+/* .docx
+Chapter: <w:keepLines/> <w:suppressAutoHyphens/>
+*/

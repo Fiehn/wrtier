@@ -49,6 +49,26 @@ pub fn targets(elements: &[ElementForm], made: &Made) -> Vec<Target> {
     out
 }
 
+/// What a `.docx` Export of `input` compiles (its header, with the probe) and converts with:
+/// its targets, the Inclusions' scope markers, metadata (titled `name` when the Work has no
+/// title), Comments, and the files' hand-written translations in stacking order.
+pub fn prepare(input: &crate::vault::ExportInput, name: &str, plain: bool, embed_fonts: bool) -> (Header, typst_docx::Options) {
+    let title = if input.preamble.title.trim().is_empty() { name.to_string() } else { input.preamble.title.clone() };
+    let header = with_probe(&input.header);
+    let options = typst_docx::Options {
+        targets: targets(&input.header.elements, &input.made),
+        scope: Some((crate::vault::SCOPE_START.into(), crate::vault::SCOPE_END.into())),
+        metadata: typst_docx::Metadata { title, author: input.preamble.author.clone(), date: w3c(input.date_ms), seed: seed(&input.ident) },
+        plain,
+        comments: comments(input.comments.clone(), header.text.len()),
+        embed_fonts,
+        translations: input.made.translations.iter()
+            .map(|file| typst_docx::translate::Translation { origin: file.path.clone(), source: file.content.clone() })
+            .collect(),
+    };
+    (header, options)
+}
+
 /// The header with `typst-docx`'s probe at its end, after the Look and the extra Styles, so it
 /// reads the settings the Work's text is set in.
 pub fn with_probe(header: &Header) -> Header {

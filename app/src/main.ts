@@ -1050,6 +1050,20 @@ $("new-element").addEventListener("click", () => act(async () => {
   });
 }));
 
+$("restore-defaults").addEventListener("click", () => act(async () => {
+  const yes = await confirmAsk(
+    "Put the Styles, Looks and Story elements the app comes with back as this version of the app has them? " +
+    "Any you've changed go to the Vault's .trash folder first, and any you've removed come back. Your own are left alone. " +
+    "Works pick up the new versions as they do any change in the Style library.",
+    "Restore");
+  if (!yes) return;
+  await tabs.idle(); // anything typed in a library file's tab is saved first, then trashed with it
+  const restored = await invoke<string[]>("restore_library_defaults");
+  showInfo(restored.length === 0
+    ? "The defaults were already as this version of the app has them."
+    : `Restored ${restored.length === 1 ? "1 default" : `${restored.length} defaults`}: ${restored.map((p) => p.replace(/^elements\//, "").replace(/\.(typ|look)$/, "")).join(", ")}.`);
+}));
+
 async function openWork(id: string, cursor?: number, restoring = false) {
   if (!restoring) phone.show("write");
   const path = libraryPath(id);

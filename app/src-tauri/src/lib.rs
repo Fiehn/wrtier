@@ -398,21 +398,7 @@ async fn export_docx(handle: AppHandle, id: String, look: Option<String>, plain:
             Ok((input, vault.root.join("fonts")))
         })?;
         let name = id.rsplit('/').next().unwrap_or(&id).to_string();
-        let title = if input.preamble.title.trim().is_empty() { name.clone() } else { input.preamble.title.clone() };
-        let header = docx::with_probe(&input.header);
-        let options = typst_docx::Options {
-            targets: docx::targets(&input.header.elements, &input.made),
-            scope: Some((vault::SCOPE_START.into(), vault::SCOPE_END.into())),
-            metadata: typst_docx::Metadata {
-                title, author: input.preamble.author.clone(), date: docx::w3c(input.date_ms), seed: docx::seed(&input.ident),
-            },
-            plain,
-            comments: docx::comments(input.comments, header.text.len()),
-            embed_fonts,
-            translations: input.made.translations.iter()
-                .map(|file| typst_docx::translate::Translation { origin: file.path.clone(), source: file.content.clone() })
-                .collect(),
-        };
+        let (header, options) = docx::prepare(&input, &name, plain, embed_fonts);
         let made = {
             let state = handle.state::<TypesetState>();
             let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -657,6 +643,16 @@ fn trash_library(state: State<AppState>, path: String) -> Result<(), String> {
     with_app(&state, |app| {
         let root = &open_vault_of(app)?.root;
         library::trash(root, &root.join(vault::TRASH), &path)
+    })
+}
+
+/// Puts the library's defaults back as this app version ships them; changed ones go to the
+/// Vault's trash folder first. Returns the paths (inside `styles/`) it wrote.
+#[tauri::command]
+fn restore_library_defaults(state: State<AppState>) -> Result<Vec<&'static str>, String> {
+    with_app(&state, |app| {
+        let root = &open_vault_of(app)?.root;
+        library::restore_defaults(root, &root.join(vault::TRASH))
     })
 }
 
@@ -1272,6 +1268,7 @@ pub fn run() {
             write_library,
             create_library,
             resolve_library,
+            restore_library_defaults,
             retitle_library,
             trash_library,
             forget_preview,

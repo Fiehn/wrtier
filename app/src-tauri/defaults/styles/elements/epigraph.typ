@@ -4,3 +4,8 @@
 // A quotation set before a Chapter or Part.
 
 #let epigraph(body) = [#block(width: 100%, inset: (left: 35%), above: 2em, below: 2.5em, text(size: 0.9em, style: "italic", body)) <epigraph>]
+
+// In a .docx: never split across pages, and kept with what follows it.
+/* .docx
+Epigraph: <w:keepNext/> <w:keepLines/>
+*/

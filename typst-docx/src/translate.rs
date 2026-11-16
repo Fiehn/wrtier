@@ -12,8 +12,10 @@
 //! */
 //! ```
 //!
-//! Each line names a target by its Word style name (or `Page`, for every section's page) and
-//! gives raw paragraph, run or section properties for it; a line starting with spaces carries
+//! Each line names a target by its Word style name (or `Page`, for every section's page), or by
+//! the target's own name where Word's differs ("Chapter" for Word's "heading 1", or "heading 2"
+//! under a heading above it) as long as no style has that name in Word, and gives raw
+//! paragraph, run or section properties for it; a line starting with spaces carries
 //! on the one before. Properties may come in any order: they're put in Word's. Several sources
 //! are given in stacking order, and a later one wins, one property element at a time.
 

@@ -130,6 +130,9 @@ pub(crate) struct Style {
     pub id: String,
     /// As Word shows it ("heading 1" is how Word names its built-in Heading 1).
     pub name: String,
+    /// The name it has after its target, where Word's differs ("Chapter" for "heading 2"), so a
+    /// hand-written translation can name it whatever heading level it lands on.
+    pub alias: Option<String>,
     pub kind: Kind,
     pub based_on: Option<usize>,
     /// The style Word gives the paragraph typed after one in this style.
@@ -137,6 +140,18 @@ pub(crate) struct Style {
     /// Everything this style sets, including what it shares with its base (see `own`).
     pub props: Props,
     pub key: Key,
+}
+
+impl Laid {
+    /// Whether a hand-written translation's target names style `s`, ignoring case: by its name
+    /// in Word, or by its target's when no style has that name in Word (so under a Part,
+    /// "Heading 2" is the Chapter, Word's heading 2, not the level-2 heading named so).
+    pub fn answers_to(&self, s: usize, target: &str) -> bool {
+        let style = &self.styles[s];
+        style.name.eq_ignore_ascii_case(target)
+            || (style.alias.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(target))
+                && !self.styles.iter().any(|o| o.name.eq_ignore_ascii_case(target)))
+    }
 }
 
 /// A list item's place in its list, and where its marker and text start.
@@ -374,24 +389,26 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
 
     // The styles, Normal first, each after the style it's based on.
     let mut laid = Laid { styles: Vec::new(), paras: Vec::new(), notes: Vec::new(), plain: false };
-    let name_of = |key: &Key| -> (String, Kind) {
-        let (name, kind) = match key.target {
-            None if key.list => ("List Paragraph".to_string(), Kind::Custom),
-            None if key.first => ("First Paragraph".to_string(), Kind::Custom),
-            None => ("Normal".to_string(), Kind::Normal),
+    // A style's name in Word, its kind, and its name after its target where that differs.
+    let name_of = |key: &Key| -> (String, Kind, Option<String>) {
+        let (name, kind, alias) = match key.target {
+            None if key.list => ("List Paragraph".to_string(), Kind::Custom, None),
+            None if key.first => ("First Paragraph".to_string(), Kind::Custom, None),
+            None => ("Normal".to_string(), Kind::Normal, None),
             Some(t) => match targets[t].role {
-                Role::Heading(n) if primary(t).is_none() => (format!("heading {n}"), Kind::Heading(n)),
-                Role::Heading(n) => (targets[t].name.clone(), Kind::Heading(n)),
-                _ if key.first => (format!("{}, first", targets[t].name), Kind::Custom),
-                _ => (targets[t].name.clone(), Kind::Custom),
+                Role::Heading(n) if primary(t).is_none() => (format!("heading {n}"), Kind::Heading(n), Some(targets[t].name.clone())),
+                Role::Heading(n) => (targets[t].name.clone(), Kind::Heading(n), None),
+                _ if key.first => (format!("{}, first", targets[t].name), Kind::Custom, None),
+                _ => (targets[t].name.clone(), Kind::Custom, None),
             },
         };
+        let alias = alias.filter(|a| !a.eq_ignore_ascii_case(&name));
         match &key.scope {
-            Some(scope) => (format!("{name} ({scope})"), if kind == Kind::Normal { Kind::Custom } else { kind }),
-            None => (name, kind),
+            Some(scope) => (format!("{name} ({scope})"), if kind == Kind::Normal { Kind::Custom } else { kind }, alias.map(|a| format!("{a} ({scope})"))),
+            None => (name, kind, alias),
         }
     };
-    fn style_for(laid: &mut Laid, key: &Key, name_of: &dyn Fn(&Key) -> (String, Kind), primary: &dyn Fn(usize) -> Option<usize>) -> usize {
+    fn style_for(laid: &mut Laid, key: &Key, name_of: &dyn Fn(&Key) -> (String, Kind, Option<String>), primary: &dyn Fn(usize) -> Option<usize>) -> usize {
         if let Some(i) = laid.styles.iter().position(|s| s.key == *key) {
             return i;
         }
@@ -409,13 +426,13 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
             None
         };
         let based_on = base.map(|b| style_for(laid, &b, name_of, primary));
-        let (name, kind) = name_of(key);
+        let (name, kind, alias) = name_of(key);
         let id = match kind {
             Kind::Normal => "Normal".to_string(),
             Kind::Heading(n) if key.scope.is_none() && heading.is_none() => format!("Heading{n}"),
             _ => id_for(&name, &laid.styles),
         };
-        laid.styles.push(Style { id, name, kind, based_on, next: None, props: Props::default(), key: key.clone() });
+        laid.styles.push(Style { id, name, alias, kind, based_on, next: None, props: Props::default(), key: key.clone() });
         laid.styles.len() - 1
     }
     style_for(&mut laid, &Key { target: None, scope: None, first: false, list: false }, &name_of, &primary);

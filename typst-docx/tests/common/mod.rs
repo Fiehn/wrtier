@@ -75,6 +75,18 @@ pub const PAPERBACK: [&str; 5] = [
 #[allow(dead_code)]
 pub const MANUSCRIPT: [&str; 2] = [library!("Manuscript.typ"), library!("Inclusion titles.typ")];
 
+#[allow(dead_code)]
+pub const A4_DRAFT: [&str; 4] = [library!("A4 page.typ"), library!("Book text.typ"), library!("Chapter openings.typ"), library!("Page numbers.typ")];
+
+/// Every Style the library ships, by name.
+#[allow(dead_code)]
+pub const STYLES: [(&str, &str); 7] = [
+    ("A4 page", library!("A4 page.typ")), ("Book text", library!("Book text.typ")),
+    ("Chapter openings", library!("Chapter openings.typ")), ("Inclusion titles", library!("Inclusion titles.typ")),
+    ("Manuscript", library!("Manuscript.typ")), ("Page numbers", library!("Page numbers.typ")),
+    ("Paperback page", library!("Paperback page.typ")),
+];
+
 /// The book: everything the default Story elements and Styles do, plus an Inclusion with a
 /// Style of its own, written out as the app writes one, bracketed by scope markers when
 /// `markers`.

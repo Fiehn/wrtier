@@ -1582,6 +1582,84 @@ mod tests {
         assert!(refused.contains("line 3") && refused.contains("Nothing was exported"), "{refused}");
     }
 
+    /// The font and size Word gives each paragraph whose text starts with one of `starts`:
+    /// its style's, following what it's based on, unless a run says otherwise.
+    fn fonts_of(docx: &[u8], starts: &[&str]) -> Vec<(String, Option<String>, Option<String>)> {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(docx)).unwrap();
+        let mut read = |name: &str| {
+            let mut xml = String::new();
+            std::io::Read::read_to_string(&mut zip.by_name(name).unwrap(), &mut xml).unwrap();
+            xml
+        };
+        let (document, styles) = (read("word/document.xml"), read("word/styles.xml"));
+        let (document, styles) = (roxmltree::Document::parse(&document).unwrap(), roxmltree::Document::parse(&styles).unwrap());
+        let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        let font = |props: roxmltree::Node| props.children().find(|n| n.has_tag_name("rFonts")).and_then(|n| n.attribute((w, "ascii"))).map(String::from);
+        let size = |props: roxmltree::Node| props.children().find(|n| n.has_tag_name("sz")).and_then(|n| n.attribute((w, "val"))).map(String::from);
+        let style = |id: &str| styles.descendants().find(|n| n.has_tag_name("style") && n.attribute((w, "styleId")) == Some(id));
+        // Up the chain of styles, the first that says.
+        let inherited = |id: &str, get: &dyn Fn(roxmltree::Node) -> Option<String>| {
+            let mut at = style(id);
+            while let Some(s) = at {
+                if let Some(v) = s.children().find(|n| n.has_tag_name("rPr")).and_then(get) {
+                    return Some(v);
+                }
+                at = s.children().find(|n| n.has_tag_name("basedOn")).and_then(|b| b.attribute((w, "val"))).and_then(style);
+            }
+            None
+        };
+        document.descendants().filter(|n| n.has_tag_name("p")).filter_map(|p| {
+            let text: String = p.descendants().filter(|n| n.has_tag_name("t")).filter_map(|n| n.text()).collect();
+            if !starts.iter().any(|s| text.starts_with(s)) {
+                return None;
+            }
+            let id = p.descendants().find(|n| n.has_tag_name("pStyle")).and_then(|n| n.attribute((w, "val"))).unwrap_or("Normal").to_string();
+            for run in p.children().filter(|n| n.has_tag_name("r")).filter_map(|r| r.children().find(|n| n.has_tag_name("rPr"))) {
+                assert!(font(run).is_none() && size(run).is_none(), "{text}: formatted directly");
+            }
+            Some((id.clone(), inherited(&id, &font), inherited(&id, &size)))
+        }).collect()
+    }
+
+    /// The whole Style system at once: a Style that's only a `.typ` file in the library, added
+    /// to a Work as an extra Style, restyles every one of a Story element's uses, in each Look's
+    /// PDF (as Typst lays it out) and in its `.docx` (in the Story element's own Word style).
+    #[test]
+    fn an_extra_style_restyles_a_story_element_in_every_look_and_the_docx() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open(dir.path());
+        std::fs::write(dir.path().join("styles/Typed letters.typ"), include_str!("../../../examples/styles/Typed letters.typ")).unwrap();
+        vault.create_work("Rain", 1000).unwrap();
+        let text = "= Letters\n\nShe opened the first.\n\n#block-text[Dear Anna,\n\nCome home. The garden misses you.\n\nYours, \\\nM.]\n\n\
+            Then the second, shorter.\n\n#block-text[Anna, the dog misses you too. M.]\n\nShe went home.";
+        vault.edit("Rain", vec![typing(0, text)], 2000).unwrap();
+        let letters = ["Dear Anna", "Come home.", "Yours,", "Anna, the dog"];
+        let prose = ["She opened", "Then the second", "She went"];
+        for (styles, typed) in [(vec![], false), (vec!["Typed letters".to_string()], true)] {
+            let preamble = Preamble { looks: vec!["Paperback".into(), "Manuscript".into()], styles, title: "Rain".into(), language: "en".into(), ..Preamble::default() };
+            vault.set_preamble("Rain", &preamble, 3000).unwrap();
+            for look in ["Paperback", "Manuscript"] {
+                let input = vault.export_input("Rain", Export { look: Some(look), ..Export::default() }, 4000).unwrap();
+                let pdf = crate::typeset::Typesetter::new(false)
+                    .export_pdf(Path::new("no-fonts"), &input.header, input.text.clone(), input.date_ms, &input.ident).unwrap();
+                let (header, options) = crate::docx::prepare(&input, "Rain", false, false);
+                let docx = crate::typeset::Typesetter::new(false).export_docx(Path::new("no-fonts"), &header, input.text.clone(), &options).unwrap();
+                let found = fonts_of(&docx.bytes, &letters);
+                assert_eq!(found.len(), letters.len(), "{look}: every paragraph of both letters: {found:?}");
+                for (style, font, size) in &found {
+                    assert!(style.starts_with("BlockText"), "{look}: in Block text's own style, not {style}");
+                    assert_eq!(font.as_deref() == Some("DejaVu Sans Mono"), typed, "{look}: {style} in {font:?}");
+                    assert_eq!(size.as_deref() == Some("18"), typed, "{look}: {style} at {size:?} half-points");
+                }
+                for (style, font, _) in fonts_of(&docx.bytes, &prose) {
+                    assert_eq!(font.as_deref(), Some("Libertinus Serif"), "{look}: the prose ({style}) is as it was");
+                }
+                // The PDF has the monospaced font in it only with the Style (nothing else uses it).
+                assert_eq!(pdf.bytes.windows(14).any(|w| w == b"DejaVuSansMono"), typed, "{look}: the PDF's fonts");
+            }
+        }
+    }
+
     #[test]
     fn a_conflict_copy_in_the_library_is_a_sync_problem() {
         let dir = tempfile::tempdir().unwrap();

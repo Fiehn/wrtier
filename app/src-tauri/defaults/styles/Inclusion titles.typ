@@ -12,3 +12,9 @@
   align(center, text(style: "italic", it.value))
   v(2em)
 }
+
+// In a .docx: the title is never split or hyphenated, and the author line stays with what follows.
+/* .docx
+Inclusion title: <w:keepLines/> <w:suppressAutoHyphens/>
+Inclusion author: <w:keepNext/> <w:keepLines/>
+*/

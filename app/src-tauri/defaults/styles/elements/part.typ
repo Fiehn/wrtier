@@ -10,3 +10,8 @@
   [#block(width: 100%, align(center, text(size: 1.6em, title))) <part>]
   pagebreak(weak: true)
 }
+
+// In a .docx: its title is never split across pages or hyphenated.
+/* .docx
+Part: <w:keepLines/> <w:suppressAutoHyphens/>
+*/
