@@ -1316,6 +1316,25 @@ mod tests {
     }
 
     #[test]
+    fn a_docx_report_says_which_lines_hold_what_it_cant_carry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        // An equation in the included Work; one and a drawn line after the Inclusion.
+        v.open_work("Rain", 12_000).unwrap();
+        let end = RAIN.find("stopped.").unwrap() + "stopped.".len();
+        v.edit("Rain", vec![typing(end, " Then $x$.")], 12_100).unwrap();
+        v.open_work("Collected", 12_200).unwrap();
+        v.edit("Collected", vec![typing(19, "\n\nAfter it, $y$.\n\n#line(length: 1cm)")], 12_300).unwrap();
+        v.tick(20_000);
+        let input = v.export_input("Collected", Export::default(), 21_000).unwrap();
+        let (header, options) = crate::docx::prepare(&input, "Collected", false, false);
+        let made = crate::typeset::Typesetter::new(false).export_docx(Path::new("none"), &header, input.text.clone(), &input.inclusions, &options).unwrap();
+        let report: Vec<String> = crate::docx::report(&made.docx.report, &made.lines, &input.made, false).into_iter().map(|l| l.text).collect();
+        assert!(report.contains(&"Equations on lines 3 (in included text) and 5 are kept as plain text, without their layout.".to_string()), "{report:?}");
+        assert!(report.contains(&"A drawn line or shape on line 7 is left out.".to_string()), "lines after the Inclusion count as the Work's own: {report:?}");
+    }
+
+    #[test]
     fn a_docx_carries_the_comments_on_its_own_and_its_included_text() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = collected(dir.path());
@@ -1351,7 +1370,7 @@ mod tests {
             comments: crate::docx::comments(input.comments.clone(), header.text.len()),
             ..typst_docx::Options::default()
         };
-        let made = crate::typeset::Typesetter::new(false).export_docx(Path::new("none"), &header, input.text, &options).unwrap();
+        let made = crate::typeset::Typesetter::new(false).export_docx(Path::new("none"), &header, input.text, &input.inclusions, &options).unwrap().docx;
         assert!(!made.report.iter().any(|n| matches!(n.what, typst_docx::What::CommentNotPlaced { .. })), "{:?}", made.report);
         let mut placed = commented(&made.bytes);
         placed.sort();

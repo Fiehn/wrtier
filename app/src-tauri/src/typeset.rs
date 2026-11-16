@@ -159,6 +159,20 @@ impl typst_ide::IdeWorld for WorkWorld {
     }
 }
 
+/// A `.docx` Export's file and report, and where in the Work's text each of the report's notes
+/// is, when it says and that's in the text (not in the Preamble).
+pub struct Converted {
+    pub docx: typst_docx::Docx,
+    pub lines: Vec<Option<TextLine>>,
+}
+
+/// A line of a Work's text (from 1); in included text, the Inclusion's line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TextLine {
+    pub line: usize,
+    pub included: bool,
+}
+
 /// One open Work's preview: its World, and the last pages that compiled.
 struct Preview {
     world: WorkWorld,
@@ -596,10 +610,13 @@ impl Typesetter {
     }
 
     /// A `.docx` of a Work's text after its Preamble (which must hold `typst_docx`'s probe),
-    /// refused if it doesn't compile, as the PDF Export is.
-    pub fn export_docx(&mut self, fonts_dir: &Path, header: &Header, text: String, options: &typst_docx::Options) -> Result<typst_docx::Docx, String> {
+    /// refused if it doesn't compile, as the PDF Export is. `inclusions`: where the text's
+    /// Inclusions were written out (see `Block::all`), so the report can say which line of the
+    /// Work's text something is on.
+    pub fn export_docx(&mut self, fonts_dir: &Path, header: &Header, text: String, inclusions: &[(usize, usize)], options: &typst_docx::Options) -> Result<Converted, String> {
         const KEY: &str = "\u{0}export"; // apart from every Work's preview
-        let compiled = self.compile_with(KEY, fonts_dir, header, text);
+        let blocks = Block::all(&text, inclusions);
+        let compiled = self.compile_body(KEY, fonts_dir, header, text, blocks);
         let result = (|| {
             if let Some(error) = compiled.errors.first() {
                 let line = error.line.map(|l| format!("line {l}: ")).unwrap_or_default();
@@ -607,7 +624,15 @@ impl Typesetter {
             }
             let preview = self.previews.get(KEY).ok_or("Nothing to export.")?;
             let document = preview.last_good.as_ref().ok_or("Nothing to export.")?;
-            typst_docx::convert(document, &preview.world.main, options).map_err(|e| format!("The .docx couldn't be made: {e}"))
+            let docx = typst_docx::convert(document, &preview.world.main, options).map_err(|e| format!("The .docx couldn't be made: {e}"))?;
+            let lines = docx.report.iter().map(|note| match note.what {
+                typst_docx::What::NotCarried { at: Some(at), .. } => {
+                    let (_, inside) = preview.locate_text(at)?;
+                    preview.line_of(at).map(|line| TextLine { line, included: inside.is_some() })
+                }
+                _ => None,
+            }).collect();
+            Ok(Converted { docx, lines })
         })();
         self.previews.remove(KEY);
         result

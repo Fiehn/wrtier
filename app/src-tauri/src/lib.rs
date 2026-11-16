@@ -402,7 +402,7 @@ async fn export_docx(handle: AppHandle, id: String, look: Option<String>, plain:
         let made = {
             let state = handle.state::<TypesetState>();
             let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            typesetter.export_docx(&fonts_dir, &header, input.text, &options)?
+            typesetter.export_docx(&fonts_dir, &header, input.text, &input.inclusions, &options)?
         };
         let file_name = match (&look, plain) {
             (_, true) => format!("{name} (prose only).docx"),
@@ -414,8 +414,8 @@ async fn export_docx(handle: AppHandle, id: String, look: Option<String>, plain:
         else {
             return Ok(None);
         };
-        std::fs::write(&path, &made.bytes).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
-        let mut report = docx::report(&made.report, &input.made, plain);
+        std::fs::write(&path, &made.docx.bytes).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+        let mut report = docx::report(&made.docx.report, &made.lines, &input.made, plain);
         report.extend(input.missing.iter().map(|m| docx::Line { text: format!("An Inclusion couldn't be shown: {m}"), open: None }));
         Ok(Some(ExportedDocx { path: path.display().to_string(), report }))
     })

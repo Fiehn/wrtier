@@ -10,6 +10,9 @@
 //!   predecessor, not per paragraph;
 //! - a scoped variant ("Normal (Zampanò)"), for units between the caller's scope markers.
 //!
+//! Footnotes' text is Word's "footnote text", measured from the notes at the foot of the pages,
+//! apart from the body: a note's spacing and indents say nothing about the body's.
+//!
 //! What's left over (a paragraph that doesn't fit its style) becomes direct formatting on just
 //! that paragraph, and is counted for the report.
 
@@ -32,6 +35,8 @@ pub(crate) struct Key {
     pub first: bool,
     /// A list item ("List Paragraph"; its indents are its list's numbering's).
     pub list: bool,
+    /// A footnote's text ("footnote text").
+    pub note: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,6 +179,8 @@ pub(crate) struct Para {
     pub list: Option<ListItem>,
     /// The page it starts on.
     pub page: usize,
+    /// It's in footnote n's text, not the body (see `measure::Unit::note`).
+    pub note: Option<usize>,
     pub runs: Vec<Run>,
     /// Paragraph formatting the style doesn't explain.
     pub direct: Props,
@@ -238,6 +245,8 @@ struct Kept<'a> {
     /// Its index in the measured units, to tell whether two kept units were neighbours.
     index: usize,
     target: Option<usize>,
+    /// It's a footnote's text.
+    note: bool,
 }
 
 /// Line spacing of a unit as a multiple of its font's single line, if it has two lines.
@@ -334,7 +343,7 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
     };
     let kept: Vec<Kept> = units.iter().enumerate()
         .filter(|(_, u)| u.target.is_none_or(|t| targets[t].role != Role::LeftOut))
-        .map(|(index, unit)| Kept { unit, index, target: unit.target })
+        .map(|(index, unit)| Kept { unit, index, target: unit.target, note: unit.note.is_some() })
         .collect();
 
     // The flush variant: per target and scope, an indented style's units that are flush after
@@ -343,14 +352,14 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
     {
         // Where each group's lines start, for one-line units, whose indent is only where they start.
         let mut lefts: HashMap<(Option<usize>, Option<String>), Vec<f64>> = HashMap::new();
-        for k in kept.iter().filter(|k| k.unit.list.is_none()) {
+        for k in kept.iter().filter(|k| k.unit.list.is_none() && !k.note) {
             if let Some(left) = k.unit.left_indent().filter(|_| !k.unit.continues) {
                 lefts.entry((k.target, k.unit.scope.clone())).or_default().push(left);
             }
         }
         let lefts: HashMap<_, f64> = lefts.into_iter().filter_map(|(g, l)| mode(l.into_iter(), 0.1).map(|m| (g, m))).collect();
         let mut indents: HashMap<(Option<usize>, Option<String>), Vec<(Option<Option<usize>>, f64)>> = HashMap::new();
-        for (i, k) in kept.iter().enumerate().filter(|(_, k)| k.unit.list.is_none()) {
+        for (i, k) in kept.iter().enumerate().filter(|(_, k)| k.unit.list.is_none() && !k.note) {
             let left = lefts.get(&(k.target, k.unit.scope.clone())).copied();
             if let Some(indent) = indent_of(k.unit, left) {
                 let before = i.checked_sub(1).map(|j| kept[j].target);
@@ -378,13 +387,17 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
             keys.push(keys[i - 1].clone());
             continue;
         }
+        if k.note {
+            keys.push(Key { target: None, scope: None, first: false, list: false, note: true });
+            continue;
+        }
         if k.unit.list.is_some() {
-            keys.push(Key { target: None, scope: k.unit.scope.clone(), first: false, list: true });
+            keys.push(Key { target: None, scope: k.unit.scope.clone(), first: false, list: true, note: false });
             continue;
         }
         let before = i.checked_sub(1).map(|j| kept[j].target);
         let first = flush_after.get(&(k.target, k.unit.scope.clone())).is_some_and(|f| f.contains(&before));
-        keys.push(Key { target: k.target, scope: k.unit.scope.clone(), first, list: false });
+        keys.push(Key { target: k.target, scope: k.unit.scope.clone(), first, list: false, note: false });
     }
 
     // The styles, Normal first, each after the style it's based on.
@@ -392,6 +405,7 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
     // A style's name in Word, its kind, and its name after its target where that differs.
     let name_of = |key: &Key| -> (String, Kind, Option<String>) {
         let (name, kind, alias) = match key.target {
+            None if key.note => ("footnote text".to_string(), Kind::Custom, None),
             None if key.list => ("List Paragraph".to_string(), Kind::Custom, None),
             None if key.first => ("First Paragraph".to_string(), Kind::Custom, None),
             None => ("Normal".to_string(), Kind::Normal, None),
@@ -412,14 +426,14 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
         if let Some(i) = laid.styles.iter().position(|s| s.key == *key) {
             return i;
         }
-        let normal = Key { target: None, scope: None, first: false, list: false };
+        let normal = Key { target: None, scope: None, first: false, list: false, note: false };
         let heading = key.target.and_then(primary);
         let base = if key.scope.is_some() {
             Some(Key { scope: None, ..key.clone() })
         } else if key.first {
             Some(Key { first: false, ..key.clone() })
         } else if let Some(p) = heading {
-            Some(Key { target: Some(p), scope: None, first: false, list: false })
+            Some(Key { target: Some(p), scope: None, first: false, list: false, note: false })
         } else if *key != normal {
             Some(normal)
         } else {
@@ -435,7 +449,7 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
         laid.styles.push(Style { id, name, alias, kind, based_on, next: None, props: Props::default(), key: key.clone() });
         laid.styles.len() - 1
     }
-    style_for(&mut laid, &Key { target: None, scope: None, first: false, list: false }, &name_of, &primary);
+    style_for(&mut laid, &Key { target: None, scope: None, first: false, list: false, note: false }, &name_of, &primary);
     let style_of: Vec<usize> = keys.iter().map(|k| style_for(&mut laid, k, &name_of, &primary)).collect();
 
     // What each style's units have in common (layer 1).
@@ -450,7 +464,8 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
             (props.left, props.first_line) = (None, None);
         }
         let positions: Vec<usize> = (0..kept.len()).filter(|i| style_of[*i] == s && !kept[*i].unit.continues).collect();
-        if !positions.is_empty() && start_pages(&kept, &positions) && laid.styles[s].kind != Kind::Normal {
+        // A page's first footnote is at the top of no page.
+        if !positions.is_empty() && !laid.styles[s].key.note && start_pages(&kept, &positions) && laid.styles[s].kind != Kind::Normal {
             props.page_break = Some(true);
             // Down from the top of the body to the first line, as Word places a line: its
             // ascent, with the extra of a line spacing over single above the text.
@@ -485,7 +500,7 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
     let line_of = |laid: &Laid, s: usize| laid.resolved(s).line.unwrap_or(1.0);
     let pairs: Vec<(usize, usize, usize, f64)> = (1..kept.len()).filter_map(|i| {
         let (a, b) = (kept[i - 1].unit, kept[i].unit);
-        if kept[i].index != kept[i - 1].index + 1 || b.continues || a.page != b.page {
+        if kept[i].index != kept[i - 1].index + 1 || b.continues || a.page != b.page || kept[i].note != kept[i - 1].note {
             return None;
         }
         let gap = b.gap_before?;
@@ -524,7 +539,7 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
     // What's typed after each style in Word: what most often followed it (Word's default is
     // the same style again, so that's left unsaid).
     for s in 0..n {
-        let followers = (1..kept.len()).filter(|i| style_of[i - 1] == s).map(|i| style_of[i]);
+        let followers = (1..kept.len()).filter(|i| style_of[i - 1] == s && kept[*i].note == kept[i - 1].note).map(|i| style_of[i]);
         laid.styles[s].next = mode_of(followers).filter(|f| *f != s);
     }
 
@@ -576,7 +591,7 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
                 left: starts - u.area.left, hanging: (starts - l.marker_left).max(0.0),
             }
         });
-        laid.paras.push(Para { style: s, list, page: u.page, runs: u.runs.clone(), direct });
+        laid.paras.push(Para { style: s, list, page: u.page, note: u.note, runs: u.runs.clone(), direct });
     }
     for (s, count) in direct_count.into_iter().enumerate() {
         if count > 0 {
@@ -621,6 +636,8 @@ pub(crate) fn make_plain(laid: &mut Laid) {
                 ..Props::default()
             },
             Kind::Custom if s.key.first => Props { first_line: Some(0.0), ..Props::default() },
+            // Word's own footnote text.
+            Kind::Custom if s.key.note => Props { size: Some(10.0), first_line: Some(0.0), ..Props::default() },
             Kind::Custom => Props::default(),
         };
     }

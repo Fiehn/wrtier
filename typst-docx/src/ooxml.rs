@@ -222,7 +222,8 @@ struct Thread<'a> {
 
 /// Where each comment starts and ends (before the character at the first place, after the one
 /// at the second); `None` for one none of whose text is in the document. A comment on the
-/// document as a whole sits at its very start.
+/// document as a whole sits at its very start. A comment stays in the story it starts in (the
+/// body, or one footnote): Word's can't run from one into another.
 fn anchors(laid: &Laid, comments: &[Comment]) -> Vec<Option<(Place, Place)>> {
     let mut found: Vec<Option<(Place, Place)>> = vec![None; comments.len()];
     let start = (0, 0, 0);
@@ -242,10 +243,11 @@ fn anchors(laid: &Laid, comments: &[Comment]) -> Vec<Option<(Place, Place)>> {
                 for &c in &wanted {
                     if comments[c].ranges.iter().any(|range| range.contains(at)) {
                         let here = (p, r, k);
-                        found[c] = Some(match found[c] {
-                            Some((first, _)) => (first, (p, r, k + 1)),
-                            None => (here, (p, r, k + 1)),
-                        });
+                        found[c] = match found[c] {
+                            Some((first, _)) if laid.paras[first.0].note == para.note => Some((first, (p, r, k + 1))),
+                            Some(other) => Some(other),
+                            None => Some((here, (p, r, k + 1))),
+                        };
                     }
                 }
             }
@@ -431,27 +433,106 @@ pub(crate) fn section_starts(laid: &Laid, pages: usize) -> Vec<bool> {
     starts
 }
 
-fn document_xml(laid: &Laid, setup: &Setup, marks: &BTreeMap<Place, String>, sections: &Sections) -> String {
+/// The footnotes the `.docx` has: those with text whose reference is in the body (in order).
+fn footnotes(laid: &Laid) -> Vec<usize> {
+    let referenced: std::collections::BTreeSet<usize> = laid.paras.iter().filter(|p| p.note.is_none())
+        .flat_map(|p| p.runs.iter().filter_map(|r| r.note)).collect();
+    let with_text: std::collections::BTreeSet<usize> = laid.paras.iter().filter_map(|p| p.note).collect();
+    referenced.intersection(&with_text).copied().collect()
+}
+
+/// A footnote's ID in Word: -1 and 0 are its separators'.
+fn footnote_id(n: usize) -> usize {
+    n + 1
+}
+
+/// Word's number format for footnotes numbered as `shown` was (Typst's "1", "a", "i", "*").
+fn footnote_format(shown: &str) -> &'static str {
+    match shown.trim().chars().next() {
+        Some(c) if c.is_ascii_digit() => "decimal",
+        Some('*' | '†' | '‡' | '§') => "chicago",
+        Some('i' | 'v' | 'x') => "lowerRoman",
+        Some('I' | 'V' | 'X') => "upperRoman",
+        Some(c) if c.is_lowercase() => "lowerLetter",
+        Some(c) if c.is_uppercase() => "upperLetter",
+        _ => "decimal",
+    }
+}
+
+/// Paragraph `p`'s runs, with the comment markers that fall inside them. A footnote's number is
+/// Word's: a reference to the footnote in the body (when the footnote is in the `.docx`, else its
+/// number as shown), the footnote's own mark in its text.
+fn para_content(laid: &Laid, p: usize, resolved: &[Props], marks: &BTreeMap<Place, String>, notes: &[usize]) -> String {
+    let para = &laid.paras[p];
+    let mut content = String::new();
+    for (r, run) in para.runs.iter().enumerate() {
+        let chars: Vec<char> = run.text.chars().collect();
+        let mark = match run.note {
+            Some(_) if para.note.is_some() => Some("<w:footnoteRef/>".to_string()),
+            Some(n) if notes.contains(&n) => Some(format!("<w:footnoteReference w:id=\"{}\"/>", footnote_id(n))),
+            _ => None,
+        };
+        if let Some(mark) = mark {
+            for (_, xml) in marks.range((p, r, 0)..=(p, r, chars.len())) {
+                content.push_str(xml);
+            }
+            let _ = write!(content, "<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr>{mark}</w:r>");
+            continue;
+        }
+        let props = rpr(&run_props(run, &resolved[para.style], laid.plain), None);
+        // The run in pieces, with the markers that fall inside it between them.
+        let mut from = 0;
+        for (&(_, _, k), xml) in marks.range((p, r, 0)..=(p, r, chars.len())) {
+            run_xml(&mut content, &chars[from..k].iter().collect::<String>(), &props);
+            content.push_str(xml);
+            from = k;
+        }
+        run_xml(&mut content, &chars[from..].iter().collect::<String>(), &props);
+    }
+    content
+}
+
+/// Paragraph `p`'s properties: its style (unless Normal) and what it has of its own.
+fn para_props(laid: &Laid, p: usize) -> Vec<(String, String)> {
+    let para = &laid.paras[p];
+    let style = &laid.styles[para.style];
+    let id = (style.kind != Kind::Normal).then_some(style.id.as_str());
+    let mut items = ppr_items(&para.direct, id, None);
+    if let Some(item) = &para.list {
+        items.push(("numPr".into(), format!("<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{}\"/></w:numPr>", item.level, item.list + 1)));
+    }
+    items.sort_by_key(|(n, _)| translate::PARAGRAPH.iter().position(|o| o == n).unwrap_or(usize::MAX));
+    items
+}
+
+/// `footnotes.xml`: Word's separators, then each footnote's paragraphs. None without footnotes.
+fn footnotes_xml(laid: &Laid, marks: &BTreeMap<Place, String>, notes: &[usize]) -> Option<String> {
+    if notes.is_empty() {
+        return None;
+    }
+    let resolved: Vec<Props> = (0..laid.styles.len()).map(|s| laid.resolved(s)).collect();
+    let separator = |kind: &str, id: i32| format!(
+        "<w:footnote w:type=\"{kind}\" w:id=\"{id}\"><w:p><w:pPr><w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/></w:pPr><w:r><w:{kind}/></w:r></w:p></w:footnote>");
+    let mut x = format!("{HEAD}<w:footnotes xmlns:w=\"{W}\" xmlns:r=\"{R}\">{}{}", separator("separator", -1), separator("continuationSeparator", 0));
+    for &n in notes {
+        let _ = write!(x, "<w:footnote w:id=\"{}\">", footnote_id(n));
+        for p in (0..laid.paras.len()).filter(|p| laid.paras[*p].note == Some(n)) {
+            let props = wrap("pPr", para_props(laid, p).into_iter().map(|(_, x)| x).collect());
+            let _ = write!(x, "<w:p>{props}{}</w:p>", para_content(laid, p, &resolved, marks, notes));
+        }
+        x.push_str("</w:footnote>");
+    }
+    x.push_str("</w:footnotes>");
+    Some(x)
+}
+
+fn document_xml(laid: &Laid, setup: &Setup, marks: &BTreeMap<Place, String>, sections: &Sections, notes: &[usize]) -> String {
     let resolved: Vec<Props> = (0..laid.styles.len()).map(|s| laid.resolved(s)).collect();
     // Each paragraph's properties and content, apart, so a section break can go in before it.
     let mut paras: Vec<(String, Option<String>, String)> = Vec::new();
     let mut section = 0;
-    for (p, para) in laid.paras.iter().enumerate() {
-        let style = &laid.styles[para.style];
-        let id = (style.kind != Kind::Normal).then_some(style.id.as_str());
-        let mut content = String::new();
-        for (r, run) in para.runs.iter().enumerate() {
-            let props = rpr(&run_props(run, &resolved[para.style], laid.plain), None);
-            // The run in pieces, with the markers that fall inside it between them.
-            let chars: Vec<char> = run.text.chars().collect();
-            let mut from = 0;
-            for (&(_, _, k), xml) in marks.range((p, r, 0)..=(p, r, chars.len())) {
-                run_xml(&mut content, &chars[from..k].iter().collect::<String>(), &props);
-                content.push_str(xml);
-                from = k;
-            }
-            run_xml(&mut content, &chars[from..].iter().collect::<String>(), &props);
-        }
+    for p in (0..laid.paras.len()).filter(|p| laid.paras[*p].note.is_none()) {
+        let content = para_content(laid, p, &resolved, marks, notes);
         // Word 2013 and later drop the space before a paragraph at the top of a page after a
         // page break, but not at the start of a section: so a paragraph that opens a page
         // (its style still says so, for paragraphs added in Word) begins a section, and keeps
@@ -460,12 +541,7 @@ fn document_xml(laid: &Laid, setup: &Setup, marks: &BTreeMap<Place, String>, sec
             before.1 = Some(sect_pr(setup, section, true, false, sections));
             section += 1;
         }
-        let mut items = ppr_items(&para.direct, id, None);
-        if let Some(item) = &para.list {
-            items.push(("numPr".into(), format!("<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{}\"/></w:numPr>", item.level, item.list + 1)));
-        }
-        items.sort_by_key(|(n, _)| translate::PARAGRAPH.iter().position(|o| o == n).unwrap_or(usize::MAX));
-        paras.push((wrap("pPr", items.into_iter().map(|(_, x)| x).collect()), None, content));
+        paras.push((wrap("pPr", para_props(laid, p).into_iter().map(|(_, x)| x).collect()), None, content));
     }
     let mut body = String::new();
     for (props, section, content) in &paras {
@@ -478,7 +554,7 @@ fn document_xml(laid: &Laid, setup: &Setup, marks: &BTreeMap<Place, String>, sec
         }
         let _ = write!(body, "<w:p>{props}{content}</w:p>");
     }
-    if laid.paras.is_empty() {
+    if paras.is_empty() {
         let start = marks.get(&(0, 0, 0)).cloned().unwrap_or_default();
         let _ = write!(body, "<w:p>{start}</w:p>");
     }
@@ -587,7 +663,7 @@ fn furniture_xml(root: &str, style: &str, lines: &Lines, style_look: Option<&Loo
     format!("{HEAD}<w:{root} xmlns:w=\"{W}\" xmlns:r=\"{R}\">{body}</w:{root}>")
 }
 
-fn styles_xml(laid: &Laid, setup: &Setup, furniture: &Furniture, hands: &[(String, Vec<Property>)]) -> String {
+fn styles_xml(laid: &Laid, setup: &Setup, furniture: &Furniture, hands: &[(String, Vec<Property>)], footnotes: bool) -> String {
     let normal = laid.resolved(0);
     let defaults = Props { family: normal.family.clone(), size: normal.size, ..Props::default() };
     let mut x = format!(
@@ -638,22 +714,31 @@ fn styles_xml(laid: &Laid, setup: &Setup, furniture: &Furniture, hands: &[(Strin
         x.push_str("</w:style>");
     }
     x.push_str(&furniture_styles(furniture, setup, laid.plain, hands));
+    if footnotes {
+        // The footnote's number, in the text and in the note, as Word's own is.
+        let run = vec![("vertAlign".to_string(), "<w:vertAlign w:val=\"superscript\"/>".to_string())];
+        let _ = write!(x, "<w:style w:type=\"character\" w:styleId=\"FootnoteReference\"><w:name w:val=\"footnote reference\"/><w:uiPriority w:val=\"99\"/><w:unhideWhenUsed/>{}</w:style>",
+            wrap("rPr", translate::overlay(run, &hand(hands, |t| t.eq_ignore_ascii_case("footnote reference"), TKind::Run), translate::RUN)));
+    }
     x.push_str("</w:styles>");
     x
 }
 
-fn settings_xml(setup: &Setup, plain: bool, odd_and_even: bool, embedded: bool) -> String {
+fn settings_xml(setup: &Setup, plain: bool, odd_and_even: bool, embedded: bool, footnotes: Option<&str>) -> String {
     // Embedded whole, and kept so when Word saves (no `saveSubsetFonts`), so text typed in
     // Word can use them too.
     let embed = if embedded { "<w:embedTrueTypeFonts/>" } else { "" };
     let mirror = if setup.margins.mirrored && !plain { "<w:mirrorMargins/>" } else { "" };
     let hyphenate = if setup.hyphenate && !plain { "<w:autoHyphenation/>" } else { "" };
     let sides = if odd_and_even { "<w:evenAndOddHeaders/>" } else { "" };
+    // How footnotes are numbered, and the separators every footnote section has.
+    let notes = footnotes.map(|format| format!(
+        "<w:footnotePr><w:numFmt w:val=\"{format}\"/><w:footnote w:id=\"-1\"/><w:footnote w:id=\"0\"/></w:footnotePr>")).unwrap_or_default();
     // doNotExpandShiftReturn: a forced line break in a justified paragraph isn't stretched,
     // as in Typst.
     format!(
         "{HEAD}<w:settings xmlns:w=\"{W}\">{embed}{mirror}<w:defaultTabStop w:val=\"720\"/>{hyphenate}{sides}\
-         <w:characterSpacingControl w:val=\"doNotCompress\"/>\
+         <w:characterSpacingControl w:val=\"doNotCompress\"/>{notes}\
          <w:compat><w:doNotExpandShiftReturn/>\
          <w:compatSetting w:name=\"compatibilityMode\" w:uri=\"http://schemas.microsoft.com/office/word\" w:val=\"15\"/>\
          </w:compat></w:settings>")
@@ -721,7 +806,12 @@ fn core_xml(m: &Metadata) -> String {
         esc(&m.title), esc(&m.author))
 }
 
-fn content_types(comments: bool, furniture: &[(String, String, &str)], fonts: bool, numbering: bool) -> String {
+fn content_types(comments: bool, furniture: &[(String, String, &str)], fonts: bool, numbering: bool, footnotes: bool) -> String {
+    let footnotes = if footnotes {
+        "<Override PartName=\"/word/footnotes.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml\"/>"
+    } else {
+        ""
+    };
     let numbering = if numbering {
         "<Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>"
     } else {
@@ -748,7 +838,7 @@ fn content_types(comments: bool, furniture: &[(String, String, &str)], fonts: bo
          <Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\
          <Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>\
          <Override PartName=\"/word/settings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml\"/>\
-         {comments}{furniture}{numbering}\
+         {comments}{furniture}{numbering}{footnotes}\
          <Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>\
          </Types>")
 }
@@ -758,7 +848,12 @@ const PACKAGE_RELS: &str = "<Relationships xmlns=\"http://schemas.openxmlformats
     <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/>\
     </Relationships>";
 
-fn document_rels(comments: bool, furniture: &[(String, String, &str)], fonts: bool, numbering: bool) -> String {
+fn document_rels(comments: bool, furniture: &[(String, String, &str)], fonts: bool, numbering: bool, footnotes: bool) -> String {
+    let footnotes = if footnotes {
+        "<Relationship Id=\"rIdFootnotes\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes\" Target=\"footnotes.xml\"/>"
+    } else {
+        ""
+    };
     let numbering = if numbering {
         "<Relationship Id=\"rIdNumbering\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering\" Target=\"numbering.xml\"/>"
     } else {
@@ -781,7 +876,7 @@ fn document_rels(comments: bool, furniture: &[(String, String, &str)], fonts: bo
         "{HEAD}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
          <Relationship Id=\"rIdStyles\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>\
          <Relationship Id=\"rIdSettings\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings\" Target=\"settings.xml\"/>\
-         {comments}{furniture}{fonts}{numbering}</Relationships>")
+         {comments}{furniture}{fonts}{numbering}{footnotes}</Relationships>")
 }
 
 /// The parts of the package, by name, and a note for each comment that couldn't be placed.
@@ -859,15 +954,23 @@ pub(crate) fn parts(laid: &Laid, setup: &Setup, meta: &Metadata, comments: &[Com
 
     let embedded = families.iter().any(|f| !f.faces.is_empty());
     let numbering = numbering_xml(laid);
+    let footnote_ids = footnotes(laid);
+    let footnotes = footnotes_xml(laid, &marks, &footnote_ids);
+    // Numbered as the first footnote's reference showed it.
+    let format = footnote_ids.first().and_then(|n| laid.paras.iter().filter(|p| p.note.is_none()).flat_map(|p| &p.runs).find(|r| r.note == Some(*n)))
+        .map(|r| footnote_format(&r.text));
     let mut parts: Vec<(String, String)> = vec![
-        ("[Content_Types].xml".to_string(), content_types(any, &furniture_parts, embedded, numbering.is_some())),
+        ("[Content_Types].xml".to_string(), content_types(any, &furniture_parts, embedded, numbering.is_some(), footnotes.is_some())),
         ("_rels/.rels".to_string(), format!("{HEAD}{PACKAGE_RELS}")),
-        ("word/document.xml".to_string(), document_xml(laid, setup, &marks, &sections)),
-        ("word/styles.xml".to_string(), styles_xml(laid, setup, furniture, hands)),
-        ("word/settings.xml".to_string(), settings_xml(setup, laid.plain, odd_and_even, embedded)),
-        ("word/_rels/document.xml.rels".to_string(), document_rels(any, &furniture_parts, embedded, numbering.is_some())),
+        ("word/document.xml".to_string(), document_xml(laid, setup, &marks, &sections, &footnote_ids)),
+        ("word/styles.xml".to_string(), styles_xml(laid, setup, furniture, hands, footnotes.is_some())),
+        ("word/settings.xml".to_string(), settings_xml(setup, laid.plain, odd_and_even, embedded, format)),
+        ("word/_rels/document.xml.rels".to_string(), document_rels(any, &furniture_parts, embedded, numbering.is_some(), footnotes.is_some())),
         ("docProps/core.xml".to_string(), core_xml(meta)),
     ];
+    if let Some(footnotes) = footnotes {
+        parts.push(("word/footnotes.xml".to_string(), footnotes));
+    }
     for ((part, _, _), xml) in furniture_parts.iter().zip(furniture_xmls) {
         parts.push((format!("word/{part}"), xml));
     }

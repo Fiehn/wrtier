@@ -5,11 +5,12 @@
 
 use std::ops::Range;
 
-use typst_docx::{Comment, Note, Reply, Role, Selector, Target, What};
+use typst_docx::{Comment, Note, Reply, Role, Selector, Target, Uncarried, What};
 
 use serde::Serialize;
 
 use crate::preamble::{ElementForm, Header, HEADER_END};
+use crate::typeset::TextLine;
 use crate::vault::Made;
 use crate::work::Mark;
 
@@ -118,10 +119,31 @@ pub struct Line {
 }
 
 /// The report, a line per item: what the converter noted (`notes`), and Styles whose hand-written
-/// translations were partly left out for mistakes (not for prose only, which uses none).
-pub fn report(notes: &[Note], made: &Made, plain: bool) -> Vec<Line> {
+/// translations were partly left out for mistakes (not for prose only, which uses none). What
+/// the `.docx` doesn't carry gets a line for each kind, with the lines of the Work's text it's
+/// on (`lines`, one for each note), and one for each Style that adds some.
+pub fn report(notes: &[Note], lines: &[Option<TextLine>], made: &Made, plain: bool) -> Vec<Line> {
     let look = made.look.as_ref().and_then(|l| l.path.clone());
-    let mut lines: Vec<Line> = notes.iter().map(|n| match &n.what {
+    let mut in_text: Vec<(Uncarried, Vec<TextLine>)> = Vec::new();
+    let mut from_styles: Vec<(Uncarried, Option<String>)> = Vec::new();
+    for (n, line) in notes.iter().zip(lines.iter().copied().chain(std::iter::repeat(None))) {
+        let What::NotCarried { what, .. } = n.what else { continue };
+        match line {
+            Some(line) => match in_text.iter_mut().find(|(w, _)| *w == what) {
+                Some((_, all)) if !all.contains(&line) => all.push(line),
+                Some(_) => {}
+                None => in_text.push((what, vec![line])),
+            },
+            None => {
+                let open = n.origin.clone().or(look.clone());
+                if !from_styles.contains(&(what, open.clone())) {
+                    from_styles.push((what, open));
+                }
+            }
+        }
+    }
+    in_text.sort_by_key(|(what, _)| *what);
+    let mut lines: Vec<Line> = notes.iter().filter(|n| !matches!(n.what, What::NotCarried { .. })).map(|n| match &n.what {
         What::FormattedDirectly { paragraphs } => {
             // Word's own heading styles are named "heading 1", shown as "Heading 1".
             let style = n.style.as_deref().unwrap_or("A style");
@@ -141,7 +163,15 @@ pub fn report(notes: &[Note], made: &Made, plain: bool) -> Vec<Line> {
             let by = n.origin.as_deref().unwrap_or("someone");
             Line { text: format!("A Comment by {by} (“{text}”) isn't in it: the text it's on isn't either."), open: None }
         }
+        What::NotCarried { .. } => unreachable!("listed by kind below"),
     }).collect();
+    for (what, mut at) in in_text {
+        at.sort();
+        lines.push(Line { text: not_carried(what, Some(&at)), open: None });
+    }
+    for (what, open) in from_styles {
+        lines.push(Line { text: not_carried(what, None), open });
+    }
     if !plain {
         for file in &made.translations {
             let problems = typst_docx::translate::problems(&file.content);
@@ -155,6 +185,32 @@ pub fn report(notes: &[Note], made: &Made, plain: bool) -> Vec<Line> {
         }
     }
     lines
+}
+
+/// What becomes of something the `.docx` doesn't carry, on `at`, lines of the Work's text, or
+/// else added by a Style.
+fn not_carried(what: Uncarried, at: Option<&[TextLine]>) -> String {
+    let many = at.is_some_and(|a| a.len() > 1);
+    let (one, all, fate) = match what {
+        Uncarried::Image => ("An image", "Images", if many { "are left out" } else { "is left out" }),
+        Uncarried::Drawing => ("A drawn line or shape", "Drawn lines and shapes", if many { "are left out" } else { "is left out" }),
+        Uncarried::Equation => ("An equation", "Equations", if many { "are kept as plain text, without their layout" } else { "is kept as plain text, without its layout" }),
+        Uncarried::Table => ("A table", "Tables", if many { "are kept as their cells' text, a paragraph for each" } else { "is kept as its cells' text, a paragraph for each" }),
+    };
+    let Some(at) = at else {
+        return format!("{one} a Style adds {fate}.");
+    };
+    const SHOWN: usize = 10;
+    let mut named: Vec<String> = at.iter().take(SHOWN).map(|l| if l.included { format!("{} (in included text)", l.line) } else { l.line.to_string() }).collect();
+    if at.len() > SHOWN {
+        named.push(format!("{} more", at.len() - SHOWN));
+    }
+    let list = match named.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    };
+    if many { format!("{all} on lines {list} {fate}.") } else { format!("{one} on line {list} {fate}.") }
 }
 
 #[cfg(test)]
@@ -206,7 +262,7 @@ mod tests {
             Note { style: Some("Normal".into()), origin: None, what: What::FormattedDirectly { paragraphs: 1 } },
             Note { style: None, origin: Some("Anna".into()), what: What::CommentNotPlaced { text: "Hm".into() } },
         ];
-        let lines = report(&notes, &made, false);
+        let lines = report(&notes, &[], &made, false);
         assert_eq!(lines[0], Line { text: "Heading 1: 2 paragraphs don't look like the rest, so they're formatted directly.".into(), open: Some("styles/Paperback.look".into()) });
         assert_eq!(lines[1].open.as_deref(), Some("styles/Paperback.look"), "prose is the Look's");
         assert_eq!(lines[2].open, None);
@@ -214,7 +270,30 @@ mod tests {
             text: "Book text's .docx translations were partly left out: line 2: should be a style's name, a colon, then its properties.".into(),
             open: Some("styles/Book text.typ".into()),
         });
-        assert_eq!(report(&[], &made, true), [], "prose only uses no translations");
+        assert_eq!(report(&[], &[], &made, true), [], "prose only uses no translations");
+    }
+
+    #[test]
+    fn what_isnt_carried_is_listed_by_kind_with_its_lines() {
+        use crate::vault::File;
+        let made = Made { look: Some(File { name: "Paperback".into(), path: Some("styles/Paperback.look".into()), content: String::new() }), ..Made::default() };
+        let note = |what: Uncarried, origin: Option<&str>| Note { style: None, origin: origin.map(String::from), what: What::NotCarried { what, at: Some(0) } };
+        let at = |line: usize, included: bool| Some(TextLine { line, included });
+        let notes = [
+            note(Uncarried::Image, None), note(Uncarried::Equation, None), note(Uncarried::Image, None), note(Uncarried::Image, None),
+            note(Uncarried::Table, Some("styles/elements/epigraph.typ")), note(Uncarried::Drawing, None), note(Uncarried::Drawing, Some("styles/x.typ")),
+        ];
+        let lines = [at(12, false), at(4, true), at(3, false), at(12, false), None, None, None];
+        assert_eq!(report(&notes, &lines, &made, false), [
+            Line { text: "Images on lines 3 and 12 are left out.".into(), open: None },
+            Line { text: "An equation on line 4 (in included text) is kept as plain text, without its layout.".into(), open: None },
+            Line { text: "A table a Style adds is kept as its cells' text, a paragraph for each.".into(), open: Some("styles/elements/epigraph.typ".into()) },
+            Line { text: "A drawn line or shape a Style adds is left out.".into(), open: Some("styles/Paperback.look".into()) },
+            Line { text: "A drawn line or shape a Style adds is left out.".into(), open: Some("styles/x.typ".into()) },
+        ]);
+        let many: Vec<Option<TextLine>> = (1..=12).map(|l| at(l, false)).collect();
+        let notes: Vec<Note> = (0..12).map(|_| note(Uncarried::Image, None)).collect();
+        assert_eq!(report(&notes, &many, &made, false)[0].text, "Images on lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 2 more are left out.");
     }
 
     #[test]

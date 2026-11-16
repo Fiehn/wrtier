@@ -436,6 +436,14 @@ Between.
     let docx = typst_docx::convert(&document, &main, &Options { embed_fonts: true, ..options() }).unwrap();
     std::fs::write(dir.join("Marks.docx"), docx.bytes).unwrap();
     std::fs::write(dir.join("Marks-typst.pdf"), typst_pdf::pdf(&document, &typst_pdf::PdfOptions::default()).map_err(|e| format!("{e:?}")).unwrap()).unwrap();
+    // Footnotes (one on a page a paragraph runs over), and what isn't carried: an equation and a table.
+    let notes = format!("= Notes\n\nA claim#footnote[Made by someone, once, \\\nin a letter.] and another#footnote[#lorem(30)].\n\n#lorem(300)#footnote[On the long paragraph.]\n\n{}\
+        Some $x^2 + 1$ maths, and a table:\n\n#table(columns: 2, [a], [b], [c], [d])\n\nThe end#footnote[Third.].", "#lorem(250)\n\n".repeat(2));
+    let (document, main) = compile_source(&source(&PAPERBACK, &notes, true));
+    let docx = typst_docx::convert(&document, &main, &Options { embed_fonts: true, ..options() }).unwrap();
+    println!("Notes: {:#?}", docx.report);
+    std::fs::write(dir.join("Notes.docx"), docx.bytes).unwrap();
+    std::fs::write(dir.join("Notes-typst.pdf"), typst_pdf::pdf(&document, &typst_pdf::PdfOptions::default()).map_err(|e| format!("{e:?}")).unwrap()).unwrap();
     for (name, plain) in [("Commented", false), ("Plain", true)] {
         let (document, main) = compile_source(&text);
         let docx = typst_docx::convert(&document, &main, &Options { comments: comments.clone(), plain, ..options() }).unwrap();
@@ -649,4 +657,125 @@ fn lists_are_word_lists_numbered_by_word() {
         assert!(numbering.contains(expected), "{expected} in {numbering}");
     }
     assert!(parts["word/styles.xml"].contains("<w:name w:val=\"List Paragraph\"/>"));
+}
+
+/// Footnote `id`'s paragraphs in footnotes.xml: each one's style ID and text, its own mark as "^".
+fn footnote(xml: &str, id: &str) -> Vec<(String, String)> {
+    let doc = roxmltree::Document::parse(xml).unwrap();
+    let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let note = doc.descendants().find(|n| n.has_tag_name("footnote") && n.attribute((w, "id")) == Some(id)).unwrap_or_else(|| panic!("no footnote {id}"));
+    note.children().filter(|n| n.has_tag_name("p")).map(|p| {
+        let style = p.descendants().find(|n| n.has_tag_name("pStyle")).and_then(|n| n.attribute((w, "val"))).unwrap_or_default().to_string();
+        let text = p.descendants().filter_map(|n| match n.tag_name().name() {
+            "t" => n.text().map(String::from),
+            "br" => Some("|".into()),
+            "footnoteRef" => Some("^".into()),
+            _ => None,
+        }).collect();
+        (style, text)
+    }).collect()
+}
+
+fn parts_of_text(text: &str) -> std::collections::HashMap<String, String> {
+    parts(&convert_text(&source(&PAPERBACK, text, true), &options()).unwrap().bytes)
+}
+
+#[test]
+fn footnotes_are_word_footnotes() {
+    // Long enough that a paragraph runs over the page while a footnote sits at its foot.
+    let text = format!("= One\n\nBefore a note#footnote[The note's text.] and after.\n\n#lorem(400)#footnote[Another, \\\non two lines.]\n\n{}Last#footnote[Third.].",
+        "#lorem(300)\n\n".repeat(2));
+    let docx = convert_text(&source(&PAPERBACK, &text, true), &options()).unwrap();
+    let parts = parts(&docx.bytes);
+    let body = paragraphs(&parts["word/document.xml"]);
+    let texts: Vec<&str> = body.iter().map(|(_, t)| t.as_str()).collect();
+    assert_eq!(texts.len(), 6, "a page's footnotes don't split the paragraph running over it: {texts:?}");
+    assert_eq!(texts[1], "Before a note and after.", "the number is Word's, the note's text isn't in the body");
+    assert!(texts.iter().all(|t| !t.contains("note’s") && !t.contains("Third")));
+    let document = &parts["word/document.xml"];
+    for id in 1..=3 {
+        assert!(document.contains(&format!("<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteReference w:id=\"{id}\"/></w:r>")));
+    }
+    let notes = &parts["word/footnotes.xml"];
+    assert!(notes.contains("<w:footnote w:type=\"separator\" w:id=\"-1\">") && notes.contains("w:type=\"continuationSeparator\" w:id=\"0\""));
+    assert_eq!(footnote(notes, "1"), [("FootnoteText".to_string(), "^The note’s text.".to_string())]);
+    assert_eq!(footnote(notes, "2"), [("FootnoteText".to_string(), "^Another,|on two lines.".to_string())]);
+    assert_eq!(footnote(notes, "3"), [("FootnoteText".to_string(), "^Third.".to_string())]);
+    // The note's style is measured from the notes: smaller than the text.
+    let styles = &parts["word/styles.xml"];
+    let style = |id: &str| {
+        let at = styles.find(&format!("w:styleId=\"{id}\"")).unwrap_or_else(|| panic!("no style {id}"));
+        styles[at..at + styles[at..].find("</w:style>").unwrap()].to_string()
+    };
+    let size = |s: &str| s.split("<w:sz w:val=\"").nth(1).and_then(|r| r[..r.find('"').unwrap()].parse::<f64>().ok());
+    let note = style("FootnoteText");
+    assert!(note.contains("<w:name w:val=\"footnote text\"/>"), "{note}");
+    let normal = styles.split("<w:rPrDefault>").nth(1).and_then(size).unwrap();
+    assert!(size(&note).unwrap() < normal, "{note}");
+    assert!(!note.contains("pageBreakBefore"), "{note}");
+    assert!(style("FootnoteReference").contains("<w:vertAlign w:val=\"superscript\"/>"));
+    assert!(parts["word/settings.xml"].contains("<w:footnotePr><w:numFmt w:val=\"decimal\"/><w:footnote w:id=\"-1\"/><w:footnote w:id=\"0\"/></w:footnotePr>"));
+    assert!(parts["[Content_Types].xml"].contains("/word/footnotes.xml"));
+    assert!(parts["word/_rels/document.xml.rels"].contains("Target=\"footnotes.xml\""));
+    assert!(!docx.report.iter().any(|n| matches!(n.what, What::NotCarried { .. })), "{:?}", docx.report);
+    // Numbered with symbols in Typst: so in Word.
+    let starred = parts_of_text(&format!("#set footnote(numbering: \"*\")\n{text}"));
+    assert!(starred["word/settings.xml"].contains("<w:numFmt w:val=\"chicago\"/>"));
+    // No footnotes: no part.
+    assert!(!parts_of_text("= One\n\nText.").contains_key("word/footnotes.xml"));
+}
+
+#[test]
+fn a_comment_stays_in_its_footnote_or_the_body() {
+    let text = "= One\n\nSome text#footnote[A note on it.] here.";
+    let full = source(&PAPERBACK, text, true);
+    let start = full.find("note on").unwrap();
+    let options = Options {
+        comments: vec![
+            Comment { author: "Anna".into(), text: "In the note.".into(), ranges: vec![start..start + 7], ..Comment::default() },
+            // From the body into the note: Word can't, so it ends with the body's text.
+            Comment { author: "Anna".into(), text: "Across.".into(), ranges: vec![full.find("Some text").unwrap()..start + 4], ..Comment::default() },
+        ],
+        ..options()
+    };
+    let parts = parts(&convert_text(&full, &options).unwrap().bytes);
+    let (notes, document) = (&parts["word/footnotes.xml"], &parts["word/document.xml"]);
+    assert!(notes.contains("<w:commentRangeStart w:id=\"0\"/>") && notes.contains("<w:commentRangeEnd w:id=\"0\"/>"), "{notes}");
+    assert!(document.contains("<w:commentRangeStart w:id=\"1\"/>") && document.contains("<w:commentRangeEnd w:id=\"1\"/>"));
+    assert!(!notes.contains("w:id=\"1\"/>"), "the body's comment doesn't end in the note");
+}
+
+#[test]
+fn what_isnt_carried_is_reported_where_it_is() {
+    let svg = "#image(bytes(\"<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><rect width='10' height='10'/></svg>\"), width: 1cm)";
+    let text = ["= One", "Some $x^2 + 1$ inline, #underline[under] and #strike[struck].", "#table(columns: 2, [a], [b], [c], [d])",
+                "$ sum_(i=1)^n i $", svg, "#line(length: 2cm)", "After."].join("\n\n");
+    let full = source(&PAPERBACK, &text, true);
+    let docx = convert_text(&full, &options()).unwrap();
+    let line = |at: usize| full[..at].matches('\n').count();
+    let found: Vec<(typst_docx::Uncarried, usize)> = docx.report.iter().filter_map(|n| match n.what {
+        What::NotCarried { what, at } => Some((what, line(at.expect("in the main source")))),
+        _ => None,
+    }).collect();
+    let line_of = |text: &str| line(full.find(text).unwrap());
+    use typst_docx::Uncarried::*;
+    assert_eq!(found, [(Equation, line_of("Some $")), (Table, line_of("#table")), (Equation, line_of("$ sum")), (Image, line_of("#image")), (Drawing, line_of("#line"))],
+        "one item each, at its line; underline and strike-through are carried");
+    // Their text is kept: an equation's in a row, without breaking its line; a table's cells
+    // as paragraphs of their own.
+    let paras = paragraphs(&parts(&docx.bytes)["word/document.xml"]);
+    let texts: Vec<&str> = paras.iter().map(|(_, t)| t.as_str()).collect();
+    assert_eq!(texts, ["One", "Some 𝑥2+1 inline, under and struck.", "a", "b", "c", "d", "∑𝑛𝑖=1𝑖", "After."]);
+}
+
+#[test]
+fn what_is_in_an_element_says_so_unless_the_element_is_left_out() {
+    let text = "= One\n\n#epigraph[A sum $x$ in it.]\n\nText.";
+    let docx = convert_text(&source(&PAPERBACK, text, true), &options()).unwrap();
+    let note = docx.report.iter().find(|n| matches!(n.what, What::NotCarried { .. })).unwrap();
+    assert_eq!(note.origin.as_deref(), Some("Epigraph.typ"));
+    let mut targets = targets();
+    targets.iter_mut().find(|t| t.name == "Epigraph").unwrap().role = Role::LeftOut;
+    let docx = convert_text(&source(&PAPERBACK, text, true), &Options { targets, ..options() }).unwrap();
+    assert!(!docx.report.iter().any(|n| matches!(n.what, What::NotCarried { .. })), "{:?}", docx.report);
 }

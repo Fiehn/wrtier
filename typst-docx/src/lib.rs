@@ -105,6 +105,19 @@ pub struct Options {
     pub translations: Vec<translate::Translation>,
 }
 
+/// Something on the pages the `.docx` can't hold as Typst set it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Uncarried {
+    /// An image: left out.
+    Image,
+    /// A line or shape drawn among the text (a box's border, a highlight): left out.
+    Drawing,
+    /// An equation: its symbols are kept, in a row, as text.
+    Equation,
+    /// A table or grid: each cell's text is kept as a paragraph of its own.
+    Table,
+}
+
 /// Something the report says.
 #[derive(Clone, Debug, PartialEq)]
 pub enum What {
@@ -119,6 +132,10 @@ pub enum What {
     /// A comment none of whose text is in the `.docx` (it's in something left out, say); `text`
     /// is the start of the comment's own text, to recognise it by.
     CommentNotPlaced { text: String },
+    /// Something the `.docx` doesn't carry as it was set (once for each place it comes from):
+    /// `at`, where it starts in the main source (byte offset), if it came from there. `origin`
+    /// is the target's it's in, if any.
+    NotCarried { what: Uncarried, at: Option<usize> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -144,9 +161,8 @@ pub fn convert(document: &PagedDocument, main: &Source, options: &Options) -> Re
         targets: options.targets.iter().map(|t| measure::Target { name: t.name.clone(), selector: t.selector.clone() }).collect(),
         scope: if options.plain { None } else { options.scope.clone() },
     };
-    let places = (!options.comments.is_empty()).then_some(main);
-    let units = measure::measure_in(document, &measuring, |page| setup.area(page), places);
-    let mut laid = styles::lay_out(&units, &options.targets, &setup);
+    let measured = measure::measure_in(document, &measuring, |page| setup.area(page), main, !options.comments.is_empty());
+    let mut laid = styles::lay_out(&measured.units, &options.targets, &setup);
     if options.plain {
         styles::make_plain(&mut laid);
     }
@@ -168,6 +184,13 @@ pub fn convert(document: &PagedDocument, main: &Source, options: &Options) -> Re
             fonts::NotEmbedded::Unconvertible(why) => format!("it couldn't be made TrueType: {why}"),
         };
         laid.notes.push(Note { style: None, origin: None, what: What::FontNotEmbedded { family, why } });
+    }
+    for s in measured.skipped {
+        let target = s.target.map(|t| &options.targets[t]);
+        if target.is_some_and(|t| t.role == Role::LeftOut) {
+            continue; // left out with what it's in
+        }
+        laid.notes.push(Note { style: None, origin: target.and_then(|t| t.origin.clone()), what: What::NotCarried { what: s.what, at: s.at } });
     }
     let hands = if options.plain { Vec::new() } else { translate::merged(&options.translations) };
     let (parts, unplaced) = ooxml::parts(&laid, &setup, &options.metadata, &options.comments, &furniture, &families, &hands);

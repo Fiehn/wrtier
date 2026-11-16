@@ -119,6 +119,8 @@ pub struct Made {
 pub struct ExportInput {
     /// Its text, with its Inclusions written out as Typst.
     pub text: String,
+    /// Where in `text` its Inclusions were written out (see `typeset::Block::all`).
+    pub inclusions: Vec<(usize, usize)>,
     /// Its open Comments (and Work comments), and those on the text it includes, each with
     /// where its text is in `text` (byte ranges; none for a Work comment), with names filled
     /// in: when asked for (see `Export`).
@@ -1071,10 +1073,10 @@ impl Vault {
         let shown = self.shown_in_doc(&doc);
         let missing: Vec<String> = shown.iter().filter_map(|s| s.missing.as_ref().map(|m| format!("{}: {m}", s.label))).collect();
         let committed = doc.committed_text();
-        let (text, _) = inclusions::typst_body(&committed, &shown);
+        let (text, inclusions) = inclusions::typst_body(&committed, &shown);
         let (db, _) = self.paths(id)?;
         let ident = storage::identity(&db).map_err(err)?.unwrap_or_else(|| id.to_string());
-        Ok(ExportInput { text, comments: Vec::new(), header, preamble: Preamble::of(&doc), made, date_ms, ident, missing })
+        Ok(ExportInput { text, inclusions, comments: Vec::new(), header, preamble: Preamble::of(&doc), made, date_ms, ident, missing })
     }
 
     /// When a Milestone was named.
@@ -1132,10 +1134,10 @@ impl Vault {
         };
         let missing: Vec<String> = shown.iter().filter_map(|s| s.missing.as_ref().map(|m| format!("{}: {m}", s.label))).collect();
         let comments = if look.comments { self.comments_for_export(&text, shown.clone(), own) } else { Vec::new() };
-        let (text, _) = inclusions::typst_body(&text, &shown);
+        let (text, inclusions) = inclusions::typst_body(&text, &shown);
         let date_ms = storage::read_all(&db).map_err(err)?.iter().map(|c| c.hlc.0).max().unwrap_or(0);
         let ident = storage::identity(&db).map_err(err)?.unwrap_or_else(|| id.to_string());
-        Ok(ExportInput { text, comments, header, preamble, made, date_ms, ident, missing })
+        Ok(ExportInput { text, inclusions, comments, header, preamble, made, date_ms, ident, missing })
     }
 
     /// A Work's Comments that go into a `.docx`: open ones on its text, and Work comments,
@@ -1726,7 +1728,7 @@ mod tests {
                 let pdf = crate::typeset::Typesetter::new(false)
                     .export_pdf(Path::new("no-fonts"), &input.header, input.text.clone(), input.date_ms, &input.ident).unwrap();
                 let (header, options) = crate::docx::prepare(&input, "Rain", false, false);
-                let docx = crate::typeset::Typesetter::new(false).export_docx(Path::new("no-fonts"), &header, input.text.clone(), &options).unwrap();
+                let docx = crate::typeset::Typesetter::new(false).export_docx(Path::new("no-fonts"), &header, input.text.clone(), &input.inclusions, &options).unwrap().docx;
                 let found = fonts_of(&docx.bytes, &letters);
                 assert_eq!(found.len(), letters.len(), "{look}: every paragraph of both letters: {found:?}");
                 for (style, font, size) in &found {

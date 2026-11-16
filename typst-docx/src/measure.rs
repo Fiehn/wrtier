@@ -18,9 +18,10 @@ use typst::foundations::{Content, Repr, StyleChain, Value};
 use typst::introspection::MetadataElem;
 use typst::introspection::{Location, Tag};
 use typst::layout::{Frame, FrameItem, FrameKind, Point};
-use typst::model::{HeadingElem, ParElem};
+use typst::math::EquationElem;
+use typst::model::{FootnoteElem, FootnoteEntry, HeadingElem, ParElem};
 use typst::pdf::{PdfMarkerTag, PdfMarkerTagKind};
-use typst::syntax::Source;
+use typst::syntax::{Source, Span};
 use typst::text::{FontStyle, TextItem};
 use typst::visualize::Paint;
 use typst_layout::PagedDocument;
@@ -88,6 +89,10 @@ pub struct Run {
     /// Where each of its characters came from in the main source file (byte offset), if it
     /// came from there; all `None` when not asked for (see `measure_in`).
     pub at: Vec<Option<usize>>,
+    /// It's a footnote's number, the footnote's index in the order they were met (from 0): in
+    /// the body, the reference to it; in the footnote's own text, its number there. Its text is
+    /// the number as Typst showed it; Word numbers footnotes itself.
+    pub note: Option<usize>,
 }
 
 /// Where a unit is in a list: which list (the outermost one, as the walk met them), how deep,
@@ -171,6 +176,26 @@ pub struct Unit {
     pub metrics: Metrics,
     /// The first text of a list item's body: where it is in the list.
     pub list: Option<ListPlace>,
+    /// It's (some of) the text of footnote n (see `Run::note`), set at the foot of its page,
+    /// not part of the body.
+    pub note: Option<usize>,
+}
+
+/// Something on the pages the `.docx` doesn't carry as it was set (see `crate::Uncarried`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Skipped {
+    pub what: crate::Uncarried,
+    /// Where it starts in the main source file (byte offset), if it came from there.
+    pub at: Option<usize>,
+    /// The target it's in, if any.
+    pub target: Option<usize>,
+}
+
+/// What the pages hold: their text, and what of them can't be carried.
+#[derive(Clone, Debug, Default)]
+pub struct Measured {
+    pub units: Vec<Unit>,
+    pub skipped: Vec<Skipped>,
 }
 
 /// How close two edges must be to count as the same, in points.
@@ -195,9 +220,8 @@ impl Unit {
         if body.is_empty() {
             return Align::Unknown; // one line: nothing to compare
         }
-        // The right edge is where most lines but the last end; a line reaches it when it ends
-        // there or hangs punctuation a little past it.
-        let edge = most_common(body.iter().map(|x| x.right)).unwrap_or(hi);
+        // A line reaches the right edge when it ends there or hangs punctuation a little past it.
+        let edge = self.right_edge();
         let reaches = |x: &Line| x.right > edge - TOL && x.right < edge + OVERHANG_EM * self.size;
         let flush_right = body.iter().filter(|x| reaches(x)).count() * 10 >= body.len() * 9;
         let starts_even = l[1..].iter().all(|x| (x.left - l[l.len() - 1].left).abs() < TOL);
@@ -232,8 +256,15 @@ impl Unit {
 
     /// From the right edge in to where justified lines end.
     pub fn right_indent(&self) -> Option<f64> {
+        (self.align() == Align::Justified).then(|| self.area.right - self.right_edge())
+    }
+
+    /// Where lines but the last end: the area's right edge when one ends there, else where most
+    /// do (a short note's two lines, one hanging a comma, have no most).
+    fn right_edge(&self) -> f64 {
+        let hi = self.area.right;
         let body = &self.lines[..self.lines.len() - 1];
-        (self.align() == Align::Justified).then(|| self.area.right - most_common(body.iter().map(|x| x.right)).unwrap_or(self.area.right))
+        if body.iter().any(|x| (x.right - hi).abs() < TOL) { hi } else { most_common(body.iter().map(|x| x.right)).unwrap_or(hi) }
     }
 
     /// The distance between baselines inside the unit (the median).
@@ -272,6 +303,13 @@ struct Piece {
     list: Option<ListPlace>,
     /// Where each character came from in the main source (see `Run::at`).
     sources: Vec<Option<usize>>,
+    /// A footnote's number (see `Run::note`).
+    note: Option<usize>,
+    /// Text of footnote n (see `Unit::note`).
+    in_note: Option<usize>,
+    /// Set off its line (a superscript in an equation, a footnote's number): it's on the line
+    /// of the text nearest it, whatever its own baseline.
+    inline: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -294,13 +332,18 @@ struct Walk<'a> {
     loose: usize,
     /// Hard groups (blocks) in the body, per page: (left, width).
     blocks: Vec<(usize, f64, f64)>,
-    /// The main source file, when each character's place in it is wanted.
+    /// The main source file, to say where things came from in it.
     main: Option<&'a Source>,
+    /// Whether each character's place in `main` is wanted (see `Run::at`).
+    places: bool,
     small_caps: crate::fonts::SmallCaps,
     /// A list item's marker, read and waiting for its body's first text: its text and left edge.
     marker: Option<(String, f64)>,
     /// The outermost lists met so far, to number them.
     lists: Vec<Location>,
+    /// The footnotes met so far, in order, to number them.
+    notes: Vec<Location>,
+    skipped: Vec<Skipped>,
 }
 
 impl Walk<'_> {
@@ -314,7 +357,37 @@ impl Walk<'_> {
 
     /// Inside a header, footer or page number: furniture of the page, not text.
     fn in_artifact(&self) -> bool {
-        self.open.iter().any(|(_, c)| c.elem().name() == "artifact")
+        self.inside("artifact")
+    }
+
+    /// Inside an element of this name (as Typst names it: "table", "underline").
+    fn inside(&self, name: &str) -> bool {
+        self.open.iter().any(|(_, c)| c.elem().name() == name)
+    }
+
+    /// The innermost target around what's being read.
+    fn current_target(&self) -> Option<usize> {
+        self.open.iter().rev().find_map(|(_, c)| self.target_of(c))
+    }
+
+    /// Footnote `loc`'s index, in the order footnotes were met.
+    fn note_index(&mut self, loc: Location) -> usize {
+        self.notes.iter().position(|l| *l == loc).unwrap_or_else(|| {
+            self.notes.push(loc);
+            self.notes.len() - 1
+        })
+    }
+
+    /// Notes that `what`, from `span`, isn't carried; once for each place it comes from.
+    fn skip(&mut self, what: crate::Uncarried, span: Span) {
+        if span.is_detached() {
+            return;
+        }
+        let at = self.main.filter(|m| span.id() == Some(m.id())).and_then(|m| m.find(span)).map(|n| n.range().start);
+        let skipped = Skipped { what, at, target: self.current_target() };
+        if !self.skipped.contains(&skipped) {
+            self.skipped.push(skipped);
+        }
     }
 
     fn walk(&mut self, frame: &Frame, offset: Point) {
@@ -330,6 +403,12 @@ impl Walk<'_> {
                 }
                 FrameItem::Tag(tag) => self.tag(tag),
                 FrameItem::Text(text) if !self.in_artifact() => self.text(at, text),
+                FrameItem::Image(_, _, span) if !self.in_artifact() => self.skip(crate::Uncarried::Image, *span),
+                // Underlines and strike-throughs are carried as such, a table's lines with the
+                // table; anything else drawn among the text isn't.
+                FrameItem::Shape(_, span) if !self.in_artifact() && !["underline", "strike", "table", "grid"].iter().any(|n| self.inside(n)) => {
+                    self.skip(crate::Uncarried::Drawing, *span);
+                }
                 _ => {}
             }
         }
@@ -348,6 +427,13 @@ impl Walk<'_> {
                         self.scopes.push(name.unwrap_or_default());
                     } else if label == *end {
                         self.scopes.pop();
+                    }
+                }
+                if !self.in_artifact() {
+                    if content.is::<EquationElem>() {
+                        self.skip(crate::Uncarried::Equation, content.span());
+                    } else if matches!(content.elem().name(), "table" | "grid") && !self.inside("table") && !self.inside("grid") {
+                        self.skip(crate::Uncarried::Table, content.span());
                     }
                 }
                 if let Some(loc) = content.location() {
@@ -372,11 +458,31 @@ impl Walk<'_> {
             }
             return;
         }
-        // The innermost paragraph, heading or list item's body is the unit; failing that, a
-        // labelled target.
+        // A footnote: its number (in a `Label` marker), in the text or in the note at the foot
+        // of the page, is the footnote's number in Word; the rest of the note is its text. A
+        // footnote that refers to another one keeps its number as text.
+        let numbering = matches!(tag, Some(PdfMarkerTagKind::Label));
+        let footnote = self.open.iter().rev().find_map(|(loc, c)| {
+            if let Some(entry) = c.to_packed::<FootnoteEntry>() {
+                entry.note.location().map(|l| (l, true))
+            } else {
+                c.to_packed::<FootnoteElem>().filter(|f| !f.is_ref()).map(|_| (*loc, false))
+            }
+        });
+        let (note, in_note) = match footnote {
+            Some((loc, in_entry)) => {
+                let n = self.note_index(loc);
+                (numbering.then_some(n), in_entry.then_some(n))
+            }
+            None => (None, None),
+        };
+        // The innermost paragraph, heading, list item's body, table cell, footnote or equation
+        // set apart is the unit; failing that, a labelled target.
         let body = |c: &Content| c.to_packed::<PdfMarkerTag>().is_some_and(|t| matches!(t.kind, PdfMarkerTagKind::ListItemBody));
+        let display = |c: &Content| c.to_packed::<EquationElem>().is_some_and(|e| e.block.get(StyleChain::default()));
         let unit = self.open.iter().rev()
-            .find(|(_, c)| c.is::<ParElem>() || c.is::<HeadingElem>() || body(c) || self.target_of(c).is_some())
+            .find(|(_, c)| c.is::<ParElem>() || c.is::<HeadingElem>() || body(c) || c.is::<FootnoteEntry>() || display(c)
+                || c.elem().name() == "cell" || self.target_of(c).is_some())
             .map(|(loc, _)| UnitKey::Element(*loc));
         let lists: Vec<&(Location, Content)> = self.open.iter().filter(|(_, c)| matches!(c.elem().name(), "list" | "enum")).collect();
         let list = match (self.marker.take(), lists.first(), lists.last()) {
@@ -396,7 +502,8 @@ impl Walk<'_> {
             }
             UnitKey::Loose(self.loose)
         });
-        let target = self.open.iter().rev().find_map(|(_, c)| self.target_of(c));
+        let target = if in_note.is_some() { None } else { self.current_target() };
+        let inline = note.is_some() || self.inside("equation");
         let font = item.font.font();
         let info = font.info();
         let fill = match &item.fill {
@@ -415,9 +522,8 @@ impl Walk<'_> {
             }
         }
         let cap = item.font.metrics().cap_height.at(item.size).to_pt();
-        let place = self.main.map_or_else(Vec::new, |main| sources(item, main));
-        let inside = |name: &str| self.open.iter().any(|(_, c)| c.elem().name() == name);
-        let (underline, strike) = (inside("underline"), inside("strike"));
+        let place = self.main.filter(|_| self.places).map_or_else(Vec::new, |main| sources(item, main));
+        let (underline, strike) = (self.inside("underline"), self.inside("strike"));
         let small_caps = self.small_caps.of(item);
         self.pieces.push(Piece {
             unit, target, scope: self.scopes.last().cloned(), page: self.page, at: at_point, width: visible,
@@ -425,6 +531,7 @@ impl Walk<'_> {
             family: info.family.clone(), size: item.size.to_pt(),
             italic: info.variant.style != FontStyle::Normal, bold: info.variant.weight.to_number() >= 600,
             fill, small_caps, underline, strike, text: item.text.to_string(), list, sources: place,
+            note, in_note, inline,
         });
     }
 }
@@ -465,11 +572,11 @@ pub(crate) fn word_metrics(font: &typst::text::FontInstance, size: f64, cap: f64
     Metrics { ascent: ascent / per_em * size, descent: descent / per_em * size, cap }
 }
 
-fn walk<'a>(document: &PagedDocument, options: &'a Options, main: Option<&'a Source>) -> Walk<'a> {
+fn walk<'a>(document: &PagedDocument, options: &'a Options, main: Option<&'a Source>, places: bool) -> Walk<'a> {
     let mut walk = Walk {
         targets: &options.targets, scope_labels: options.scope.as_ref(), scopes: Vec::new(),
-        open: Vec::new(), pieces: Vec::new(), page: 0, loose: 0, blocks: Vec::new(), main,
-        small_caps: crate::fonts::SmallCaps::default(), marker: None, lists: Vec::new(),
+        open: Vec::new(), pieces: Vec::new(), page: 0, loose: 0, blocks: Vec::new(), main, places,
+        small_caps: crate::fonts::SmallCaps::default(), marker: None, lists: Vec::new(), notes: Vec::new(), skipped: Vec::new(),
     };
     for (n, page) in document.pages().iter().enumerate() {
         walk.page = n;
@@ -482,17 +589,19 @@ fn walk<'a>(document: &PagedDocument, options: &'a Options, main: Option<&'a Sou
 /// page numbers are left out: they belong to the page, not to a target. Each page's body area
 /// is guessed from what's on it (see `measure_in` for when it's known).
 pub fn measure(document: &PagedDocument, options: &Options) -> Vec<Unit> {
-    let walk = walk(document, options, None);
-    let units = group(walk.pieces);
+    let walk = walk(document, options, None, false);
+    let units = group_all(walk.pieces);
     let areas = areas(&units, &walk.blocks, document.pages().len());
     units.into_iter().map(|mut u| { u.area = areas[u.page]; u }).collect()
 }
 
-/// As `measure`, with each page's body area given (by its index). With `main`, the source file
-/// the document was compiled from, each run also says where its characters came from in it.
-pub fn measure_in(document: &PagedDocument, options: &Options, area: impl Fn(usize) -> Area, main: Option<&Source>) -> Vec<Unit> {
-    let units = group(walk(document, options, main).pieces);
-    units.into_iter().map(|mut u| { u.area = area(u.page); u }).collect()
+/// As `measure`, with each page's body area given (by its index), and what can't be carried,
+/// with where in `main`, the source file the document was compiled from, it came from. With
+/// `places`, each run also says where its characters came from in it.
+pub fn measure_in(document: &PagedDocument, options: &Options, area: impl Fn(usize) -> Area, main: &Source, places: bool) -> Measured {
+    let walk = walk(document, options, Some(main), places);
+    let units = group_all(walk.pieces).into_iter().map(|mut u| { u.area = area(u.page); u }).collect();
+    Measured { units, skipped: walk.skipped }
 }
 
 /// A soft hyphen: what Typst sets as the hyphen it adds where it breaks a word.
@@ -509,7 +618,7 @@ pub(crate) fn wraps_after(text: &str) -> bool {
 fn run_of(p: &Piece) -> Run {
     Run {
         text: String::new(), family: p.family.clone(), size: p.size, italic: p.italic, bold: p.bold, fill: p.fill.clone(),
-        small_caps: p.small_caps, underline: p.underline, strike: p.strike, at: Vec::new(),
+        small_caps: p.small_caps, underline: p.underline, strike: p.strike, at: Vec::new(), note: p.note,
     }
 }
 
@@ -574,6 +683,7 @@ fn most_common(values: impl Iterator<Item = f64>) -> Option<f64> {
 /// differ); its top is the commonest top of a page's first line.
 fn areas(units: &[Unit], blocks: &[(usize, f64, f64)], pages: usize) -> Vec<Area> {
     let width = most_common(blocks.iter().map(|b| b.2)).unwrap_or(0.0);
+    let units: Vec<&Unit> = units.iter().filter(|u| u.note.is_none()).collect();
     let top = most_common(units.iter().filter(|u| u.first_on_page && u.continues).map(|u| u.lines[0].top))
         .or_else(|| most_common(units.iter().filter(|u| u.first_on_page).map(|u| u.lines[0].top)))
         .unwrap_or(0.0);
@@ -588,6 +698,38 @@ fn areas(units: &[Unit], blocks: &[(usize, f64, f64)], pages: usize) -> Vec<Area
         let left = lefts[p].or_else(|| p.checked_sub(2).and_then(|q| lefts[q])).or_else(|| lefts.get(p + 2).copied().flatten()).unwrap_or(0.0);
         Area { left, top, right: left + width, bottom: f64::INFINITY }
     }).collect()
+}
+
+/// The body's units, then the footnotes': each in the order their first piece was found, and
+/// each on its own, so a page's footnotes don't come between a paragraph and its rest on the
+/// next page.
+fn group_all(pieces: Vec<Piece>) -> Vec<Unit> {
+    let (notes, body): (Vec<Piece>, Vec<Piece>) = pieces.into_iter().partition(|p| p.in_note.is_some());
+    let mut units = group(body);
+    units.extend(group(notes));
+    units
+}
+
+/// Puts each piece set off its line (see `Piece::inline`) on the baseline of the nearest piece
+/// that isn't, before or after it in reading order; when none is, on the largest piece's.
+fn snap(pieces: &mut [Piece]) {
+    let set: Vec<Option<f64>> = pieces.iter().map(|p| (!p.inline).then(|| p.at.y.to_pt())).collect();
+    let fallback = pieces.iter().max_by(|a, b| a.size.total_cmp(&b.size)).map(|p| p.at.y);
+    for i in 0..pieces.len() {
+        if !pieces[i].inline {
+            continue;
+        }
+        let y = pieces[i].at.y.to_pt();
+        let before = set[..i].iter().rev().find_map(|x| *x);
+        let after = set[i + 1..].iter().find_map(|x| *x);
+        let nearest = match (before, after) {
+            (Some(b), Some(a)) => Some(if (b - y).abs() <= (a - y).abs() { b } else { a }),
+            (b, a) => b.or(a),
+        };
+        if let Some(to) = nearest.map(typst::layout::Abs::pt).or(fallback) {
+            pieces[i].at.y = to;
+        }
+    }
 }
 
 /// Groups pieces into units, in the order their first piece was found.
@@ -605,7 +747,8 @@ fn group(pieces: Vec<Piece>) -> Vec<Unit> {
     let mut units: Vec<Unit> = Vec::new();
     let mut last_key: Option<UnitKey> = None;
     for key in order {
-        let pieces = by_key.remove(&key).unwrap();
+        let mut pieces = by_key.remove(&key).unwrap();
+        snap(&mut pieces);
         if pieces.iter().all(|p| p.text.trim().is_empty() || p.text == "\u{ad}") {
             continue;
         }
@@ -643,6 +786,7 @@ fn group(pieces: Vec<Piece>) -> Vec<Unit> {
         let metrics = pieces.iter().find(|p| format!("{}|{:.2}", p.family, p.size) == main).map_or(Metrics::default(), |p| p.metrics);
         units.push(Unit {
             list: pieces.iter().find_map(|p| p.list.clone()),
+            note: pieces[0].in_note,
             runs,
             ends_hyphenated,
             metrics,
