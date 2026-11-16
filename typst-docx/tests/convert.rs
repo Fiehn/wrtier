@@ -512,7 +512,7 @@ fn hand_written_translations_go_over_what_was_measured() {
         styles[start..start + styles[start..].find("</w:style>").unwrap()].to_string()
     };
     let epigraph = style("Epigraph");
-    assert!(epigraph.contains("<w:ind w:left=\"1440\"/>"), "the later source wins: {epigraph}");
+    assert!(epigraph.contains("<w:ind w:left=\"1440\" w:firstLine=\"0\"/>"), "the later source wins, over what's measured an attribute at a time: {epigraph}");
     assert!(epigraph.contains("<w:i w:val=\"0\"/>"), "the earlier one's other properties stay: {epigraph}");
     assert!(epigraph.find("<w:ind").unwrap() < epigraph.find("<w:jc").unwrap_or(usize::MAX), "in Word's order");
     let normal = style("Normal");
@@ -573,7 +573,7 @@ fn the_shipped_translations_land_on_their_styles() {
     let document = &manuscript["word/document.xml"];
     assert_eq!(document.matches("<w:pgSz w:w=\"12240\" w:h=\"15840\" w:code=\"1\"/>").count(), document.matches("<w:sectPr").count());
 
-    // Paperback and A4 draft: their paper, kerning and widow control, a centred footer.
+    // Paperback and A4 draft: their paper, a centred footer.
     for (look, page, paper) in [(&PAPERBACK[..], "w:w=\"7920\" w:h=\"12240\"", "6"), (&common::A4_DRAFT[..], "w:w=\"11906\" w:h=\"16838\"", "9")] {
         let options = Options { translations: shipped(look), ..options() };
         let converted = parts(&convert_text(&source(look, &book(true), true), &options).unwrap().bytes);
@@ -584,8 +584,6 @@ fn the_shipped_translations_land_on_their_styles() {
         let measured = parts(&convert_text(&source(look, &book(true), true), &self::options()).unwrap().bytes);
         assert!(measured["word/document.xml"].contains(&format!("<w:pgSz {page}/>")), "{page}");
         let styles = &converted["word/styles.xml"];
-        let normal = style_named(styles, "Normal");
-        assert!(normal.contains("<w:widowControl/>") && normal.contains("<w:kern w:val=\"2\"/>"), "{normal}");
         assert!(style_named(styles, "footer").contains("<w:jc w:val=\"center\"/>"));
         assert!(style_named(styles, "heading 2").contains("<w:keepLines/>"), "Chapter openings' Chapter");
     }
@@ -778,4 +776,50 @@ fn what_is_in_an_element_says_so_unless_the_element_is_left_out() {
     targets.iter_mut().find(|t| t.name == "Epigraph").unwrap().role = Role::LeftOut;
     let docx = convert_text(&source(&PAPERBACK, text, true), &Options { targets, ..options() }).unwrap();
     assert!(!docx.report.iter().any(|n| matches!(n.what, What::NotCarried { .. })), "{:?}", docx.report);
+}
+
+#[test]
+fn an_included_work_with_its_own_page_is_a_section_set_its_way() {
+    // As the app writes an Inclusion whose Styles set a smaller page: its title on the book's page,
+    // then its text on its own.
+    let text = "= Before\n\n#lorem(150)\n\n#[\n\n#heading(level: 1, \"Other\")<inclusion-title>\n#metadata(\"Other\")<scope-start>\n\
+        #set page(width: 5in, height: 8in, margin: 0.75in)\n= Its chapter\n\n#lorem(250)\n\n#lorem(100)\n\n#metadata(none)<scope-end>\n]\n\n= After\n\n#lorem(150)";
+    let options = Options { translations: shipped(&PAPERBACK), ..options() };
+    let docx = convert_text(&source(&PAPERBACK, text, true), &options).unwrap();
+    let document = &parts(&docx.bytes)["word/document.xml"];
+    let sections: Vec<&str> = document.split("<w:sectPr>").skip(1).map(|s| &s[..s.find("</w:sectPr>").unwrap()]).collect();
+    let own: Vec<&&str> = sections.iter().filter(|s| s.contains("<w:pgSz w:w=\"7200\" w:h=\"11520\"/>")).collect();
+    assert!(!own.is_empty(), "the included text's pages: {sections:#?}");
+    assert!(own.iter().all(|s| s.contains("w:top=\"1080\"") && s.contains("w:left=\"1080\"")), "its margins: {own:#?}");
+    let book = "<w:pgSz w:w=\"7920\" w:h=\"12240\" w:code=\"6\"/>";
+    assert_eq!(sections.iter().filter(|s| s.contains(book)).count() + own.len(), sections.len(), "the book's Page line, on the book's pages only: {sections:#?}");
+    assert!(sections.first().unwrap().contains(book) && sections.last().unwrap().contains(book), "{sections:#?}");
+    // Its text is measured on its own page, so it fits its styles.
+    assert!(!docx.report.iter().any(|n| matches!(&n.what, What::FormattedDirectly { paragraphs } if *paragraphs > 1 && n.style.as_deref().is_some_and(|s| s.contains("Other")))), "{:?}", docx.report);
+}
+
+#[test]
+fn widow_control_and_kerning_are_typsts_own() {
+    let normal = |styles: &[&str], plain: bool| style_named(&parts(&convert_text(&source(styles, "= One\n\nText.", true), &Options { plain, ..options() }).unwrap().bytes)["word/styles.xml"], "Normal");
+    let typst = normal(&PAPERBACK, false);
+    assert!(typst.contains("<w:widowControl/>") && typst.contains("<w:kern w:val=\"2\"/>"), "{typst}");
+    let mut styles = PAPERBACK.to_vec();
+    styles.push("#set text(kerning: false, costs: (widow: 0%, orphan: 0%))");
+    let off = normal(&styles, false);
+    assert!(!off.contains("widowControl") && !off.contains("w:kern"), "a Look that turns them off: {off}");
+    let plain = normal(&PAPERBACK, true);
+    assert!(plain.contains("<w:widowControl/>") && !plain.contains("w:kern"), "a book draft: Word's widow control: {plain}");
+}
+
+#[test]
+fn block_text_fits_its_style_in_every_look() {
+    for (name, look) in [("Paperback", &PAPERBACK[..]), ("Manuscript", &MANUSCRIPT[..])] {
+        let docx = convert_text(&source(look, &book(true), true), &options()).unwrap();
+        assert!(!docx.report.iter().any(|n| n.style.as_deref().is_some_and(|s| s.starts_with("Block text"))), "{name}: {:?}", docx.report);
+        let styles = &parts(&docx.bytes)["word/styles.xml"];
+        let block = style_named(styles, "Block text");
+        let indent = |side: &str| block.split(&format!("w:{side}=\"")).nth(1).map(|r| r[..r.find('"').unwrap()].to_string());
+        assert!(indent("left").is_some() && indent("left") == indent("right"), "{name}: set in from both margins: {block}");
+        assert!(style_named(styles, "Block text, first").contains("<w:ind w:firstLine=\"0\"/>"));
+    }
 }

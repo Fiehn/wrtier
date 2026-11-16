@@ -17,7 +17,13 @@
 //! under a heading above it) as long as no style has that name in Word, and gives raw
 //! paragraph, run or section properties for it; a line starting with spaces carries
 //! on the one before. Properties may come in any order: they're put in Word's. Several sources
-//! are given in stacking order, and a later one wins, one property element at a time.
+//! are given in stacking order, and a later one wins.
+//!
+//! A property goes over what's under it (measured, or from an earlier source) one attribute at
+//! a time: `<w:spacing w:line="480"/>` changes the line spacing and keeps the measured space
+//! before and after. An attribute replaces its counterpart too (`w:hanging` the `w:firstLine`).
+//! A property with no attributes (`<w:b/>`, on) or with child elements (`<w:tabs>`) replaces
+//! what's under it whole.
 
 /// A source that may hold a block of translations, and where it came from (handed back in the
 /// report, uninterpreted).
@@ -192,7 +198,7 @@ pub(crate) fn merged(translations: &[Translation]) -> Vec<(String, Vec<Property>
             for p in entry.properties {
                 let list = &mut out[at].1;
                 match list.iter_mut().find(|q| q.name == p.name && q.kind == p.kind) {
-                    Some(q) => *q = p,
+                    Some(q) => q.xml = over(&q.xml, &p.xml),
                     None => list.push(p),
                 }
             }
@@ -207,12 +213,49 @@ pub(crate) fn overlay(generated: Vec<(String, String)>, hand: &[&Property], orde
     let mut all = generated;
     for p in hand {
         match all.iter_mut().find(|(n, _)| *n == p.name) {
-            Some(slot) => slot.1 = p.xml.clone(),
+            Some(slot) => slot.1 = over(&slot.1, &p.xml),
             None => all.push((p.name.clone(), p.xml.clone())),
         }
     }
     all.sort_by_key(|(n, _)| order.iter().position(|o| o == n).unwrap_or(usize::MAX));
     all.into_iter().map(|(_, x)| x).collect()
+}
+
+/// Attributes that say the same thing another way, so one replaces the other.
+const COUNTERPARTS: &[(&str, &str)] = &[
+    ("firstLine", "hanging"), ("firstLineChars", "hangingChars"), ("left", "start"), ("right", "end"),
+    ("leftChars", "startChars"), ("rightChars", "endChars"),
+];
+
+/// Property element `top` over `under` (both one element of the same name), one attribute at a
+/// time (see the module's documentation); `top` whole when it has no attributes, has children,
+/// or either isn't a lone element with attributes only in Word's namespace.
+pub(crate) fn over(under: &str, top: &str) -> String {
+    let wrap = |xml: &str| format!("<r xmlns:w=\"{W}\">{xml}</r>");
+    let (under_xml, top_xml) = (wrap(under), wrap(top));
+    let (Ok(a), Ok(b)) = (roxmltree::Document::parse(&under_xml), roxmltree::Document::parse(&top_xml)) else { return top.to_string() };
+    let lone = |doc: &roxmltree::Document| {
+        let mut elements = doc.root_element().children().filter(|n| n.is_element());
+        let first = elements.next()?;
+        let plain = elements.next().is_none() && !first.has_children()
+            && first.attributes().all(|at| at.namespace() == Some(W));
+        plain.then(|| (first.tag_name().name().to_string(), first.attributes().map(|at| (at.name().to_string(), at.value().to_string())).collect::<Vec<_>>()))
+    };
+    let (Some((name, mut attributes)), Some((top_name, top_attributes))) = (lone(&a), lone(&b)) else { return top.to_string() };
+    if name != top_name || top_attributes.is_empty() {
+        return top.to_string();
+    }
+    for (key, value) in top_attributes {
+        let other = COUNTERPARTS.iter().find_map(|(x, y)| if *x == key { Some(*y) } else if *y == key { Some(*x) } else { None });
+        attributes.retain(|(k, _)| Some(k.as_str()) != other);
+        match attributes.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = value,
+            None => attributes.push((key, value)),
+        }
+    }
+    let escape = |v: &str| v.replace('&', "&amp;").replace('<', "&lt;").replace('"', "&quot;");
+    let attributes: String = attributes.iter().map(|(k, v)| format!(" w:{k}=\"{}\"", escape(v))).collect();
+    format!("<w:{name}{attributes}/>")
 }
 
 #[cfg(test)]
@@ -245,6 +288,21 @@ mod tests {
         assert!(problems[2].starts_with("line 5: <w:frobnicate>"));
         assert!(problems[3].starts_with("line 6: <w:jc> isn't a page property"));
         assert!(super::problems("#set text(size: 11pt)").is_empty(), "no block, no problems");
+    }
+
+    #[test]
+    fn a_property_goes_over_another_one_attribute_at_a_time() {
+        let spacing = "<w:spacing w:before=\"0\" w:after=\"170\" w:line=\"264\" w:lineRule=\"auto\"/>";
+        assert_eq!(over(spacing, "<w:spacing w:line=\"480\"/>"), "<w:spacing w:before=\"0\" w:after=\"170\" w:line=\"480\" w:lineRule=\"auto\"/>");
+        assert_eq!(over("<w:ind w:left=\"0\" w:firstLine=\"264\"/>", "<w:ind w:hanging=\"360\"/>"), "<w:ind w:left=\"0\" w:hanging=\"360\"/>", "a hanging indent is no first-line indent");
+        assert_eq!(over("<w:b w:val=\"0\"/>", "<w:b/>"), "<w:b/>", "no attributes: on, whole");
+        let tabs = "<w:tabs><w:tab w:val=\"left\" w:pos=\"720\"/></w:tabs>";
+        assert_eq!(over("<w:tabs><w:tab w:val=\"center\" w:pos=\"100\"/></w:tabs>", tabs), tabs, "children: whole");
+        assert_eq!(over("<w:rFonts w:ascii=\"A\" w:hAnsi=\"A\"/>", "<w:rFonts w:ascii=\"B &amp; C\"/>"), "<w:rFonts w:ascii=\"B &amp; C\" w:hAnsi=\"A\"/>");
+        // From stacked sources too.
+        let a = Translation { origin: None, source: "/* .docx\nNormal: <w:spacing w:line=\"480\" w:lineRule=\"auto\"/>\n*/".into() };
+        let b = Translation { origin: None, source: "/* .docx\nNormal: <w:spacing w:after=\"0\"/>\n*/".into() };
+        assert_eq!(merged(&[a, b])[0].1[0].xml, "<w:spacing w:line=\"480\" w:lineRule=\"auto\" w:after=\"0\"/>");
     }
 
     #[test]

@@ -90,6 +90,8 @@ pub struct Options {
     /// Labels of two `metadata` markers bracketing a stretch set its own way (see
     /// `measure::Options::scope`); its text gets styles of its own, named after the start
     /// marker's value.
+    /// A stretch may set its own page: the document then also holds `probe::scope_snippet()`
+    /// for the end marker, and the stretch's pages are sections of their own.
     pub scope: Option<(String, String)>,
     pub metadata: Metadata,
     /// Keep only the structure and emphasis: each target keeps its named style, but the styles
@@ -155,14 +157,15 @@ pub struct Docx {
 /// The `.docx` of a compiled document. `main`: the source file it was compiled from, which
 /// comments are anchored in.
 pub fn convert(document: &PagedDocument, main: &Source, options: &Options) -> Result<Docx, String> {
-    let setup = probe::read(document)
+    let setups = probe::read_all(document, if options.plain { None } else { options.scope.as_ref() })
         .ok_or_else(|| "the document has no probe (typst_docx::probe::snippet())".to_string())??;
+    let setup = &setups.main;
     let measuring = measure::Options {
         targets: options.targets.iter().map(|t| measure::Target { name: t.name.clone(), selector: t.selector.clone() }).collect(),
         scope: if options.plain { None } else { options.scope.clone() },
     };
-    let measured = measure::measure_in(document, &measuring, |page| setup.area(page), main, !options.comments.is_empty());
-    let mut laid = styles::lay_out(&measured.units, &options.targets, &setup);
+    let measured = measure::measure_in(document, &measuring, |page, scope| setups.of(scope).area(page), main, !options.comments.is_empty());
+    let mut laid = styles::lay_out(&measured.units, &options.targets, setup);
     if options.plain {
         styles::make_plain(&mut laid);
     }
@@ -170,8 +173,21 @@ pub fn convert(document: &PagedDocument, main: &Source, options: &Options) -> Re
         furniture::plain(furniture::Look { family: "Times New Roman".into(), size: 12.0, italic: false, bold: false, fill: "000000".into(), small_caps: false })
     } else {
         let pages = document.pages().len();
-        let areas: Vec<measure::Area> = (0..pages).map(|p| setup.area(p)).collect();
-        furniture::read(document, &areas, &ooxml::section_starts(&laid, pages), &styles::titles(&laid, pages))
+        // A page is set as the text it starts with is (a page with none, as the one before).
+        let mut scopes: Vec<Option<&str>> = vec![None; pages];
+        let mut seen = vec![false; pages];
+        for u in measured.units.iter().filter(|u| u.note.is_none() && u.page < pages) {
+            if !seen[u.page] {
+                (seen[u.page], scopes[u.page]) = (true, u.scope.as_deref());
+            }
+        }
+        for p in 1..pages {
+            if !seen[p] {
+                scopes[p] = scopes[p - 1];
+            }
+        }
+        let areas: Vec<measure::Area> = (0..pages).map(|p| setups.of(scopes[p]).area(p)).collect();
+        furniture::read(document, &areas, &ooxml::section_starts(&laid, &setups, pages), &styles::titles(&laid, pages))
     };
     let (families, not_embedded) = if options.embed_fonts && !options.plain {
         fonts::collect(document, options.metadata.seed)
@@ -193,7 +209,7 @@ pub fn convert(document: &PagedDocument, main: &Source, options: &Options) -> Re
         laid.notes.push(Note { style: None, origin: target.and_then(|t| t.origin.clone()), what: What::NotCarried { what: s.what, at: s.at } });
     }
     let hands = if options.plain { Vec::new() } else { translate::merged(&options.translations) };
-    let (parts, unplaced) = ooxml::parts(&laid, &setup, &options.metadata, &options.comments, &furniture, &families, &hands);
+    let (parts, unplaced) = ooxml::parts(&laid, &setups, &options.metadata, &options.comments, &furniture, &families, &hands);
     laid.notes.extend(unplaced);
     let bytes = ooxml::zip(&parts)?;
     Ok(Docx { bytes, report: laid.notes })

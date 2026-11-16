@@ -1439,7 +1439,8 @@ mod tests {
 
         let offers = vault.default_offers(3000).unwrap();
         assert_eq!(offers, [library::Offer { path: "styles/Book text.typ".into(), kind: library::Kind::Style, title: "Book text".into() }]);
-        assert_eq!(vault.vault_doc.field(DEFAULTS_RECORD, "Manuscript.typ"), Some("2"), "the same already: recorded");
+        let version = |path: &str| library::DEFAULTS.iter().find(|(p, _, _)| *p == path).unwrap().1.to_string();
+        assert_eq!(vault.vault_doc.field(DEFAULTS_RECORD, "Manuscript.typ"), Some(version("Manuscript.typ").as_str()), "the same already: recorded");
         assert_eq!(vault.vault_doc.field(DEFAULTS_RECORD, "elements/part.typ"), Some("1"), "deleted: left as it was");
         assert!(!styles.join("elements/part.typ").exists());
 

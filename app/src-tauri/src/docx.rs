@@ -71,11 +71,12 @@ pub fn prepare(input: &crate::vault::ExportInput, name: &str, plain: bool, embed
 }
 
 /// The header with `typst-docx`'s probe at its end, after the Look and the extra Styles, so it
-/// reads the settings the Work's text is set in.
+/// reads the settings the Work's text is set in; and at the end of each Inclusion with Styles of
+/// its own, which may set its own page.
 pub fn with_probe(header: &Header) -> Header {
     let mut h = header.clone();
     let at = h.text.rfind(HEADER_END).unwrap_or(h.text.len());
-    h.text.insert_str(at, &typst_docx::probe::snippet());
+    h.text.insert_str(at, &(typst_docx::probe::snippet() + &typst_docx::probe::scope_snippet(crate::vault::SCOPE_END)));
     h
 }
 

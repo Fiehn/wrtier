@@ -125,7 +125,10 @@ pub fn source(styles: &[&str], text: &str, probe: bool) -> String {
     for e in ELEMENTS { s.push_str(e); s.push('\n'); }
     s.push_str("#let wrtier-look-1(doc) = [\n");
     for st in styles { s.push_str(st); s.push('\n'); }
-    if probe { s.push_str(&typst_docx::probe::snippet()); }
+    if probe {
+        s.push_str(&typst_docx::probe::snippet());
+        s.push_str(&typst_docx::probe::scope_snippet("scope-end"));
+    }
     s.push_str("#doc\n]\n#show: wrtier-look-1\n");
     s.push_str(text);
     s

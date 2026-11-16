@@ -11,7 +11,7 @@ use crate::fonts::Family;
 use crate::furniture::{Format, Furniture, Lines, Look, Piece, Side};
 use crate::translate::{self, Kind as TKind, Property};
 use crate::measure::{Align, Run};
-use crate::probe::Setup;
+use crate::probe::{Setup, Setups};
 use crate::styles::{Kind, Laid, ListItem, Props};
 use crate::{Comment, Metadata, Note, What};
 
@@ -377,8 +377,11 @@ pub(crate) struct Sections<'a> {
 }
 
 /// Section `k`'s properties; `next_page` for a section that ends where the next page begins.
-/// With no page given (`plain`), Word's own page.
-fn sect_pr(setup: &Setup, k: usize, next_page: bool, plain: bool, sections: &Sections) -> String {
+/// With no page given (`plain`), Word's own page. `own`: the page of a stretch set its own way,
+/// which the hand-written page properties (the document's) don't go over.
+fn sect_pr(setups: &Setups, own: Option<&Setup>, k: usize, next_page: bool, plain: bool, sections: &Sections) -> String {
+    let setup = own.unwrap_or(&setups.main);
+    let hand: &[&Property] = if own.is_some() { &[] } else { &sections.page };
     let refs = if k == 0 { sections.refs.as_str() } else { "" };
     let numbering = match sections.furniture.numbering.get(k) {
         Some((start, format)) if start.is_some() || *format != Format::Decimal => {
@@ -394,7 +397,7 @@ fn sect_pr(setup: &Setup, k: usize, next_page: bool, plain: bool, sections: &Sec
     };
     let title = if sections.title_page { "<w:titlePg/>" } else { "" };
     let items = |list: Vec<(&str, String)>| translate::overlay(
-        list.into_iter().filter(|(_, x)| !x.is_empty()).map(|(n, x)| (n.to_string(), x)).collect(), &sections.page, translate::SECTION);
+        list.into_iter().filter(|(_, x)| !x.is_empty()).map(|(n, x)| (n.to_string(), x)).collect(), hand, translate::SECTION);
     if plain {
         return format!("<w:sectPr>{refs}{}</w:sectPr>", items(vec![("pgNumType", numbering), ("titlePg", title.to_string())]));
     }
@@ -418,15 +421,37 @@ fn opens_page(laid: &Laid, resolved: &[Props], i: usize) -> bool {
     i > 0 && !laid.plain && p.direct.page_break.or(resolved[p.style].page_break) == Some(true)
 }
 
-/// For each page of `pages`, whether a section starts on it (the first page always does).
-pub(crate) fn section_starts(laid: &Laid, pages: usize) -> Vec<bool> {
+/// The page paragraph `i`'s text is set on when it's its own (see `Setups::own`).
+fn own_page<'a>(laid: &Laid, setups: &'a Setups, i: usize) -> Option<&'a Setup> {
+    if laid.plain {
+        return None;
+    }
+    setups.own(laid.styles[laid.paras[i].style].key.scope.as_deref())
+}
+
+/// For each paragraph, whether it starts a section: a body paragraph that opens a page, or whose
+/// page is set otherwise than the one before's.
+fn section_breaks(laid: &Laid, setups: &Setups) -> Vec<bool> {
     let resolved: Vec<Props> = (0..laid.styles.len()).map(|s| laid.resolved(s)).collect();
+    let mut breaks = vec![false; laid.paras.len()];
+    let mut before: Option<usize> = None;
+    for i in (0..laid.paras.len()).filter(|i| laid.paras[*i].note.is_none()) {
+        if let Some(b) = before {
+            breaks[i] = opens_page(laid, &resolved, i) || own_page(laid, setups, i) != own_page(laid, setups, b);
+        }
+        before = Some(i);
+    }
+    breaks
+}
+
+/// For each page of `pages`, whether a section starts on it (the first page always does).
+pub(crate) fn section_starts(laid: &Laid, setups: &Setups, pages: usize) -> Vec<bool> {
     let mut starts = vec![false; pages];
     if let Some(first) = starts.first_mut() {
         *first = true;
     }
-    for i in 0..laid.paras.len() {
-        if opens_page(laid, &resolved, i) && let Some(page) = starts.get_mut(laid.paras[i].page) {
+    for (i, starts_one) in section_breaks(laid, setups).into_iter().enumerate() {
+        if starts_one && let Some(page) = starts.get_mut(laid.paras[i].page) {
             *page = true;
         }
     }
@@ -526,20 +551,25 @@ fn footnotes_xml(laid: &Laid, marks: &BTreeMap<Place, String>, notes: &[usize]) 
     Some(x)
 }
 
-fn document_xml(laid: &Laid, setup: &Setup, marks: &BTreeMap<Place, String>, sections: &Sections, notes: &[usize]) -> String {
+fn document_xml(laid: &Laid, setups: &Setups, marks: &BTreeMap<Place, String>, sections: &Sections, notes: &[usize]) -> String {
     let resolved: Vec<Props> = (0..laid.styles.len()).map(|s| laid.resolved(s)).collect();
+    let breaks = section_breaks(laid, setups);
     // Each paragraph's properties and content, apart, so a section break can go in before it.
     let mut paras: Vec<(String, Option<String>, String)> = Vec::new();
     let mut section = 0;
-    for p in (0..laid.paras.len()).filter(|p| laid.paras[*p].note.is_none()) {
+    let body: Vec<usize> = (0..laid.paras.len()).filter(|p| laid.paras[*p].note.is_none()).collect();
+    // The page the section being written is set on, when it's a stretch's own.
+    let mut own = body.first().and_then(|p| own_page(laid, setups, *p));
+    for p in body {
         let content = para_content(laid, p, &resolved, marks, notes);
         // Word 2013 and later drop the space before a paragraph at the top of a page after a
         // page break, but not at the start of a section: so a paragraph that opens a page
         // (its style still says so, for paragraphs added in Word) begins a section, and keeps
         // its distance from the top of the page.
-        if opens_page(laid, &resolved, p) && let Some(before) = paras.last_mut() {
-            before.1 = Some(sect_pr(setup, section, true, false, sections));
+        if breaks[p] && let Some(before) = paras.last_mut() {
+            before.1 = Some(sect_pr(setups, own, section, true, false, sections));
             section += 1;
+            own = own_page(laid, setups, p);
         }
         paras.push((wrap("pPr", para_props(laid, p).into_iter().map(|(_, x)| x).collect()), None, content));
     }
@@ -558,7 +588,7 @@ fn document_xml(laid: &Laid, setup: &Setup, marks: &BTreeMap<Place, String>, sec
         let start = marks.get(&(0, 0, 0)).cloned().unwrap_or_default();
         let _ = write!(body, "<w:p>{start}</w:p>");
     }
-    format!("{HEAD}<w:document xmlns:w=\"{W}\" xmlns:r=\"{R}\"><w:body>{body}{}</w:body></w:document>", sect_pr(setup, section, false, laid.plain, sections))
+    format!("{HEAD}<w:document xmlns:w=\"{W}\" xmlns:r=\"{R}\"><w:body>{body}{}</w:body></w:document>", sect_pr(setups, own, section, false, laid.plain, sections))
 }
 
 /// The most used look among a region's pieces.
@@ -707,8 +737,19 @@ fn styles_xml(laid: &Laid, setup: &Setup, furniture: &Furniture, hands: &[(Strin
             }
             items
         };
-        let paragraph = with_forced(ppr_items(&own, None, outline), ppr_items(&resolved, None, outline));
-        let run = with_forced(rpr_items(&own, None), rpr_items(&resolved, None));
+        let mut paragraph = with_forced(ppr_items(&own, None, outline), ppr_items(&resolved, None, outline));
+        let mut run = with_forced(rpr_items(&own, None), rpr_items(&resolved, None));
+        if s.kind == Kind::Normal {
+            // What Typst does to every paragraph, which Word does only when told: avoiding
+            // widows and orphans, and kerning (from 1 pt up). A book draft keeps Word's
+            // widow control.
+            if setup.widows || laid.plain {
+                paragraph.push(("widowControl".into(), "<w:widowControl/>".into()));
+            }
+            if setup.kerning && !laid.plain {
+                run.push(("kern".into(), "<w:kern w:val=\"2\"/>".into()));
+            }
+        }
         x.push_str(&wrap("pPr", translate::overlay(paragraph, &hand(hands, |t| laid.answers_to(i, t), TKind::Paragraph), translate::PARAGRAPH)));
         x.push_str(&wrap("rPr", translate::overlay(run, &hand(hands, |t| laid.answers_to(i, t), TKind::Run), translate::RUN)));
         x.push_str("</w:style>");
@@ -900,7 +941,8 @@ fn font_table(families: &[Family]) -> (String, String, Vec<(String, Vec<u8>)>) {
     (table, rels, files)
 }
 
-pub(crate) fn parts(laid: &Laid, setup: &Setup, meta: &Metadata, comments: &[Comment], furniture: &Furniture, families: &[Family], hands: &[(String, Vec<Property>)]) -> (Vec<(String, Vec<u8>)>, Vec<Note>) {
+pub(crate) fn parts(laid: &Laid, setups: &Setups, meta: &Metadata, comments: &[Comment], furniture: &Furniture, families: &[Family], hands: &[(String, Vec<Property>)]) -> (Vec<(String, Vec<u8>)>, Vec<Note>) {
+    let setup = &setups.main;
     let anchors = anchors(laid, comments);
     let mut notes = Vec::new();
     let mut threads: Vec<Thread> = Vec::new();
@@ -962,7 +1004,7 @@ pub(crate) fn parts(laid: &Laid, setup: &Setup, meta: &Metadata, comments: &[Com
     let mut parts: Vec<(String, String)> = vec![
         ("[Content_Types].xml".to_string(), content_types(any, &furniture_parts, embedded, numbering.is_some(), footnotes.is_some())),
         ("_rels/.rels".to_string(), format!("{HEAD}{PACKAGE_RELS}")),
-        ("word/document.xml".to_string(), document_xml(laid, setup, &marks, &sections, &footnote_ids)),
+        ("word/document.xml".to_string(), document_xml(laid, setups, &marks, &sections, &footnote_ids)),
         ("word/styles.xml".to_string(), styles_xml(laid, setup, furniture, hands, footnotes.is_some())),
         ("word/settings.xml".to_string(), settings_xml(setup, laid.plain, odd_and_even, embedded, format)),
         ("word/_rels/document.xml.rels".to_string(), document_rels(any, &furniture_parts, embedded, numbering.is_some(), footnotes.is_some())),

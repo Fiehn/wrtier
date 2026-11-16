@@ -459,6 +459,14 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
             continue;
         }
         let mut props = measured(&mine, laid.styles[s].kind);
+        if laid.styles[s].key.first {
+            // The flush variant is flush, even when all it has are one-line paragraphs (which
+            // show no indent), and those say nothing about alignment: it keeps its base's.
+            props.first_line = Some(0.0);
+            if mine.iter().all(|u| u.align() == Align::Unknown) {
+                props.align = None;
+            }
+        }
         if laid.styles[s].key.list {
             // Where a list item's lines start is its list's numbering's to say.
             (props.left, props.first_line) = (None, None);

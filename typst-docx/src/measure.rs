@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 use typst::foundations::{Content, Repr, StyleChain, Value};
 use typst::introspection::MetadataElem;
 use typst::introspection::{Location, Tag};
-use typst::layout::{Frame, FrameItem, FrameKind, Point};
+use typst::layout::{BlockElem, Frame, FrameItem, FrameKind, Point};
 use typst::math::EquationElem;
 use typst::model::{FootnoteElem, FootnoteEntry, HeadingElem, ParElem};
 use typst::pdf::{PdfMarkerTag, PdfMarkerTagKind};
@@ -179,6 +179,9 @@ pub struct Unit {
     /// It's (some of) the text of footnote n (see `Run::note`), set at the foot of its page,
     /// not part of the body.
     pub note: Option<usize>,
+    /// Where the block it's in ends on the right, inside its inset, in points from the page's
+    /// left: how far in its lines may go, which ragged lines don't show.
+    pub right_bound: Option<f64>,
 }
 
 /// Something on the pages the `.docx` doesn't carry as it was set (see `crate::Uncarried`).
@@ -256,7 +259,11 @@ impl Unit {
 
     /// From the right edge in to where justified lines end.
     pub fn right_indent(&self) -> Option<f64> {
-        (self.align() == Align::Justified).then(|| self.area.right - self.right_edge())
+        if self.align() == Align::Justified {
+            return Some(self.area.right - self.right_edge());
+        }
+        // Ragged lines end anywhere: the block they're in says where they may go.
+        self.right_bound.map(|b| self.area.right - b).filter(|r| *r > TOL)
     }
 
     /// Where lines but the last end: the area's right edge when one ends there, else where most
@@ -310,6 +317,8 @@ struct Piece {
     /// Set off its line (a superscript in an equation, a footnote's number): it's on the line
     /// of the text nearest it, whatever its own baseline.
     inline: bool,
+    /// See `Unit::right_bound`.
+    right_bound: Option<f64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -332,6 +341,8 @@ struct Walk<'a> {
     loose: usize,
     /// Hard groups (blocks) in the body, per page: (left, width).
     blocks: Vec<(usize, f64, f64)>,
+    /// The hard groups (blocks) being walked, innermost last: where each ends on the right.
+    rights: Vec<f64>,
     /// The main source file, to say where things came from in it.
     main: Option<&'a Source>,
     /// Whether each character's place in `main` is wanted (see `Run::at`).
@@ -396,10 +407,16 @@ impl Walk<'_> {
             match item {
                 FrameItem::Group(group) => {
                     let t = group.transform;
-                    if group.frame.kind() == FrameKind::Hard && !self.in_artifact() {
+                    let hard = group.frame.kind() == FrameKind::Hard && !self.in_artifact();
+                    let left = at + Point::new(t.tx, t.ty);
+                    if hard {
                         self.blocks.push((self.page, at.x.to_pt(), group.frame.width().to_pt()));
+                        self.rights.push(left.x.to_pt() + group.frame.width().to_pt());
                     }
-                    self.walk(&group.frame, at + Point::new(t.tx, t.ty));
+                    self.walk(&group.frame, left);
+                    if hard {
+                        self.rights.pop();
+                    }
                 }
                 FrameItem::Tag(tag) => self.tag(tag),
                 FrameItem::Text(text) if !self.in_artifact() => self.text(at, text),
@@ -525,13 +542,19 @@ impl Walk<'_> {
         let place = self.main.filter(|_| self.places).map_or_else(Vec::new, |main| sources(item, main));
         let (underline, strike) = (self.inside("underline"), self.inside("strike"));
         let small_caps = self.small_caps.of(item);
+        // A block's inset isn't a frame of its own: its lines just stop short of its right edge.
+        let size = item.size.to_pt();
+        let right_bound = self.open.iter().rev().find_map(|(_, c)| c.to_packed::<BlockElem>()).zip(self.rights.last()).map(|(block, right)| {
+            let inset = block.inset.get(StyleChain::default()).right.map_or(0.0, |r| r.abs.abs.to_pt() + r.abs.em.get() * size);
+            right - inset
+        });
         self.pieces.push(Piece {
             unit, target, scope: self.scopes.last().cloned(), page: self.page, at: at_point, width: visible,
             cap, metrics: word_metrics(&item.font, item.size.to_pt(), cap),
             family: info.family.clone(), size: item.size.to_pt(),
             italic: info.variant.style != FontStyle::Normal, bold: info.variant.weight.to_number() >= 600,
             fill, small_caps, underline, strike, text: item.text.to_string(), list, sources: place,
-            note, in_note, inline,
+            note, in_note, inline, right_bound,
         });
     }
 }
@@ -576,7 +599,7 @@ fn walk<'a>(document: &PagedDocument, options: &'a Options, main: Option<&'a Sou
     let mut walk = Walk {
         targets: &options.targets, scope_labels: options.scope.as_ref(), scopes: Vec::new(),
         open: Vec::new(), pieces: Vec::new(), page: 0, loose: 0, blocks: Vec::new(), main, places,
-        small_caps: crate::fonts::SmallCaps::default(), marker: None, lists: Vec::new(), notes: Vec::new(), skipped: Vec::new(),
+        small_caps: crate::fonts::SmallCaps::default(), marker: None, lists: Vec::new(), notes: Vec::new(), skipped: Vec::new(), rights: Vec::new(),
     };
     for (n, page) in document.pages().iter().enumerate() {
         walk.page = n;
@@ -595,12 +618,13 @@ pub fn measure(document: &PagedDocument, options: &Options) -> Vec<Unit> {
     units.into_iter().map(|mut u| { u.area = areas[u.page]; u }).collect()
 }
 
-/// As `measure`, with each page's body area given (by its index), and what can't be carried,
+/// As `measure`, with each page's body area given (by its index, and the scope of the text on
+/// it, which may set its own page), and what can't be carried,
 /// with where in `main`, the source file the document was compiled from, it came from. With
 /// `places`, each run also says where its characters came from in it.
-pub fn measure_in(document: &PagedDocument, options: &Options, area: impl Fn(usize) -> Area, main: &Source, places: bool) -> Measured {
+pub fn measure_in(document: &PagedDocument, options: &Options, area: impl Fn(usize, Option<&str>) -> Area, main: &Source, places: bool) -> Measured {
     let walk = walk(document, options, Some(main), places);
-    let units = group_all(walk.pieces).into_iter().map(|mut u| { u.area = area(u.page); u }).collect();
+    let units = group_all(walk.pieces).into_iter().map(|mut u| { u.area = area(u.page, u.scope.as_deref()); u }).collect();
     Measured { units, skipped: walk.skipped }
 }
 
@@ -787,6 +811,7 @@ fn group(pieces: Vec<Piece>) -> Vec<Unit> {
         units.push(Unit {
             list: pieces.iter().find_map(|p| p.list.clone()),
             note: pieces[0].in_note,
+            right_bound: most_common(pieces.iter().filter_map(|p| p.right_bound)),
             runs,
             ends_hyphenated,
             metrics,
