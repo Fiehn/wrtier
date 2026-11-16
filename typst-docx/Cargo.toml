@@ -10,7 +10,10 @@ publish = false  # until it's stable; check the name doesn't pass for one of Typ
 # The same Typst as the caller, pinned once in the workspace root Cargo.toml.
 typst.workspace = true
 typst-layout.workspace = true
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2"] }  # the .docx package
 
 [dev-dependencies]
 typst-kit = { workspace = true, features = ["embedded-fonts"] }  # Typst's bundled fonts, for tests
-zip = { version = "9.5", default-features = false, features = ["deflate-flate2"] }  # the font spike's sample .docx
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2"] }  # the font spike's sample .docx, reading packages back
+typst-pdf.workspace = true  # the samples' Typst PDFs, to compare with Word's
+roxmltree = "0.20"  # checking the parts are well-formed

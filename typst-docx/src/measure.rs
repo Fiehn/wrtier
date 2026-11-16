@@ -65,6 +65,37 @@ pub struct Area {
     pub left: f64,
     pub top: f64,
     pub right: f64,
+    pub bottom: f64,
+}
+
+/// A stretch of a unit's text set one way, in reading order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    /// The text as written: lines wrapped by Typst are joined again (a hyphen it added is
+    /// gone), and a forced line break is a run of its own holding just "\n".
+    pub text: String,
+    pub family: String,
+    /// In points.
+    pub size: f64,
+    pub italic: bool,
+    pub bold: bool,
+    pub fill: String,
+}
+
+/// A font's vertical measures at the size a unit is set in, in points: what Word works out a
+/// line's height from (on Windows, the `OS/2` table's Windows ascent and descent).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Metrics {
+    pub ascent: f64,
+    pub descent: f64,
+    pub cap: f64,
+}
+
+impl Metrics {
+    /// The height of one single-spaced line in Word.
+    pub fn line(&self) -> f64 {
+        self.ascent + self.descent
+    }
 }
 
 /// How a unit's lines sit between its edges.
@@ -107,6 +138,13 @@ pub struct Unit {
     pub gap_before: Option<f64>,
     /// The first 40 characters, to recognise it by.
     pub text: String,
+    /// All of its text, run by run.
+    pub runs: Vec<Run>,
+    /// Its last line ended in a hyphen Typst added, so a continuation on the next page carries
+    /// on the same word.
+    pub ends_hyphenated: bool,
+    /// The most used font's measures, at the unit's size.
+    pub metrics: Metrics,
 }
 
 /// How close two edges must be to count as the same, in points.
@@ -194,6 +232,7 @@ struct Piece {
     at: Point,
     width: f64,
     cap: f64,
+    metrics: Metrics,
     family: String,
     size: f64,
     italic: bool,
@@ -313,9 +352,10 @@ impl Walk<'_> {
                 visible = width;
             }
         }
+        let cap = item.font.metrics().cap_height.at(item.size).to_pt();
         self.pieces.push(Piece {
             unit, target, scope: self.scopes.last().cloned(), page: self.page, at, width: visible,
-            cap: item.font.metrics().cap_height.at(item.size).to_pt(),
+            cap, metrics: word_metrics(&item.font, item.size.to_pt(), cap),
             family: info.family.clone(), size: item.size.to_pt(),
             italic: info.variant.style != FontStyle::Normal, bold: info.variant.weight.to_number() >= 600,
             fill, text: item.text.to_string(),
@@ -323,9 +363,19 @@ impl Walk<'_> {
     }
 }
 
-/// Every paragraph-like unit of text in the body of the pages, in order. Headers, footers and
-/// page numbers are left out: they belong to the page, not to a target.
-pub fn measure(document: &PagedDocument, options: &Options) -> Vec<Unit> {
+/// Word's measures for a font: the `OS/2` Windows ascent and descent, which is what Word on
+/// Windows makes a single line of, falling back to the `hhea` ones.
+fn word_metrics(font: &typst::text::FontInstance, size: f64, cap: f64) -> Metrics {
+    let ttf = font.ttf();
+    let per_em = f64::from(ttf.units_per_em().max(1));
+    let (ascent, descent) = match ttf.tables().os2 {
+        Some(os2) => (f64::from(os2.windows_ascender()), f64::from(os2.windows_descender()).abs()),
+        None => (f64::from(ttf.ascender()), f64::from(ttf.descender()).abs() + f64::from(ttf.line_gap())),
+    };
+    Metrics { ascent: ascent / per_em * size, descent: descent / per_em * size, cap }
+}
+
+fn walk<'a>(document: &PagedDocument, options: &'a Options) -> Walk<'a> {
     let mut walk = Walk {
         targets: &options.targets, scope_labels: options.scope.as_ref(), scopes: Vec::new(),
         open: Vec::new(), pieces: Vec::new(), page: 0, loose: 0, blocks: Vec::new(),
@@ -334,9 +384,69 @@ pub fn measure(document: &PagedDocument, options: &Options) -> Vec<Unit> {
         walk.page = n;
         walk.walk(&page.frame, Point::zero());
     }
+    walk
+}
+
+/// Every paragraph-like unit of text in the body of the pages, in order. Headers, footers and
+/// page numbers are left out: they belong to the page, not to a target. Each page's body area
+/// is guessed from what's on it (see `measure_in` for when it's known).
+pub fn measure(document: &PagedDocument, options: &Options) -> Vec<Unit> {
+    let walk = walk(document, options);
     let units = group(walk.pieces);
     let areas = areas(&units, &walk.blocks, document.pages().len());
     units.into_iter().map(|mut u| { u.area = areas[u.page]; u }).collect()
+}
+
+/// As `measure`, with each page's body area given (by its index).
+pub fn measure_in(document: &PagedDocument, options: &Options, area: impl Fn(usize) -> Area) -> Vec<Unit> {
+    let units = group(walk(document, options).pieces);
+    units.into_iter().map(|mut u| { u.area = area(u.page); u }).collect()
+}
+
+/// A soft hyphen: what Typst sets as the hyphen it adds where it breaks a word.
+const SHY: &str = "\u{ad}";
+
+/// Whether a line ending in `text` was wrapped by Typst rather than broken by the writer: a
+/// wrapped line keeps the space it was broken at, or ends where a word may break (a hyphen
+/// or dash). A forced break (`\`) leaves neither, as Typst trims it away.
+pub(crate) fn wraps_after(text: &str) -> bool {
+    text.chars().last().is_some_and(|c| c.is_whitespace() || "-\u{2010}\u{2013}\u{2014}/".contains(c))
+}
+
+/// The unit's text, run by run, with Typst's line wrapping undone. Returns whether the last
+/// line ends in a hyphen Typst added.
+fn runs_of(pieces: &[Piece]) -> (Vec<Run>, bool) {
+    let mut runs: Vec<Run> = Vec::new();
+    let mut baseline: Option<f64> = None;
+    let mut hyphenated = false;
+    for p in pieces {
+        let y = p.at.y.to_pt();
+        let new_line = baseline.is_some_and(|b| (b - y).abs() >= 0.5);
+        if p.text == SHY {
+            hyphenated = true;
+            continue;
+        }
+        if new_line {
+            let wrapped = hyphenated || runs.last().is_some_and(|r| wraps_after(&r.text));
+            // Some languages repeat a hyphen at the start of the next line; it isn't text.
+            if hyphenated && p.text == "-" {
+                hyphenated = false;
+                continue;
+            }
+            if !wrapped {
+                runs.push(Run { text: "\n".into(), family: p.family.clone(), size: p.size, italic: p.italic, bold: p.bold, fill: p.fill.clone() });
+            }
+        }
+        hyphenated = false;
+        baseline = Some(y);
+        match runs.last_mut() {
+            Some(r) if r.text != "\n" && r.family == p.family && r.size == p.size && r.italic == p.italic && r.bold == p.bold && r.fill == p.fill => {
+                r.text.push_str(&p.text);
+            }
+            _ => runs.push(Run { text: p.text.clone(), family: p.family.clone(), size: p.size, italic: p.italic, bold: p.bold, fill: p.fill.clone() }),
+        }
+    }
+    (runs, hyphenated)
 }
 
 fn most_common(values: impl Iterator<Item = f64>) -> Option<f64> {
@@ -369,7 +479,7 @@ fn areas(units: &[Unit], blocks: &[(usize, f64, f64)], pages: usize) -> Vec<Area
     }
     (0..pages).map(|p| {
         let left = lefts[p].or_else(|| p.checked_sub(2).and_then(|q| lefts[q])).or_else(|| lefts.get(p + 2).copied().flatten()).unwrap_or(0.0);
-        Area { left, top, right: left + width }
+        Area { left, top, right: left + width, bottom: f64::INFINITY }
     }).collect()
 }
 
@@ -421,7 +531,13 @@ fn group(pieces: Vec<Piece>) -> Vec<Unit> {
         let gap_before = previous.filter(|u| u.page == page).map(|u| lines[0].baseline - u.lines.last().unwrap().baseline);
         let continues = matches!(key.0, UnitKey::Element(_)) && last_key == Some(key.0);
         let text: String = pieces.iter().map(|p| p.text.as_str()).collect::<String>().chars().take(40).collect();
+        let (runs, ends_hyphenated) = runs_of(&pieces);
+        let main = most(&|p| format!("{}|{:.2}", p.family, p.size));
+        let metrics = pieces.iter().find(|p| format!("{}|{:.2}", p.family, p.size) == main).map_or(Metrics::default(), |p| p.metrics);
         units.push(Unit {
+            runs,
+            ends_hyphenated,
+            metrics,
             target: pieces[0].target,
             after: previous.map(|u| u.target),
             continues,

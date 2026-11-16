@@ -3,61 +3,18 @@
 //! them, and prints how much each target varies.
 //! `cargo test -p typst-docx --test measuring_spike -- --nocapture`
 
+#[macro_use]
 mod common;
 
 use common::compile;
 use typst_docx::measure::{measure, summary, Options, Selector, Target};
 
-macro_rules! library { ($f:literal) => { include_str!(concat!("../../app/src-tauri/defaults/styles/", $f)) } }
-
-const ELEMENTS: [&str; 5] = [
-    library!("elements/block-text.typ"), library!("elements/dedication.typ"), library!("elements/epigraph.typ"),
-    library!("elements/part.typ"), library!("elements/scene-break.typ"),
-];
-
-/// The book: everything the default Story elements and Styles do, plus an Inclusion with a
-/// Style of its own, written out as the app writes one.
-fn book(markers: bool) -> String {
-    let p = |n: usize| format!("#lorem({n})\n\n");
-    let mut t = String::new();
-    t.push_str("#dedication[For M., who waited.]\n\n#part[Book One]\n\n= The Long Night\n\n");
-    t.push_str("#epigraph[The night is long that never finds the day. \\\n— Macbeth]\n\n");
-    for n in [70, 45, 90, 30, 60] { t.push_str(&p(n)); }
-    t.push_str("#scene-break()\n\n");
-    for n in [80, 50, 65] { t.push_str(&p(n)); }
-    t.push_str("#block-text[Dear Anna,\n\nCome home. The garden misses you, and so does the dog, who sits by the gate every evening as if you might come up the road.\n\nYours, \\\nM.]\n\n");
-    for n in [55, 75] { t.push_str(&p(n)); }
-    t.push_str("= The Morning\n\n");
-    for n in [60, 40, 85] { t.push_str(&p(n)); }
-    t.push_str("== A smaller heading\n\n");
-    for n in [50, 70] { t.push_str(&p(n)); }
-    // An Inclusion of a whole Work, with "Typewriter" as its own Style (inclusions::wrap),
-    // bracketed by scope markers when `markers`.
-    if markers { t.push_str("#metadata(\"Zampanò\")<scope-start>\n"); }
-    t.push_str("#[\n\n#heading(level: 1, \"Zampanò\")<inclusion-title>\n#metadata(\"J. Truant\")<inclusion-author>\n#set heading(offset: 1)\n");
-    t.push_str("#set text(font: \"DejaVu Sans Mono\")\n");
-    t.push_str("= Exploration A\n\n");
-    for n in [60, 45, 70] { t.push_str(&p(n)); }
-    t.push_str("\n\n]\n");
-    if markers { t.push_str("#metadata(none)<scope-end>\n"); }
-    t.push_str("\n= After\n\n");
-    for n in [60, 50] { t.push_str(&p(n)); }
-    t
-}
-
 fn source(styles: &[&str]) -> String {
     source_with(styles, true)
 }
 
-/// The source as the Preamble builds it: elements, then the Look wrapped around the text.
 fn source_with(styles: &[&str], markers: bool) -> String {
-    let mut s = String::from("#set document(title: \"Rain\", author: \"R. L. Fiehn\")\n#set text(lang: \"en\")\n");
-    for e in ELEMENTS { s.push_str(e); s.push('\n'); }
-    s.push_str("#let wrtier-look-1(doc) = [\n");
-    for st in styles { s.push_str(st); s.push('\n'); }
-    s.push_str("#doc\n]\n#show: wrtier-look-1\n");
-    s.push_str(&book(markers));
-    s
+    common::source(styles, &common::book(markers), false)
 }
 
 fn options() -> Options {
