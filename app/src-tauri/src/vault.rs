@@ -61,16 +61,40 @@ pub struct Vault {
     included_docs: inclusions::DocCache,
 }
 
+/// How a Work is exported: in which Look, and whether a `.docx` carries its Comments.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Export<'a> {
+    /// The Look to typeset it in, by name; `None`, its first.
+    pub look: Option<&'a str>,
+    /// In no Look at all: the Story elements, extra Styles and raw Typst only (a `.docx` that
+    /// keeps just the prose and its structure).
+    pub no_look: bool,
+    pub comments: bool,
+}
+
+impl Export<'_> {
+    /// The Preamble's header for this Export, from the Work's recorded copies.
+    fn header(&self, doc: &Doc, shelf: &Shelf) -> preamble::Header {
+        let mut uses = preamble::uses(doc, shelf, Version::Recorded);
+        if self.no_look {
+            uses.looks.clear();
+        }
+        preamble::header(doc, uses, self.look)
+    }
+}
+
 /// What an Export needs (see `Vault::export_input`).
 pub struct ExportInput {
     /// Its text, with its Inclusions written out as Typst.
     pub text: String,
-    /// Its text for a `.docx`, with its Inclusions written out as plain text under headings.
-    pub docx_text: String,
+    /// Its open Comments (and Work comments), and those on the text it includes, each with
+    /// where its text is in `text` (byte ranges; none for a Work comment), with names filled
+    /// in: when asked for (see `Export`).
+    pub comments: Vec<(crate::work::Mark, Vec<std::ops::Range<usize>>)>,
     /// Inclusions that couldn't be shown, and why: an Export says so.
     pub missing: Vec<String>,
     pub header: preamble::Header,
-    /// Its title, author and language, for a `.docx`'s running header and properties.
+    /// Its title, author and language, for a `.docx`'s properties.
     pub preamble: Preamble,
     /// The time of the Work's newest Change: the PDF's date, the same on every Device.
     pub date_ms: u64,
@@ -114,7 +138,7 @@ mod settings;
 pub use colours::Colours;
 pub use find::TextForFinding;
 pub use reading::{Reading, ReadingSource};
-pub use inclusions::{ChapterChoice, InclusionView, Target};
+pub use inclusions::{ChapterChoice, InclusionView, Target, SCOPE_END, SCOPE_START};
 pub use history::{ComparisonView, HistoryView, RestorePreview, ReturnPreview, RevertPreview, SnippetsView};
 pub use mods::Mods;
 pub use moves::{TrashedWork, TRASH};
@@ -970,19 +994,18 @@ impl Vault {
     /// What an Export of a Work as it was at a Milestone needs: exactly what it showed then,
     /// with the Styles and the versions of included Works it had recorded (ADR 0015). Nothing is
     /// recorded. Its date is when the Milestone was named, the same on every Device.
-    pub fn export_input_at(&mut self, id: &str, milestone: &str, look: Option<&str>, now_ms: u64) -> Result<ExportInput, String> {
+    pub fn export_input_at(&mut self, id: &str, milestone: &str, look: Export, now_ms: u64) -> Result<ExportInput, String> {
         let doc = self.at_milestone(id, milestone, now_ms)?;
         let named: ChangeId = milestone.parse().map_err(|_| format!("Not a Milestone: {milestone}"))?;
         let date_ms = self.milestone_time(id, named, now_ms)?;
-        let header = preamble::header(&doc, preamble::uses(&doc, &Shelf::read(&self.root), Version::Recorded), look);
+        let header = look.header(&doc, &Shelf::read(&self.root));
         let shown = self.shown_in_doc(&doc);
         let missing: Vec<String> = shown.iter().filter_map(|s| s.missing.as_ref().map(|m| format!("{}: {m}", s.label))).collect();
         let committed = doc.committed_text();
-        let docx_text = inclusions::docx_body(&committed, &shown);
         let (text, _) = inclusions::typst_body(&committed, &shown);
         let (db, _) = self.paths(id)?;
         let ident = storage::identity(&db).map_err(err)?.unwrap_or_else(|| id.to_string());
-        Ok(ExportInput { text, docx_text, header, preamble: Preamble::of(&doc), date_ms, ident, missing })
+        Ok(ExportInput { text, comments: Vec::new(), header, preamble: Preamble::of(&doc), date_ms, ident, missing })
     }
 
     /// When a Milestone was named.
@@ -1000,11 +1023,11 @@ impl Vault {
     /// What a PDF Export of a Work needs, after recording changed Styles (so the Export is
     /// exactly a version in its History): its text, the header from its recorded copies in
     /// `look` (else its first), the time of its newest Change, and its ID.
-    pub fn export_input(&mut self, id: &str, look: Option<&str>, now_ms: u64) -> Result<ExportInput, String> {
+    pub fn export_input(&mut self, id: &str, look: Export, now_ms: u64) -> Result<ExportInput, String> {
         let shelf = Shelf::read(&self.root);
         let generation = self.library_generation;
-        let typeset = |doc: &Doc| (doc.committed_text(), preamble::header(doc, preamble::uses(doc, &shelf, Version::Recorded), look), Preamble::of(doc));
-        let (db, (text, header, preamble), shown) = if self.works.contains_key(&self.current_id(id)) {
+        let typeset = |doc: &Doc| (doc.committed_text(), look.header(doc, &shelf), Preamble::of(doc));
+        let (db, (text, header, preamble), shown, own) = if self.works.contains_key(&self.current_id(id)) {
             // The versions of the included Works it shows now go in first (ADR 0015).
             self.with_work(id, now_ms, |w, _| {
                 if !w.has_cut() {
@@ -1022,7 +1045,8 @@ impl Vault {
             })?;
             let shown = self.shown_in(id, true)?;
             let work = self.works.get(&self.current_id(id)).ok_or_else(|| format!("{id} isn't open."))?;
-            (db, typeset(&work.doc), shown)
+            let own = if look.comments { self.named_comments(&work.doc) } else { Vec::new() };
+            (db, typeset(&work.doc), shown, own)
         } else {
             let (db, _) = self.paths(id)?;
             let (me, name) = (self.device, self.device_name());
@@ -1034,14 +1058,49 @@ impl Vault {
                 record_name(&db, &mut doc, name.as_deref(), now_ms)?;
             }
             let shown = self.shown_in_doc(&doc);
-            (db, typeset(&doc), shown)
+            let own = if look.comments { self.named_comments(&doc) } else { Vec::new() };
+            (db, typeset(&doc), shown, own)
         };
         let missing: Vec<String> = shown.iter().filter_map(|s| s.missing.as_ref().map(|m| format!("{}: {m}", s.label))).collect();
-        let docx_text = inclusions::docx_body(&text, &shown);
+        let comments = if look.comments { self.comments_for_export(&text, shown.clone(), own) } else { Vec::new() };
         let (text, _) = inclusions::typst_body(&text, &shown);
         let date_ms = storage::read_all(&db).map_err(err)?.iter().map(|c| c.hlc.0).max().unwrap_or(0);
         let ident = storage::identity(&db).map_err(err)?.unwrap_or_else(|| id.to_string());
-        Ok(ExportInput { text, docx_text, header, preamble, date_ms, ident, missing })
+        Ok(ExportInput { text, comments, header, preamble, date_ms, ident, missing })
+    }
+
+    /// A Work's Comments that go into a `.docx`: open ones on its text, and Work comments,
+    /// with their senders' names; ranges in its committed text.
+    fn named_comments(&self, doc: &Doc) -> Vec<crate::work::Mark> {
+        let text = doc.committed_text();
+        let mut marks = inclusions::comments_in(doc, &text, &[(0, 0, text.chars().count())]);
+        // Work comments, which `comments_in` leaves to their own Work: this is it.
+        marks.extend(doc.comments().into_iter().filter(|c| c.on_work).map(|c| crate::work::mark(c, Vec::new())));
+        marks.retain(|m| !m.resolved && (m.on_work || !m.ranges.is_empty()));
+        for mark in &mut marks {
+            (mark.name, mark.colour) = self.sender_label(doc, &mark.sender);
+            for reply in &mut mark.replies {
+                (reply.name, reply.colour) = self.sender_label(doc, &reply.sender);
+            }
+        }
+        marks
+    }
+
+    /// The Work's own Comments (`own`, in `text`) and the open ones on the text it includes,
+    /// placed in its Typst body (see `inclusions::comments_in_body`).
+    fn comments_for_export(&self, text: &str, mut shown: Vec<inclusions::Shown>, own: Vec<crate::work::Mark>) -> Vec<(crate::work::Mark, Vec<std::ops::Range<usize>>)> {
+        for s in &mut shown {
+            let author = s.author.clone();
+            // A Work comment belongs to its own Work only.
+            s.comments.retain(|m| !m.resolved && !m.on_work && !m.ranges.is_empty());
+            for mark in &mut s.comments {
+                (mark.name, mark.colour) = self.included_sender(&author, &mark.sender);
+                for reply in &mut mark.replies {
+                    (reply.name, reply.colour) = self.included_sender(&author, &reply.sender);
+                }
+            }
+        }
+        inclusions::comments_in_body(text, &shown, own)
     }
 
     /// The Style update notice of every open Work, as the library is now.
@@ -1452,7 +1511,7 @@ mod tests {
     }
 
     fn export(vault: &mut Vault, look: Option<&str>, now_ms: u64) -> Result<Vec<u8>, String> {
-        let input = vault.export_input("Rain", look, now_ms)?;
+        let input = vault.export_input("Rain", Export { look, ..Export::default() }, now_ms)?;
         crate::typeset::Typesetter::new(false)
             .export_pdf(Path::new("no-fonts"), &input.header, input.text, input.date_ms, &input.ident)
             .map(|pdf| pdf.bytes)

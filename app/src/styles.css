@@ -3518,3 +3518,15 @@ body.phone #write-toolbar button:disabled {
   padding: 0 0.2em;
   cursor: pointer;
 }
+
+/* The .docx Export's report: what the Author may want to know, a line each. */
+.report-list {
+  margin: 0 0 12px;
+  padding-left: 20px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.report-list li + li {
+  margin-top: 6px;
+}

@@ -179,6 +179,27 @@ pub struct Mark {
     pub other_body: Option<String>,
 }
 
+/// A Comment's highlight, on `ranges`; names, colours and bodies that lost to another Device's
+/// edit are left to fill in.
+pub fn mark(c: wrtier::doc::CommentView, ranges: Vec<(usize, usize)>) -> Mark {
+    Mark {
+        id: c.id.to_string(),
+        ranges,
+        on_work: c.on_work,
+        sender: c.sender,
+        name: String::new(),
+        colour: String::new(),
+        body: c.body,
+        resolved: c.resolved,
+        quote: c.quote,
+        time_ms: c.hlc.0,
+        replies: c.replies.into_iter().map(|r| ReplyMark {
+            id: r.id.to_string(), sender: r.sender, name: String::new(), colour: String::new(), body: r.body, time_ms: r.hlc.0, other_body: None,
+        }).collect(),
+        other_body: None,
+    }
+}
+
 impl Op {
     /// What the editor shows after this op: the edit as it was made, before the History has a say.
     fn as_the_editor_shows_it(&self, text: &str) -> String {
@@ -476,24 +497,13 @@ impl OpenWork {
             }
         }
         comments.into_iter().map(|c| {
-            let id = c.id.to_string();
-            Mark {
-                ranges: c.ranges.iter().map(|&(from, to)| (self.positions.to_utf16(from), self.positions.to_utf16(to))).collect(),
-                on_work: c.on_work,
-                sender: c.sender,
-                name: String::new(),
-                colour: String::new(),
-                body: c.body,
-                resolved: c.resolved,
-                quote: c.quote,
-                time_ms: c.hlc.0,
-                replies: c.replies.into_iter().map(|r| {
-                    let id = r.id.to_string();
-                    ReplyMark { other_body: other.get(&id).cloned(), id, sender: r.sender, name: String::new(), colour: String::new(), body: r.body, time_ms: r.hlc.0 }
-                }).collect(),
-                other_body: other.get(&id).cloned(),
-                id,
+            let ranges = c.ranges.iter().map(|&(from, to)| (self.positions.to_utf16(from), self.positions.to_utf16(to))).collect();
+            let mut mark = mark(c, ranges);
+            mark.other_body = other.get(&mark.id).cloned();
+            for reply in &mut mark.replies {
+                reply.other_body = other.get(&reply.id).cloned();
             }
+            mark
         }).collect()
     }
 

@@ -343,8 +343,8 @@ async fn export_pdf(handle: AppHandle, id: String, look: Option<String>, milesto
         let (input, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
             let vault = open_vault_of(app)?;
             let input = match &milestone {
-                Some(m) => vault.export_input_at(&id, m, look.as_deref(), now_ms())?,
-                None => vault.export_input(&id, look.as_deref(), now_ms())?,
+                Some(m) => vault.export_input_at(&id, m, vault::Export { look: look.as_deref(), ..vault::Export::default() }, now_ms())?,
+                None => vault.export_input(&id, vault::Export { look: look.as_deref(), ..vault::Export::default() }, now_ms())?,
             };
             Ok((input, vault.root.join("fonts")))
         })?;
@@ -375,43 +375,58 @@ async fn export_pdf(handle: AppHandle, id: String, look: Option<String>, milesto
 #[serde(rename_all = "camelCase")]
 struct ExportedDocx {
     path: String,
-    paragraphs: usize,
-    /// What the `.docx` couldn't carry, with its line in the text.
-    left_out: Vec<docx::LeftOut>,
-    /// Inclusions that couldn't be shown (each with why).
-    missing: Vec<String>,
+    /// What the Author may want to know (see `docx::report`), and Inclusions that couldn't be
+    /// shown: a line each.
+    report: Vec<String>,
 }
 
-/// Exports a Work as a plain `.docx` in standard manuscript format (`font`: "Times New Roman"
-/// or "Courier New"). Changed Styles are recorded first, so its Story elements do what their
-/// recorded definitions say. None if the Author cancelled the save dialog.
+/// Exports a Work as a `.docx` in `look` (by name; None, its first), or with `plain`, in no
+/// Look, keeping only its prose and structure (ADR 0016). With `comments`, its open Comments
+/// (and those on the text it includes) go in as Word comments; never from a Milestone. Changed
+/// Styles are recorded first, as for a PDF. None if the Author cancelled the save dialog.
 #[tauri::command]
-async fn export_docx(handle: AppHandle, id: String, font: String, milestone: Option<String>) -> Result<Option<ExportedDocx>, String> {
+async fn export_docx(handle: AppHandle, id: String, look: Option<String>, plain: bool, comments: bool, milestone: Option<String>) -> Result<Option<ExportedDocx>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        if !["Times New Roman", "Courier New"].contains(&font.as_str()) {
-            return Err(format!("Not a manuscript font: {font}"));
-        }
-        let input = with_app(&handle.state::<AppState>(), |app| {
+        let (input, fonts_dir) = with_app(&handle.state::<AppState>(), |app| {
             let vault = open_vault_of(app)?;
-            match &milestone {
-                Some(m) => vault.export_input_at(&id, m, None, now_ms()),
-                None => vault.export_input(&id, None, now_ms()),
-            }
+            let how = vault::Export { look: look.as_deref(), no_look: plain, comments: comments && milestone.is_none() };
+            let input = match &milestone {
+                Some(m) => vault.export_input_at(&id, m, how, now_ms())?,
+                None => vault.export_input(&id, how, now_ms())?,
+            };
+            Ok((input, vault.root.join("fonts")))
         })?;
         let name = id.rsplit('/').next().unwrap_or(&id).to_string();
         let title = if input.preamble.title.trim().is_empty() { name.clone() } else { input.preamble.title.clone() };
-        let manuscript = docx::Manuscript {
-            title: &title, author: &input.preamble.author, language: &input.preamble.language,
-            font: &font, date_ms: input.date_ms,
+        let header = docx::with_probe(&input.header);
+        let options = typst_docx::Options {
+            targets: docx::targets(&input.header.elements),
+            scope: Some((vault::SCOPE_START.into(), vault::SCOPE_END.into())),
+            metadata: typst_docx::Metadata {
+                title, author: input.preamble.author.clone(), date: docx::w3c(input.date_ms), seed: docx::seed(&input.ident),
+            },
+            plain,
+            comments: docx::comments(input.comments, header.text.len()),
         };
-        let made = docx::docx(&input.docx_text, &input.header.elements, &manuscript)?;
-        let Some(path) = handle.dialog().file().set_title("Export as .docx").set_file_name(format!("{name}.docx"))
+        let made = {
+            let state = handle.state::<TypesetState>();
+            let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            typesetter.export_docx(&fonts_dir, &header, input.text, &options)?
+        };
+        let file_name = match (&look, plain) {
+            (_, true) => format!("{name} (prose only).docx"),
+            (Some(look), false) => format!("{name} ({look}).docx"),
+            (None, false) => format!("{name}.docx"),
+        };
+        let Some(path) = handle.dialog().file().set_title("Export as .docx").set_file_name(&file_name)
             .add_filter("Word document", &["docx"]).blocking_save_file().and_then(|p| p.into_path().ok())
         else {
             return Ok(None);
         };
         std::fs::write(&path, &made.bytes).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
-        Ok(Some(ExportedDocx { path: path.display().to_string(), paragraphs: made.paragraphs, left_out: made.left_out, missing: input.missing }))
+        let mut report = docx::report(&made.report);
+        report.extend(input.missing.iter().map(|m| format!("An Inclusion couldn't be shown: {m}")));
+        Ok(Some(ExportedDocx { path: path.display().to_string(), report }))
     })
     .await
     .map_err(|e| e.to_string())?

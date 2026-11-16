@@ -16,6 +16,7 @@ mod ooxml;
 mod styles;
 
 pub use measure::Selector;
+use typst::syntax::Source;
 use typst_layout::PagedDocument;
 
 /// What a target becomes in the `.docx`.
@@ -52,6 +53,34 @@ pub struct Metadata {
     pub seed: u64,
 }
 
+/// A Word comment: on the text that came from `ranges` of the main source, or on the document
+/// as a whole (no ranges), with its replies.
+#[derive(Clone, Debug, Default)]
+pub struct Comment {
+    pub author: String,
+    /// Shown in Word beside the comment, such as "RF".
+    pub initials: String,
+    /// W3CDTF, like `Metadata::date`.
+    pub date: String,
+    /// Its text; each line a paragraph.
+    pub text: String,
+    /// Byte ranges in the main source. The comment covers the text from the first character
+    /// that came from any of them to the last (a Word comment covers one stretch). Empty: it's
+    /// on the document as a whole, and sits at its start.
+    pub ranges: Vec<std::ops::Range<usize>>,
+    pub replies: Vec<Reply>,
+    /// Handed back in the report if it can't be placed.
+    pub origin: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Reply {
+    pub author: String,
+    pub initials: String,
+    pub date: String,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Options {
     pub targets: Vec<Target>,
@@ -60,20 +89,28 @@ pub struct Options {
     /// marker's value.
     pub scope: Option<(String, String)>,
     pub metadata: Metadata,
+    /// Keep only the structure and emphasis: each target keeps its named style, but the styles
+    /// are plain (a book draft in Times New Roman), the page is Word's own, and the only direct
+    /// formatting is italic and bold where the text differs from what's around it.
+    pub plain: bool,
+    pub comments: Vec<Comment>,
 }
 
-/// Something the report says about a style.
+/// Something the report says.
 #[derive(Clone, Debug, PartialEq)]
 pub enum What {
     /// This many paragraphs didn't fit their style and were formatted directly.
     FormattedDirectly { paragraphs: usize },
+    /// A comment none of whose text is in the `.docx` (it's in something left out, say); `text`
+    /// is the start of the comment's own text, to recognise it by.
+    CommentNotPlaced { text: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Note {
-    /// The Word style it's about.
-    pub style: String,
-    /// The target's origin, if the style comes from a target that has one.
+    /// The Word style it's about, if any.
+    pub style: Option<String>,
+    /// The origin of what it's about (a target's, a comment's), if that has one.
     pub origin: Option<String>,
     pub what: What,
 }
@@ -83,16 +120,23 @@ pub struct Docx {
     pub report: Vec<Note>,
 }
 
-/// The `.docx` of a compiled document.
-pub fn convert(document: &PagedDocument, options: &Options) -> Result<Docx, String> {
+/// The `.docx` of a compiled document. `main`: the source file it was compiled from, which
+/// comments are anchored in.
+pub fn convert(document: &PagedDocument, main: &Source, options: &Options) -> Result<Docx, String> {
     let setup = probe::read(document)
         .ok_or_else(|| "the document has no probe (typst_docx::probe::snippet())".to_string())??;
     let measuring = measure::Options {
         targets: options.targets.iter().map(|t| measure::Target { name: t.name.clone(), selector: t.selector.clone() }).collect(),
-        scope: options.scope.clone(),
+        scope: if options.plain { None } else { options.scope.clone() },
     };
-    let units = measure::measure_in(document, &measuring, |page| setup.area(page));
-    let laid = styles::lay_out(&units, &options.targets, &setup);
-    let bytes = ooxml::zip(&ooxml::parts(&laid, &setup, &options.metadata))?;
+    let places = (!options.comments.is_empty()).then_some(main);
+    let units = measure::measure_in(document, &measuring, |page| setup.area(page), places);
+    let mut laid = styles::lay_out(&units, &options.targets, &setup);
+    if options.plain {
+        styles::make_plain(&mut laid);
+    }
+    let (parts, unplaced) = ooxml::parts(&laid, &setup, &options.metadata, &options.comments);
+    laid.notes.extend(unplaced);
+    let bytes = ooxml::zip(&parts)?;
     Ok(Docx { bytes, report: laid.notes })
 }

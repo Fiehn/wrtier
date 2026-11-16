@@ -1,7 +1,7 @@
 // Story element: Part
 // Written as: #part[Book One]
 // Shown as: block
-// .docx: part heading
+// .docx: heading above chapters
 // Groups Chapters: its title stands alone on a page. Styles change it with `show <part>`.
 
 #let part(title) = {

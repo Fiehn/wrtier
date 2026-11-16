@@ -316,7 +316,10 @@ pub struct ElementForm {
     pub body: bool,
     /// Its name and what it's for, from its header comment ("Epigraph: A quotation…").
     pub detail: Option<String>,
-    /// What a `.docx` Export does with it: its header's ".docx:" line (see `library::DOCX`).
+    /// Its title, from its header comment ("Epigraph"): its style's name in a `.docx`.
+    pub title: Option<String>,
+    /// Its role in a `.docx` Export: its header's ".docx:" line (see `docx::ROLES`); none, a
+    /// paragraph in its own style.
     pub docx: Option<String>,
 }
 
@@ -338,13 +341,13 @@ impl ElementForm {
             }
         }
         let description = description.join(" ");
-        let detail = match (title, description.is_empty()) {
+        let detail = match (&title, description.is_empty()) {
             (Some(t), false) => Some(format!("{t}: {description}")),
-            (Some(t), true) => Some(t),
+            (Some(t), true) => Some(t.clone()),
             (None, false) => Some(description),
             (None, true) => None,
         };
-        ElementForm { name: name.to_string(), body, detail, docx }
+        ElementForm { name: name.to_string(), body, detail, title, docx }
     }
 }
 

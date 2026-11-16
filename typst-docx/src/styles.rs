@@ -139,6 +139,8 @@ pub(crate) struct Laid {
     pub styles: Vec<Style>,
     pub paras: Vec<Para>,
     pub notes: Vec<Note>,
+    /// Plain styles, and only italic and bold on runs (see `make_plain`).
+    pub plain: bool,
 }
 
 impl Laid {
@@ -335,7 +337,7 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
     }
 
     // The styles, Normal first, each after the style it's based on.
-    let mut laid = Laid { styles: Vec::new(), paras: Vec::new(), notes: Vec::new() };
+    let mut laid = Laid { styles: Vec::new(), paras: Vec::new(), notes: Vec::new(), plain: false };
     let name_of = |key: &Key| -> (String, Kind) {
         let (name, kind) = match key.target {
             None if key.first => ("First Paragraph".to_string(), Kind::Custom),
@@ -511,8 +513,48 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
     for (s, count) in direct_count.into_iter().enumerate() {
         if count > 0 {
             let origin = laid.styles[s].key.target.and_then(|t| targets[t].origin.clone());
-            laid.notes.push(Note { style: laid.styles[s].name.clone(), origin, what: What::FormattedDirectly { paragraphs: count } });
+            laid.notes.push(Note { style: Some(laid.styles[s].name.clone()), origin, what: What::FormattedDirectly { paragraphs: count } });
         }
     }
     laid
+}
+
+/// Keeps only what the text itself says, in plain styles: a book draft in Times New Roman 12 pt,
+/// single-spaced, indented, with black bold headings. Every target keeps its named style (with
+/// nothing of its own, so an editor can still find every epigraph); emphasis is what differs
+/// from the paragraph as it was set, so `_emph_` in an italic epigraph, set upright there, is
+/// italic here.
+pub(crate) fn make_plain(laid: &mut Laid) {
+    let measured: Vec<Props> = (0..laid.styles.len()).map(|s| laid.resolved(s)).collect();
+    for p in &mut laid.paras {
+        let m = &measured[p.style];
+        for r in &mut p.runs {
+            r.italic = r.italic != m.italic.unwrap_or(false);
+            r.bold = r.bold != m.bold.unwrap_or(false);
+        }
+        p.direct = Props::default();
+    }
+    laid.notes.retain(|n| !matches!(n.what, What::FormattedDirectly { .. }));
+    for s in &mut laid.styles {
+        s.props = match s.kind {
+            Kind::Normal => Props {
+                family: Some("Times New Roman".into()), size: Some(12.0), italic: Some(false), bold: Some(false),
+                fill: Some("000000".into()), align: Some(Align::Left), left: Some(0.0), right: Some(0.0),
+                first_line: Some(36.0), line: Some(1.0), before: Some(0.0), after: Some(0.0),
+                page_break: None, keep_next: None,
+            },
+            Kind::Heading(n) => Props {
+                size: Some(match n { 1 => 16.0, 2 => 14.0, _ => 12.0 }),
+                bold: Some(true),
+                first_line: Some(0.0),
+                before: Some(if n == 1 { 24.0 } else { 12.0 }),
+                after: Some(6.0),
+                keep_next: Some(true),
+                ..Props::default()
+            },
+            Kind::Custom if s.key.first => Props { first_line: Some(0.0), ..Props::default() },
+            Kind::Custom => Props::default(),
+        };
+    }
+    laid.plain = true;
 }

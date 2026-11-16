@@ -21,7 +21,7 @@ use wrtier::storage;
 use wrtier::text_file::{inclusion_block, parse_version, version_text};
 use crate::library::Kind;
 use crate::preamble::{self, Preamble, Shelf, Version};
-use crate::work::{Op, OpenWork};
+use crate::work::{Mark, Op, OpenWork};
 use super::{err, file_stamp, walk_works, Vault};
 
 /// A Work's version: the highest Change counter it holds from each Device.
@@ -120,7 +120,10 @@ pub struct Shown {
     /// (start in `plain`, start in the included Work's `committed_text`, length), in characters.
     pub runs: Vec<(usize, usize, usize)>,
     /// The included Work's Comments on that text, ranges in `plain` (UTF-16); names left to fill in.
-    pub comments: Vec<crate::work::Mark>,
+    pub comments: Vec<Mark>,
+    /// Where the included Work's own text is in `typst`: runs of (start in `plain`, start in
+    /// `typst`, length), in UTF-16, so a `.docx` can put its Comments where the text came out.
+    pub in_typst: Vec<(usize, usize, usize)>,
     /// The included Work's author name, for its Author's Comments.
     pub author: String,
     /// A new Chapter found right after the included one (see `Target::next`), if one.
@@ -203,7 +206,7 @@ pub(super) fn expand(ctx: &mut Ctx, doc: &Doc, stack: &mut Vec<String>) -> Vec<S
 fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut Vec<String>) -> Shown {
     let mut s = Shown {
         at, index, target: Target::of(including, at), name: None, label: "An Inclusion".into(), chapter: None,
-        missing: None, plain: String::new(), typst: String::new(), version: None, language: String::new(), elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), author: String::new(), split: None,
+        missing: None, plain: String::new(), typst: String::new(), version: None, language: String::new(), elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), in_typst: Vec::new(), author: String::new(), split: None,
     };
     let result = (|| {
         let target = s.target.clone().ok_or("This Inclusion has lost what it includes.")?;
@@ -264,6 +267,8 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
         let (mut plain, mut typst) = (String::new(), String::new());
         let mut plain_len = 0; // in characters
         let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+        let mut in_typst: Vec<(usize, usize, usize)> = Vec::new(); // UTF-16
+        let (mut plain_u16, mut typst_u16) = (0, 0);
         let mut next = nested.iter().peekable();
         for (i, &c) in chars.iter().enumerate().take(to).skip(from) {
             match next.peek() {
@@ -273,8 +278,11 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
                         None => n.plain.clone(),
                     };
                     plain_len += inner.chars().count();
+                    plain_u16 += inner.encode_utf16().count();
                     plain.push_str(&inner);
-                    typst.push_str(&inclusion_block(n.at, &n.label, &n.typst));
+                    let block = inclusion_block(n.at, &n.label, &n.typst);
+                    typst_u16 += block.encode_utf16().count();
+                    typst.push_str(&block);
                     next.next();
                 }
                 _ => {
@@ -283,6 +291,12 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
                         _ => runs.push((plain_len, i, 1)),
                     }
                     plain_len += 1;
+                    match in_typst.last_mut() {
+                        Some((p, t, len)) if *p + *len == plain_u16 && *t + *len == typst_u16 => *len += c.len_utf16(),
+                        _ => in_typst.push((plain_u16, typst_u16, c.len_utf16())),
+                    }
+                    plain_u16 += c.len_utf16();
+                    typst_u16 += c.len_utf16();
                     plain.push(c);
                     typst.push(c);
                 }
@@ -302,7 +316,10 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
             let shown = !author.is_empty() && author != Preamble::of(including).author.trim();
             (title.as_str(), shown.then_some(author))
         });
-        s.typst = wrap(&typst, &preamble.language, heading, &styles);
+        let (wrapped, at) = wrap(&typst, &preamble.language, heading, &styles, &name);
+        s.typst = wrapped;
+        let opening = s.typst[..at].encode_utf16().count();
+        s.in_typst = in_typst.into_iter().map(|(p, t, len)| (p, t + opening, len)).collect();
         s.title = target.chapter.is_none().then_some(title);
         s.plain = plain;
         s.version = Some(doc.version());
@@ -343,7 +360,7 @@ fn committed_at(doc: &Doc, at: usize) -> usize {
 
 /// The included Work's Comments on its own text in `plain` (`runs` says where that is), with
 /// their ranges in `plain` (UTF-16). A Comment none of whose text is shown there is left out.
-pub(super) fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]) -> Vec<crate::work::Mark> {
+pub(super) fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]) -> Vec<Mark> {
     let comments = doc.comments();
     if comments.is_empty() || runs.is_empty() {
         return Vec::new();
@@ -389,7 +406,12 @@ pub(super) fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]
 /// shown) with its Chapters a level down, then its own Styles, kept apart from the text around
 /// it by paragraph breaks. The title is labelled `<inclusion-title>` and the author's name is
 /// `<inclusion-author>` metadata, so a Style ("Inclusion titles") can show them its own way.
-fn wrap(text: &str, language: &str, heading: Option<(&str, Option<&str>)>, styles: &[String]) -> String {
+///
+/// With Styles of its own, the text after the title is bracketed by `SCOPE_START` (naming the
+/// Work, `name`) and `SCOPE_END` metadata, invisible and moving nothing, so a `.docx` Export
+/// can give it styles of its own ("Normal (Zampanò)"). Returns the Typst, and where in it (in
+/// bytes) `text` starts.
+fn wrap(text: &str, language: &str, heading: Option<(&str, Option<&str>)>, styles: &[String], name: &str) -> (String, usize) {
     let mut out = String::from("#[\n\n");
     if !language.trim().is_empty() {
         out.push_str(&format!("#set text(lang: {})\n", preamble::string(language.trim())));
@@ -401,16 +423,29 @@ fn wrap(text: &str, language: &str, heading: Option<(&str, Option<&str>)>, style
         }
         out.push_str("#set heading(offset: 1)\n");
     }
+    let scoped = !styles.is_empty();
+    if scoped {
+        out.push_str(&format!("#metadata({})<{SCOPE_START}>\n", preamble::string(name)));
+    }
     for style in styles {
         out.push_str(style);
         if !style.ends_with('\n') {
             out.push('\n');
         }
     }
+    let at = out.len();
     out.push_str(text);
-    out.push_str("\n\n]");
-    out
+    out.push_str("\n\n");
+    if scoped {
+        out.push_str(&format!("#metadata(none)<{SCOPE_END}>\n"));
+    }
+    out.push(']');
+    (out, at)
 }
+
+/// The labels of the markers around an Inclusion with Styles of its own (see `wrap`).
+pub const SCOPE_START: &str = "wrtier-inclusion-start";
+pub const SCOPE_END: &str = "wrtier-inclusion-end";
 
 /// The Chapter whose heading line starts at `start`: from there to the next Chapter or Part,
 /// or the end (as the Chapter list reads them). None if no Chapter starts there.
@@ -480,33 +515,45 @@ pub fn expansions(shown: &[Shown]) -> storage::Expansions {
     shown.iter().map(|s| (s.at, inclusion_block(s.at, &s.label, &s.typst))).collect()
 }
 
-/// The Work's text for a `.docx` Export, which keeps only structure and emphasis: each whole
-/// Work it includes under a heading with its title, its own Chapters a level down; a Chapter as
-/// it is; a missing one as a line saying so.
-pub fn docx_body(text: &str, shown: &[Shown]) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut next = shown.iter();
-    for c in text.chars() {
-        if c != INCLUSION {
-            out.push(c);
+/// Where Comments are in the Work's Typst body (as `typst_body` writes it), as byte ranges:
+/// `own`, the Work's own, with ranges in `text` (UTF-16), and each Inclusion's Comments on its
+/// included text (`Shown::comments`), wherever that text came out. A Work comment has no
+/// ranges; a Comment on text that isn't in the body (a missing Inclusion's) has none either,
+/// and is left out.
+pub fn comments_in_body(text: &str, shown: &[Shown], own: Vec<Mark>) -> Vec<(Mark, Vec<std::ops::Range<usize>>)> {
+    let (body, blocks) = typst_body(text, shown);
+    // UTF-16 position in the body → byte, for every position (an Export's worth of memory).
+    let mut byte_at: Vec<usize> = Vec::with_capacity(body.len() + 1);
+    for (b, c) in body.char_indices() {
+        byte_at.extend(std::iter::repeat_n(b, c.len_utf16()));
+    }
+    byte_at.push(body.len());
+    let byte = |u: usize| byte_at.get(u).copied().unwrap_or(body.len());
+    // A place in `text` (UTF-16) → in the body: each block before it is longer than its one character.
+    let in_body = |at: usize| at + blocks.iter().filter(|(b, _)| *b < at).map(|(_, len)| len - 1).sum::<usize>();
+    let mut out = Vec::new();
+    for mark in own {
+        let ranges = mark.ranges.iter().map(|&(from, to)| byte(in_body(from))..byte(in_body(to))).collect();
+        out.push((mark, ranges));
+    }
+    for (s, (at, _)) in shown.iter().zip(&blocks) {
+        if s.missing.is_some() {
             continue;
         }
-        let Some(s) = next.next() else { continue };
-        if let Some(why) = &s.missing {
-            out.push_str(&format!("_[{}: {why}]_", s.label.replace(['_', '*'], "")));
-            continue;
-        }
-        match &s.title {
-            Some(title) => {
-                out.push_str(&format!("= {title}\n\n"));
-                for line in s.plain.split_inclusive('\n') {
-                    if line.starts_with('=') {
-                        out.push('=');
-                    }
-                    out.push_str(line);
-                }
+        // The Inclusion's Typst starts on the line after its block's first line.
+        let block = inclusion_block(s.at, &s.label, &s.typst);
+        let typst_start = in_body(*at) + block[..block.find('\n').map_or(0, |n| n + 1)].encode_utf16().count();
+        // A place in the included text as shown (`plain`) → in `typst`.
+        let place = |p: usize, end: bool| s.in_typst.iter()
+            .find(|(from, _, len)| if end { p > *from && p <= from + len } else { p >= *from && p < from + len })
+            .map(|(from, t, _)| t + (p - from));
+        for mark in &s.comments {
+            let ranges: Vec<_> = mark.ranges.iter()
+                .filter_map(|&(from, to)| Some(byte(typst_start + place(from, false)?)..byte(typst_start + place(to, true)?)))
+                .collect();
+            if !ranges.is_empty() {
+                out.push((mark.clone(), ranges));
             }
-            None => out.push_str(&s.plain),
         }
     }
     out
@@ -532,7 +579,7 @@ pub struct InclusionView {
     pub starts: usize,
     /// The included Work's Comments on its text here, ranges in `text` (UTF-16): they belong to that
     /// Work, and show in both.
-    pub comments: Vec<crate::work::Mark>,
+    pub comments: Vec<Mark>,
     /// A new Chapter found right after the included one (see `Target::next`), if one.
     pub split: Option<SplitNote>,
     /// Styles given to this Inclusion only.
@@ -1054,6 +1101,7 @@ pub fn elements_of(shown: &[Shown]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::vault::tests_support::open;
+    use crate::vault::Export;
     use crate::work::Origin;
     use crate::typeset::Block;
 
@@ -1237,6 +1285,86 @@ mod tests {
         assert_eq!(views[0].comments[1].ranges, vec![(went, went + 4)]);
     }
 
+    /// The text each Word comment in a `.docx` covers, by its comment's text.
+    fn commented(docx: &[u8]) -> Vec<(String, String)> {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(docx)).unwrap();
+        let mut read = |name: &str| {
+            let mut xml = String::new();
+            std::io::Read::read_to_string(&mut zip.by_name(name).unwrap(), &mut xml).unwrap();
+            xml
+        };
+        let (document, comments) = (read("word/document.xml"), read("word/comments.xml"));
+        let (document, comments) = (roxmltree::Document::parse(&document).unwrap(), roxmltree::Document::parse(&comments).unwrap());
+        let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        comments.descendants().filter(|n| n.has_tag_name("comment")).map(|c| {
+            let id = c.attribute((w, "id")).unwrap();
+            let body: String = c.descendants().filter(|n| n.has_tag_name("t")).filter_map(|n| n.text()).collect();
+            let mut inside = false;
+            let mut text = String::new();
+            for n in document.descendants() {
+                let this = n.attribute((w, "id")) == Some(id);
+                if n.has_tag_name("commentRangeStart") && this {
+                    inside = true;
+                } else if n.has_tag_name("commentRangeEnd") && this {
+                    break;
+                } else if inside && n.has_tag_name("t") {
+                    text.push_str(n.text().unwrap_or(""));
+                }
+            }
+            (body, text)
+        }).collect()
+    }
+
+    #[test]
+    fn a_docx_carries_the_comments_on_its_own_and_its_included_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        // In the Collection: one on its own text, with a Reply; one on the whole Work; a resolved one.
+        v.open_work("Collected", 12_000).unwrap();
+        let comment = |from: usize, to: usize, body: &str| Op::Comment { from, to, sender: "author".into(), body: body.into(), sender_name: None };
+        v.edit("Collected", vec![comment(3, 15, "Shorter?"), comment(0, 2, "Done.")], 12_100).unwrap();
+        v.edit("Collected", vec![Op::WorkComment { sender: "author".into(), body: "Whole thing.".into(), sender_name: None }], 12_200).unwrap();
+        let marks = v.works["Collected"].marks();
+        let id = |body: &str| marks.iter().find(|m| m.body == body).unwrap().id.clone();
+        v.edit("Collected", vec![Op::Reply { comment: id("Shorter?"), sender: "author".into(), body: "No.".into(), sender_name: None }], 12_300).unwrap();
+        v.edit("Collected", vec![Op::Resolve { id: id("Done."), resolved: true }], 12_400).unwrap();
+        // In "Rain", which it includes, after a Chapter heading of its own.
+        v.open_work("Rain", 13_000).unwrap();
+        let went = RAIN.find("went home").unwrap();
+        v.edit("Rain", vec![comment(went, went + 9, "Where?")], 13_100).unwrap();
+        v.tick(20_000);
+
+        let input = v.export_input("Collected", Export { comments: true, ..Export::default() }, 21_000).unwrap();
+        let mut found: Vec<(String, String)> = input.comments.iter()
+            .map(|(m, ranges)| (m.body.clone(), ranges.iter().map(|r| input.text[r.clone()].to_string()).collect()))
+            .collect();
+        found.sort();
+        assert_eq!(found, [
+            ("Shorter?".to_string(), "introduction".to_string()),
+            ("Where?".to_string(), "went home".to_string()),
+            ("Whole thing.".to_string(), String::new()),
+        ], "in the body as compiled; the resolved one isn't");
+
+        let header = crate::docx::with_probe(&input.header);
+        let options = typst_docx::Options {
+            targets: crate::docx::targets(&input.header.elements),
+            comments: crate::docx::comments(input.comments.clone(), header.text.len()),
+            ..typst_docx::Options::default()
+        };
+        let made = crate::typeset::Typesetter::new(false).export_docx(Path::new("none"), &header, input.text, &options).unwrap();
+        assert!(!made.report.iter().any(|n| matches!(n.what, typst_docx::What::CommentNotPlaced { .. })), "{:?}", made.report);
+        let mut placed = commented(&made.bytes);
+        placed.sort();
+        assert_eq!(placed, [
+            ("No.".to_string(), "introduction".to_string()),
+            ("Shorter?".to_string(), "introduction".to_string()),
+            ("Where?".to_string(), "went home".to_string()),
+            ("Whole thing.".to_string(), String::new()),
+        ]);
+        // Without being asked, or from a Milestone, none.
+        assert!(v.export_input("Collected", Export::default(), 22_000).unwrap().comments.is_empty());
+    }
+
     #[test]
     fn a_comment_on_included_text_stops_at_the_included_works_own_text() {
         let dir = tempfile::tempdir().unwrap();
@@ -1313,17 +1441,16 @@ mod tests {
         v.open_work("Rain", 13_000).unwrap();
         v.edit("Rain", vec![typing(RAIN.len(), " Changed later.")], 13_100).unwrap();
         v.tick(20_000);
-        let then = v.export_input_at("Collected", &sent.id, None, 21_000).unwrap();
+        let then = v.export_input_at("Collected", &sent.id, Export::default(), 21_000).unwrap();
         assert!(then.text.contains("She went home.") && !then.text.contains("Changed later."));
-        assert!(!then.docx_text.contains("Changed later.") && then.docx_text.contains("= Rain at Night"));
         assert_eq!(then.date_ms, sent.time_ms, "dated when the Milestone was named");
         // The same input, so the same PDF, on every Device and every day.
-        let again = v.export_input_at("Collected", &sent.id, None, 99_000).unwrap();
+        let again = v.export_input_at("Collected", &sent.id, Export::default(), 99_000).unwrap();
         assert_eq!((then.text.clone(), then.header.text.clone()), (again.text, again.header.text));
         let mut t = crate::typeset::Typesetter::new(false);
         t.export_pdf(Path::new("none"), &then.header, then.text, then.date_ms, &then.ident).expect("it typesets");
         // An Export of now has the later text.
-        assert!(v.export_input("Collected", None, 22_000).unwrap().text.contains("Changed later."));
+        assert!(v.export_input("Collected", Export::default(), 22_000).unwrap().text.contains("Changed later."));
     }
 
     /// The pages' text without spaces (lines break and justify differently from font to font).
@@ -1437,7 +1564,7 @@ mod tests {
         let s = Shown {
             at, index: 2, target: None, name: None, label: "Rain".into(), chapter: None, missing: None,
             plain: "Rain.".into(), typst: "#[\nRain.\n]".into(), version: None, language: String::new(),
-            elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), author: String::new(), split: None,
+            elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), in_typst: Vec::new(), author: String::new(), split: None,
         };
         let (body, blocks) = typst_body(&format!("A\n{INCLUSION}\nB"), &[s]);
         assert!(body.starts_with("A\n// ---- Included by wrtier") && body.ends_with("\nB"), "{body}");

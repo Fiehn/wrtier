@@ -4,8 +4,8 @@
 //! - A Style is `styles/<name>.typ`: only `set` and `show` rules.
 //! - A Look is `styles/<name>.look`: the names of its Styles, one per line, in stack order.
 //! - A Story element is `styles/elements/<name>.typ`: a Typst function named like the file,
-//!   with a header comment saying how it's written, how the Formatted view shows it and what
-//!   a `.docx` Export does with it.
+//!   with a header comment saying how it's written, how the Formatted view shows it and,
+//!   optionally, its role in a `.docx` Export.
 //!
 //! The files have no History. A Conflict copy of one is never merged: the Author picks which
 //! version to keep. The defaults the app ships with are written into the Vault once and then
@@ -14,16 +14,16 @@
 use serde::Serialize;
 use std::path::{Component, Path, PathBuf};
 use wrtier::conflicts;
+use crate::docx::ROLES;
 
 /// The library's folder, at the top of the Vault.
 pub const FOLDER: &str = "styles";
+
 /// Where Story elements live, inside it.
 const ELEMENTS: &str = "elements";
 
 /// How a Story element looks in the Formatted view.
 pub const SHOWN_AS: &[&str] = &["chip", "block"];
-/// What a `.docx` Export can do with a Story element (v1's fixed menu).
-pub const DOCX: &[&str] = &["chapter heading", "part heading", "centred #", "indented block", "centred paragraph", "plain text", "left out"];
 
 /// The version of the defaults below. A later app with better versions of them offers those
 /// (never applies them), and adds the ones a Vault has never had.
@@ -72,7 +72,8 @@ pub struct Item {
     pub description: String,
     /// What's wrong with it, if anything (it's still listed).
     pub problems: Vec<String>,
-    /// A Story element's "Written as", "Shown as" and ".docx" lines.
+    /// A Story element's "Written as", "Shown as" and ".docx" lines (no ".docx" line: its text
+    /// is paragraphs in a style of its own).
     pub written_as: Option<String>,
     pub shown_as: Option<String>,
     pub docx: Option<String>,
@@ -222,10 +223,8 @@ fn read_item(root: &Path, path: &Path, text: &str) -> Option<Item> {
                 Some(v) => item.problems.push(format!("\"Shown as: {v}\" should be chip or block")),
                 None => item.problems.push("has no \"Shown as:\" line (chip or block)".into()),
             }
-            match item.docx.as_deref() {
-                Some(v) if DOCX.contains(&v) => {}
-                Some(v) => item.problems.push(format!("\".docx: {v}\" should be one of: {}", DOCX.join(", "))),
-                None => item.problems.push("has no \".docx:\" line".into()),
+            if let Some(v) = item.docx.as_deref().filter(|v| !ROLES.contains(v)) {
+                item.problems.push(format!("\".docx: {v}\" should be one of: {} (or no such line, for paragraphs in a style of its own)", ROLES.join(", ")));
             }
         }
         Kind::Style => {}
@@ -311,6 +310,7 @@ pub fn write(root: &Path, path: &str, text: &str) -> Result<(), String> {
 pub struct NewElement {
     pub title: String,
     pub shown_as: String,
+    /// Its role in a `.docx` (`docx::ROLES`), or empty for paragraphs in a style of its own.
     pub docx: String,
     pub description: String,
 }
@@ -337,7 +337,7 @@ pub fn create(root: &Path, kind: Kind, name: &str, element: Option<NewElement>) 
             if !is_element_name(name) {
                 return Err("A Story element's name is how it's written after #: small letters, digits and -, starting with a letter (e.g. dream or radio-message).".into());
             }
-            if !SHOWN_AS.contains(&e.shown_as.as_str()) || !DOCX.contains(&e.docx.as_str()) {
+            if !SHOWN_AS.contains(&e.shown_as.as_str()) || !(e.docx.is_empty() || ROLES.contains(&e.docx.as_str())) {
                 return Err("Pick how it's shown and what a .docx does with it.".into());
             }
             let title = if e.title.trim().is_empty() { name.to_string() } else { e.title.trim().to_string() };
@@ -349,9 +349,10 @@ pub fn create(root: &Path, kind: Kind, name: &str, element: Option<NewElement>) 
             } else {
                 format!("#let {name}(body) = [#box(body) <{name}>]\n")
             };
+            let role = if e.docx.is_empty() { String::new() } else { format!("// .docx: {}\n", e.docx) };
             (format!("{FOLDER}/{ELEMENTS}/{name}.typ"), format!(
-                "// Story element: {title}\n// Written as: #{name}[…]\n// Shown as: {}\n// .docx: {}\n// {}\n\n{body}",
-                e.shown_as, e.docx, if description.is_empty() { "What it's for, in a line." } else { &description }))
+                "// Story element: {title}\n// Written as: #{name}[…]\n// Shown as: {}\n{role}// {}\n\n{body}",
+                e.shown_as, if description.is_empty() { "What it's for, in a line." } else { &description }))
         }
     };
     let file = file(root, &path)?;
@@ -491,7 +492,9 @@ mod tests {
         assert_eq!(paperback.styles, ["Paperback page", "Book text", "Chapter openings", "Page numbers", "Inclusion titles"]);
         let scene = lib.items.iter().find(|i| i.name == "scene-break").unwrap();
         assert_eq!((scene.kind, scene.title.as_str()), (Kind::StoryElement, "Scene break"));
-        assert_eq!((scene.shown_as.as_deref(), scene.docx.as_deref()), (Some("chip"), Some("centred #")));
+        assert_eq!((scene.shown_as.as_deref(), scene.docx.as_deref()), (Some("chip"), None));
+        let part = lib.items.iter().find(|i| i.name == "part").unwrap();
+        assert_eq!(part.docx.as_deref(), Some("heading above chapters"));
         assert_eq!(scene.path, "styles/elements/scene-break.typ");
     }
 
@@ -538,7 +541,7 @@ mod tests {
     fn problems_are_reported_not_hidden() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "styles/Odd.look", "// Look: Odd\nBook text\nNo such style\n").unwrap();
-        write(dir.path(), "styles/elements/dream.typ", "// Story element: Dream\n// Shown as: bubble\n#let sleep(body) = body\n").unwrap();
+        write(dir.path(), "styles/elements/dream.typ", "// Story element: Dream\n// Shown as: bubble\n// .docx: centred #\n#let sleep(body) = body\n").unwrap();
         write(dir.path(), "styles/Book text.typ", "#set text(size: 11pt)\n").unwrap();
         let lib = list(dir.path());
         let odd = lib.items.iter().find(|i| i.name == "Odd").unwrap();
@@ -546,26 +549,27 @@ mod tests {
         let dream = lib.items.iter().find(|i| i.name == "dream").unwrap();
         assert!(dream.problems.iter().any(|p| p.contains("doesn't define #dream")));
         assert!(dream.problems.iter().any(|p| p.contains("bubble")));
-        assert!(dream.problems.iter().any(|p| p.contains(".docx")));
+        assert!(dream.problems.iter().any(|p| p.contains("\".docx: centred #\" should be one of")), "v1's values are gone");
     }
 
     #[test]
     fn new_story_elements_are_correct_from_the_start() {
         let dir = tempfile::tempdir().unwrap();
         let path = create(dir.path(), Kind::StoryElement, "dream", Some(NewElement {
-            title: "Dream".into(), shown_as: "block".into(), docx: "indented block".into(), description: "A dream.".into(),
+            title: "Dream".into(), shown_as: "block".into(), docx: String::new(), description: "A dream.".into(),
         })).unwrap();
         assert_eq!(path, "styles/elements/dream.typ");
         let lib = list(dir.path());
         let dream = &lib.items[0];
         assert!(dream.problems.is_empty(), "{:?}", dream.problems);
         assert_eq!(dream.written_as.as_deref(), Some("#dream[…]"));
+        assert_eq!(dream.docx, None, "no role: paragraphs in a style of its own");
         // It compiles, and a Style can restyle it by its label.
         let source = format!("{}\n#show <dream>: set text(style: \"italic\")\n#dream[I was falling.]", read(dir.path(), &path).unwrap());
         assert!(Typesetter::new(false).compile("Rain", Path::new("x"), source).errors.is_empty());
         // Never over an existing file, and only sensible names.
         assert!(create(dir.path(), Kind::StoryElement, "dream", Some(NewElement {
-            title: String::new(), shown_as: "chip".into(), docx: "plain text".into(), description: String::new(),
+            title: String::new(), shown_as: "chip".into(), docx: "left out".into(), description: String::new(),
         })).is_err());
         assert!(create(dir.path(), Kind::StoryElement, "Dream Sequence", None).is_err());
         assert!(create(dir.path(), Kind::Style, "../escape", None).is_err());

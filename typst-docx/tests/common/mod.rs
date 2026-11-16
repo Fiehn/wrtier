@@ -30,13 +30,25 @@ impl World for TestWorld {
 /// Compiles `text`, or says why it doesn't.
 #[allow(dead_code)]
 pub fn try_compile(text: &str) -> Result<PagedDocument, Vec<String>> {
+    try_compile_source(text).map(|(document, _)| document)
+}
+
+/// Compiles `text`, with the source it was compiled from (which comments are anchored in).
+#[allow(dead_code)]
+pub fn try_compile_source(text: &str) -> Result<(PagedDocument, Source), Vec<String>> {
     let mut fonts = FontStore::new();
     for (font, info) in typst_kit::fonts::embedded() {
         fonts.push((font, info));
     }
     let id = FileId::new(RootedPath::new(VirtualRoot::Project, VirtualPath::new("main.typ").unwrap()));
     let world = TestWorld { library: LazyHash::new(Library::default()), fonts, main: Source::new(id, text.into()) };
-    typst::compile::<PagedDocument>(&world).output.map_err(|errors| errors.iter().map(|e| e.message.to_string()).collect())
+    let document = typst::compile::<PagedDocument>(&world).output.map_err(|errors| errors.iter().map(|e| e.message.to_string()).collect::<Vec<_>>())?;
+    Ok((document, world.main))
+}
+
+#[allow(dead_code)]
+pub fn compile_source(text: &str) -> (PagedDocument, Source) {
+    try_compile_source(text).unwrap_or_else(|e| panic!("doesn't compile: {e:?}"))
 }
 
 #[allow(dead_code)]

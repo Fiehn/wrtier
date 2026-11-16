@@ -7,8 +7,14 @@ mod common;
 
 use std::io::Read;
 
-use common::{book, compile, source, MANUSCRIPT, PAPERBACK};
-use typst_docx::{convert, Metadata, Options, Role, Selector, Target};
+use common::{book, compile_source, source, MANUSCRIPT, PAPERBACK};
+use typst_docx::{Comment, Metadata, Options, Reply, Role, Selector, Target, What};
+
+/// Converts `text`, compiled.
+fn convert_text(text: &str, options: &Options) -> Result<typst_docx::Docx, String> {
+    let (document, main) = compile_source(text);
+    typst_docx::convert(&document, &main, options)
+}
 
 fn targets() -> Vec<Target> {
     let t = |name: &str, selector: Selector, role: Role| Target { name: name.into(), selector, role, origin: Some(format!("{name}.typ")) };
@@ -33,6 +39,7 @@ fn options() -> Options {
         targets: targets(),
         scope: Some(("scope-start".into(), "scope-end".into())),
         metadata: Metadata { title: "Rain".into(), author: "R. L. Fiehn".into(), date: "2026-11-16T10:00:00Z".into(), seed: 7 },
+        ..Options::default()
     }
 }
 
@@ -63,7 +70,7 @@ fn paragraphs(document: &str) -> Vec<(String, String)> {
 }
 
 fn paperback() -> (std::collections::HashMap<String, String>, typst_docx::Docx) {
-    let docx = convert(&compile(&source(&PAPERBACK, &book(true), true)), &options()).unwrap();
+    let docx = convert_text(&source(&PAPERBACK, &book(true), true), &options()).unwrap();
     (parts(&docx.bytes), docx)
 }
 
@@ -120,17 +127,97 @@ fn a_one_line_paragraph_after_prose_is_flush_like_a_longer_one() {
     assert_eq!(style_of("Come home."), "BlockText");
 }
 
+const TEXT: &str = "= One\n\n#lorem(400)\n\nThe extraordinarily incomprehensible circumstances surrounding the uncharacteristically disproportionate thing went on, and _on_, and *on*.\n\n#epigraph[Line one \\\nline two, _upright_]\n\nShe said, \"It's late.\"";
+
+/// The text of the runs between comment `id`'s range start and end.
+fn commented(document: &str, id: &str) -> String {
+    let doc = roxmltree::Document::parse(document).unwrap();
+    let mut inside = false;
+    let mut text = String::new();
+    for n in doc.descendants() {
+        let this = n.attribute(("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "id")) == Some(id);
+        if n.has_tag_name("commentRangeStart") && this {
+            inside = true;
+        } else if n.has_tag_name("commentRangeEnd") && this {
+            break;
+        } else if inside && n.has_tag_name("t") {
+            text.push_str(n.text().unwrap_or(""));
+        }
+    }
+    text
+}
+
+#[test]
+fn comments_sit_on_the_text_they_were_made_on() {
+    let text = source(&PAPERBACK, TEXT, true);
+    let range = |s: &str| { let at = text.rfind(s).unwrap(); at..at + s.len() };
+    let comment = |text: &str, ranges, replies| Comment {
+        author: "Anna".into(), initials: "A".into(), date: "2026-11-01T09:00:00Z".into(),
+        text: text.into(), ranges, replies, origin: None,
+    };
+    let reply = Reply { author: "R. L. Fiehn".into(), initials: "RF".into(), date: "2026-11-02T09:00:00Z".into(), text: "Agreed.".into() };
+    let options = Options {
+        comments: vec![
+            // Across the edge of an emphasised word, and Typst's hyphenation of "uncharacteristically".
+            comment("Too long?", vec![range("uncharacteristically disproportionate"), range("_on_, and")], vec![reply]),
+            comment("Lovely book.\nTruly.", vec![], vec![]),
+            // In the Look's own source: nothing of it is text.
+            comment("Lost", vec![range("#show heading")], vec![]),
+            // After text a function made (`#lorem`), whose offsets aren't into the source.
+            comment("Late", vec![range("late")], vec![]),
+        ],
+        ..options()
+    };
+    let docx = convert_text(&text, &options).unwrap();
+    let parts = parts(&docx.bytes);
+    let xml = &parts["word/document.xml"];
+    assert_eq!(commented(xml, "0"), "uncharacteristically disproportionate thing went on, and on, and", "first to last character covered");
+    assert_eq!(commented(xml, "1"), commented(xml, "0"), "a reply sits where its comment does");
+    assert_eq!(commented(xml, "2"), "", "a comment on the Work is at its start, on nothing");
+    assert_eq!(commented(xml, "3"), "late");
+    let comments = &parts["word/comments.xml"];
+    assert_eq!(comments.matches("<w:comment ").count(), 4);
+    assert!(comments.contains("w:author=\"R. L. Fiehn\""));
+    assert_eq!(comments.matches("<w:p ").count(), 5, "one paragraph per line");
+    assert_eq!(parts["word/commentsExtended.xml"].matches("paraIdParent").count(), 1);
+    assert!(parts["[Content_Types].xml"].contains("comments+xml"));
+    assert_eq!(docx.report.iter().filter(|n| matches!(&n.what, What::CommentNotPlaced { text } if text == "Lost")).count(), 1);
+}
+
+#[test]
+fn plain_keeps_the_structure_and_emphasis_only() {
+    let docx = convert_text(&source(&PAPERBACK, TEXT, true), &Options { plain: true, ..options() }).unwrap();
+    let parts = parts(&docx.bytes);
+    let (xml, styles) = (&parts["word/document.xml"], &parts["word/styles.xml"]);
+    assert!(xml.contains("<w:sectPr/>"), "Word's own page");
+    assert!(!parts["word/settings.xml"].contains("mirrorMargins") && !parts["word/settings.xml"].contains("autoHyphenation"));
+    assert!(styles.contains("w:ascii=\"Times New Roman\"") && !styles.contains("Libertinus"), "{styles}");
+    assert!(styles.contains("<w:name w:val=\"Epigraph\"/>"), "the element keeps its named style");
+    let paras = paragraphs(xml);
+    assert_eq!(paras.iter().find(|(_, t)| t.starts_with("Line one")).unwrap().0, "Epigraph");
+    let doc = roxmltree::Document::parse(xml).unwrap();
+    let italic = |text: &str| doc.descendants().find(|n| n.has_tag_name("r") && n.descendants().any(|t| t.has_tag_name("t") && t.text() == Some(text)))
+        .unwrap_or_else(|| panic!("no run {text:?}"))
+        .descendants().any(|n| n.has_tag_name("i") && n.attributes().count() == 0);
+    assert!(italic("on"), "_on_ is italic");
+    assert!(italic("upright"), "emphasis in the (italic) epigraph is italic here");
+    assert!(!italic("Line one"), "the epigraph's own italic is the Look's, not the text's");
+    assert!(!xml.contains("Libertinus") && !xml.contains("<w:sz "), "no fonts or sizes on runs");
+    assert!(docx.report.is_empty(), "{:?}", docx.report);
+}
+
 #[test]
 fn the_text_reads_as_written() {
-    let doc = compile(&source(&PAPERBACK, "= One\n\nThe extraordinarily incomprehensible circumstances surrounding the uncharacteristically disproportionate thing went on, and _on_, and *on*.\n\n#epigraph[Line one \\\nline two]\n\nShe said, \"It's late.\"", true));
-    let parts = parts(&convert(&doc, &options()).unwrap().bytes);
+    let doc = source(&PAPERBACK, TEXT, true);
+    let parts = parts(&convert_text(&doc, &options()).unwrap().bytes);
     let xml = &parts["word/document.xml"];
     let paras = paragraphs(xml);
     let texts: Vec<&str> = paras.iter().map(|(_, t)| t.as_str()).collect();
-    assert_eq!(texts, [
-        "One",
+    assert_eq!(texts[0], "One");
+    assert!(texts[1].starts_with("Lorem ipsum"));
+    assert_eq!(texts[2..], [
         "The extraordinarily incomprehensible circumstances surrounding the uncharacteristically disproportionate thing went on, and on, and on.",
-        "Line one|line two",
+        "Line one|line two, upright",
         "She said, “It’s late.”",
     ]);
     assert!(!xml.contains('\u{ad}'), "Typst's hyphens are gone");
@@ -155,14 +242,14 @@ fn the_page_comes_from_the_probe() {
 }
 
 fn parts_of(styles: &[&str]) -> std::collections::HashMap<String, String> {
-    parts(&convert(&compile(&source(styles, &book(true), true)), &options()).unwrap().bytes)
+    parts(&convert_text(&source(styles, &book(true), true), &options()).unwrap().bytes)
 }
 
 #[test]
 fn the_probe_moves_nothing() {
     use typst::layout::FrameItem;
     let positions = |probe: bool| -> Vec<String> {
-        let doc = compile(&source(&PAPERBACK, &book(true), probe));
+        let (doc, _) = compile_source(&source(&PAPERBACK, &book(true), probe));
         doc.pages().iter().enumerate().flat_map(|(n, p)| p.frame.items().filter_map(move |(pos, item)| {
             matches!(item, FrameItem::Group(_) | FrameItem::Text(_)).then(|| format!("{n} {:.2} {:.2}", pos.x.to_pt(), pos.y.to_pt()))
         })).collect()
@@ -172,14 +259,13 @@ fn the_probe_moves_nothing() {
 
 #[test]
 fn without_a_probe_it_says_so() {
-    let doc = compile(&source(&PAPERBACK, "Text.", false));
-    assert!(convert(&doc, &options()).err().unwrap().contains("probe"));
+    assert!(convert_text(&source(&PAPERBACK, "Text.", false), &options()).err().unwrap().contains("probe"));
 }
 
 #[test]
 fn the_same_input_gives_the_same_file() {
-    let doc = compile(&source(&PAPERBACK, &book(true), true));
-    assert_eq!(convert(&doc, &options()).unwrap().bytes, convert(&doc, &options()).unwrap().bytes);
+    let text = source(&PAPERBACK, &book(true), true);
+    assert_eq!(convert_text(&text, &options()).unwrap().bytes, convert_text(&text, &options()).unwrap().bytes);
 }
 
 /// Writes `Paperback.docx` and `Manuscript.docx` to the folder in SPIKE_DOCX_DIR, with Typst's
@@ -189,11 +275,27 @@ fn the_same_input_gives_the_same_file() {
 fn write_samples() {
     let dir = std::path::PathBuf::from(std::env::var("SPIKE_DOCX_DIR").expect("set SPIKE_DOCX_DIR"));
     for (name, styles) in [("Paperback", &PAPERBACK[..]), ("Manuscript", &MANUSCRIPT[..])] {
-        let document = compile(&source(styles, &book(true), true));
-        let docx = convert(&document, &options()).unwrap();
+        let (document, main) = compile_source(&source(styles, &book(true), true));
+        let docx = typst_docx::convert(&document, &main, &options()).unwrap();
         println!("{name}: {:#?}", docx.report);
         let pdf = typst_pdf::pdf(&document, &typst_pdf::PdfOptions::default()).map_err(|e| format!("{e:?}")).unwrap();
         std::fs::write(dir.join(format!("{name}-typst.pdf")), pdf).unwrap();
+        std::fs::write(dir.join(format!("{name}.docx")), docx.bytes).unwrap();
+    }
+    // The book with comments (one with a reply, one on the whole Work), and plain.
+    let text = source(&PAPERBACK, &book(true), true);
+    let range = |s: &str| { let at = text.find(s).unwrap(); at..at + s.len() };
+    let person = |name: &str, initials: &str, date: &str, text: &str| (name.to_string(), initials.to_string(), date.to_string(), text.to_string());
+    let (a, ai, ad, at) = person("Anna", "A", "2026-11-01T09:00:00Z", "Is this the right quote?");
+    let comments = vec![
+        Comment { author: a, initials: ai, date: ad, text: at, ranges: vec![range("The night is long")], origin: None,
+            replies: vec![Reply { author: "R. L. Fiehn".into(), initials: "RF".into(), date: "2026-11-02T09:00:00Z".into(), text: "Yes, Act 4.".into() }] },
+        Comment { author: "Anna".into(), initials: "A".into(), date: "2026-11-03T09:00:00Z".into(), text: "Lovely book overall.".into(), ..Comment::default() },
+        Comment { author: "Anna".into(), initials: "A".into(), date: "2026-11-03T10:00:00Z".into(), text: "Garden?".into(), ranges: vec![range("The garden misses you")], ..Comment::default() },
+    ];
+    for (name, plain) in [("Commented", false), ("Plain", true)] {
+        let (document, main) = compile_source(&text);
+        let docx = typst_docx::convert(&document, &main, &Options { comments: comments.clone(), plain, ..options() }).unwrap();
         std::fs::write(dir.join(format!("{name}.docx")), docx.bytes).unwrap();
     }
 }

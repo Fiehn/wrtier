@@ -162,7 +162,7 @@
             <select id="preview-zoom" aria-label="Zoom" title="How big the pages are shown (remembered on this Device). Ctrl + mouse wheel or a pinch over the pages zooms too."></select>
             <span class="spacer"></span>
             <button id="preview-pdf" type="button" class="link" title="Export the Work as a PDF">PDF…</button>
-            <button id="preview-docx" type="button" class="link" title="Export the Work as a manuscript .docx">.docx…</button>
+            <button id="preview-docx" type="button" class="link" title="Export the Work as a .docx, in a Look or as prose only">.docx…</button>
           </header>
           <div id="preview-bar" hidden></div>
           <div id="preview-pages" tabindex="0" aria-label="Pages"></div>
@@ -303,16 +303,25 @@
     <dialog id="ask-docx">
       <form method="dialog">
         <h2 id="ask-docx-heading">Export as .docx</h2>
-        <p class="muted">Standard manuscript format: US Letter, 1-inch margins, double-spaced, with your surname, the title and the page number at the top. Only the structure and emphasis are kept; Looks don't apply.</p>
-        <label>Font
-          <select id="ask-docx-font">
-            <option value="Times New Roman">Times New Roman</option>
-            <option value="Courier New">Courier New</option>
-          </select>
+        <label>In the Look
+          <select id="ask-docx-look"></select>
         </label>
+        <p class="muted">Each kind of text (prose, Chapters, each Story element) becomes one named Word style, so it can be restyled in one place. With no Look, only the prose, its headings and emphasis are kept, plainly set.</p>
+        <label id="ask-docx-comments-row" class="row"><input id="ask-docx-comments" type="checkbox" /> Export comments (open Comments and their Replies, as Word comments)</label>
         <menu>
           <button type="button" data-close="cancel">Cancel</button>
           <button value="export">Export…</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="docx-report">
+      <form method="dialog">
+        <h2>Exported</h2>
+        <p id="docx-report-path"></p>
+        <ul id="docx-report-list" class="report-list"></ul>
+        <menu>
+          <button value="ok">OK</button>
         </menu>
       </form>
     </dialog>
@@ -385,12 +394,9 @@
         </label>
         <label>In a .docx Export
           <select id="element-docx">
-            <option value="plain text">Plain text</option>
-            <option value="indented block">Indented block</option>
-            <option value="centred paragraph">Centred paragraph</option>
-            <option value="chapter heading">Chapter heading (new page)</option>
-            <option value="part heading">Part heading (new page, centred)</option>
-            <option value="centred #">A centred # line</option>
+            <option value="">Paragraphs in a style of its own</option>
+            <option value="chapter heading">A Chapter heading</option>
+            <option value="heading above chapters">A heading above Chapters (a Part)</option>
             <option value="left out">Left out</option>
           </select>
         </label>

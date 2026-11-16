@@ -595,6 +595,24 @@ impl Typesetter {
         result
     }
 
+    /// A `.docx` of a Work's text after its Preamble (which must hold `typst_docx`'s probe),
+    /// refused if it doesn't compile, as the PDF Export is.
+    pub fn export_docx(&mut self, fonts_dir: &Path, header: &Header, text: String, options: &typst_docx::Options) -> Result<typst_docx::Docx, String> {
+        const KEY: &str = "\u{0}export"; // apart from every Work's preview
+        let compiled = self.compile_with(KEY, fonts_dir, header, text);
+        let result = (|| {
+            if let Some(error) = compiled.errors.first() {
+                let line = error.line.map(|l| format!("line {l}: ")).unwrap_or_default();
+                return Err(format!("It doesn't typeset: {line}{}. Nothing was exported.", error.message));
+            }
+            let preview = self.previews.get(KEY).ok_or("Nothing to export.")?;
+            let document = preview.last_good.as_ref().ok_or("Nothing to export.")?;
+            typst_docx::convert(document, &preview.world.main, options).map_err(|e| format!("The .docx couldn't be made: {e}"))
+        })();
+        self.previews.remove(KEY);
+        result
+    }
+
     /// The Work's tab closed (or it was renamed): its preview isn't needed.
     pub fn forget(&mut self, id: &str) {
         self.previews.remove(id);

@@ -19,6 +19,7 @@ use typst::introspection::MetadataElem;
 use typst::introspection::{Location, Tag};
 use typst::layout::{Frame, FrameItem, FrameKind, Point};
 use typst::model::{HeadingElem, ParElem};
+use typst::syntax::Source;
 use typst::text::{FontStyle, TextItem};
 use typst::visualize::Paint;
 use typst_layout::PagedDocument;
@@ -80,6 +81,9 @@ pub struct Run {
     pub italic: bool,
     pub bold: bool,
     pub fill: String,
+    /// Where each of its characters came from in the main source file (byte offset), if it
+    /// came from there; all `None` when not asked for (see `measure_in`).
+    pub at: Vec<Option<usize>>,
 }
 
 /// A font's vertical measures at the size a unit is set in, in points: what Word works out a
@@ -239,6 +243,8 @@ struct Piece {
     bold: bool,
     fill: String,
     text: String,
+    /// Where each character came from in the main source (see `Run::at`).
+    sources: Vec<Option<usize>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -261,6 +267,8 @@ struct Walk<'a> {
     loose: usize,
     /// Hard groups (blocks) in the body, per page: (left, width).
     blocks: Vec<(usize, f64, f64)>,
+    /// The main source file, when each character's place in it is wanted.
+    main: Option<&'a Source>,
 }
 
 impl Walk<'_> {
@@ -322,7 +330,7 @@ impl Walk<'_> {
         }
     }
 
-    fn text(&mut self, at: Point, item: &TextItem) {
+    fn text(&mut self, at_point: Point, item: &TextItem) {
         // The innermost paragraph or heading is the unit; failing that, a labelled target.
         let unit = self.open.iter().rev()
             .find(|(_, c)| c.is::<ParElem>() || c.is::<HeadingElem>() || self.target_of(c).is_some())
@@ -353,14 +361,39 @@ impl Walk<'_> {
             }
         }
         let cap = item.font.metrics().cap_height.at(item.size).to_pt();
+        let place = self.main.map_or_else(Vec::new, |main| sources(item, main));
         self.pieces.push(Piece {
-            unit, target, scope: self.scopes.last().cloned(), page: self.page, at, width: visible,
+            unit, target, scope: self.scopes.last().cloned(), page: self.page, at: at_point, width: visible,
             cap, metrics: word_metrics(&item.font, item.size.to_pt(), cap),
             family: info.family.clone(), size: item.size.to_pt(),
             italic: info.variant.style != FontStyle::Normal, bold: info.variant.weight.to_number() >= 600,
-            fill, text: item.text.to_string(),
+            fill, text: item.text.to_string(), sources: place,
         });
     }
+}
+
+/// Where each character of a text item came from in `main` (byte offsets): a glyph's span and
+/// offset give its first character's place, and the others in its cluster follow on.
+fn sources(item: &TextItem, main: &Source) -> Vec<Option<usize>> {
+    let mut by_byte: Vec<Option<usize>> = vec![None; item.text.len()];
+    for g in &item.glyphs {
+        let (span, offset) = g.span;
+        if span.id() != Some(main.id()) {
+            continue;
+        }
+        // Text a function made (`#lorem`, a counter) has its offset into what it made, not into
+        // the source: it only counts when it stays inside the node it points at.
+        let Some(node) = main.find(span) else { continue };
+        let start = node.range().start + usize::from(offset);
+        if !node.range().contains(&start) {
+            continue;
+        }
+        let range = usize::from(g.range.start)..usize::from(g.range.end).min(item.text.len());
+        for (k, b) in range.enumerate() {
+            by_byte[b] = Some(start + k);
+        }
+    }
+    item.text.char_indices().map(|(b, _)| by_byte[b]).collect()
 }
 
 /// Word's measures for a font: the `OS/2` Windows ascent and descent, which is what Word on
@@ -375,10 +408,10 @@ fn word_metrics(font: &typst::text::FontInstance, size: f64, cap: f64) -> Metric
     Metrics { ascent: ascent / per_em * size, descent: descent / per_em * size, cap }
 }
 
-fn walk<'a>(document: &PagedDocument, options: &'a Options) -> Walk<'a> {
+fn walk<'a>(document: &PagedDocument, options: &'a Options, main: Option<&'a Source>) -> Walk<'a> {
     let mut walk = Walk {
         targets: &options.targets, scope_labels: options.scope.as_ref(), scopes: Vec::new(),
-        open: Vec::new(), pieces: Vec::new(), page: 0, loose: 0, blocks: Vec::new(),
+        open: Vec::new(), pieces: Vec::new(), page: 0, loose: 0, blocks: Vec::new(), main,
     };
     for (n, page) in document.pages().iter().enumerate() {
         walk.page = n;
@@ -391,15 +424,16 @@ fn walk<'a>(document: &PagedDocument, options: &'a Options) -> Walk<'a> {
 /// page numbers are left out: they belong to the page, not to a target. Each page's body area
 /// is guessed from what's on it (see `measure_in` for when it's known).
 pub fn measure(document: &PagedDocument, options: &Options) -> Vec<Unit> {
-    let walk = walk(document, options);
+    let walk = walk(document, options, None);
     let units = group(walk.pieces);
     let areas = areas(&units, &walk.blocks, document.pages().len());
     units.into_iter().map(|mut u| { u.area = areas[u.page]; u }).collect()
 }
 
-/// As `measure`, with each page's body area given (by its index).
-pub fn measure_in(document: &PagedDocument, options: &Options, area: impl Fn(usize) -> Area) -> Vec<Unit> {
-    let units = group(walk(document, options).pieces);
+/// As `measure`, with each page's body area given (by its index). With `main`, the source file
+/// the document was compiled from, each run also says where its characters came from in it.
+pub fn measure_in(document: &PagedDocument, options: &Options, area: impl Fn(usize) -> Area, main: Option<&Source>) -> Vec<Unit> {
+    let units = group(walk(document, options, main).pieces);
     units.into_iter().map(|mut u| { u.area = area(u.page); u }).collect()
 }
 
@@ -411,6 +445,12 @@ const SHY: &str = "\u{ad}";
 /// or dash). A forced break (`\`) leaves neither, as Typst trims it away.
 pub(crate) fn wraps_after(text: &str) -> bool {
     text.chars().last().is_some_and(|c| c.is_whitespace() || "-\u{2010}\u{2013}\u{2014}/".contains(c))
+}
+
+/// A piece's characters' places, one per character (`None` where not known).
+fn places(p: &Piece) -> Vec<Option<usize>> {
+    let n = p.text.chars().count();
+    if p.sources.len() == n { p.sources.clone() } else { vec![None; n] }
 }
 
 /// The unit's text, run by run, with Typst's line wrapping undone. Returns whether the last
@@ -434,7 +474,7 @@ fn runs_of(pieces: &[Piece]) -> (Vec<Run>, bool) {
                 continue;
             }
             if !wrapped {
-                runs.push(Run { text: "\n".into(), family: p.family.clone(), size: p.size, italic: p.italic, bold: p.bold, fill: p.fill.clone() });
+                runs.push(Run { text: "\n".into(), family: p.family.clone(), size: p.size, italic: p.italic, bold: p.bold, fill: p.fill.clone(), at: vec![None] });
             }
         }
         hyphenated = false;
@@ -442,8 +482,9 @@ fn runs_of(pieces: &[Piece]) -> (Vec<Run>, bool) {
         match runs.last_mut() {
             Some(r) if r.text != "\n" && r.family == p.family && r.size == p.size && r.italic == p.italic && r.bold == p.bold && r.fill == p.fill => {
                 r.text.push_str(&p.text);
+                r.at.extend(places(p));
             }
-            _ => runs.push(Run { text: p.text.clone(), family: p.family.clone(), size: p.size, italic: p.italic, bold: p.bold, fill: p.fill.clone() }),
+            _ => runs.push(Run { text: p.text.clone(), family: p.family.clone(), size: p.size, italic: p.italic, bold: p.bold, fill: p.fill.clone(), at: places(p) }),
         }
     }
     (runs, hyphenated)

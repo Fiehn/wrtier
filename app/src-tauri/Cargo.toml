@@ -34,7 +34,7 @@ typst.workspace = true
 typst-layout.workspace = true
 typst-svg.workspace = true   # the Page preview's pages
 typst-pdf.workspace = true   # PDF Exports
-zip = { version = "9.5", default-features = false, features = ["deflate-flate2"] }  # a .docx is a zip of XML files
+typst-docx = { path = "../../typst-docx" }  # .docx Exports (ADR 0016)
 typst-ide.workspace = true   # click-to-jump from the pages to the text
 typst-kit = { workspace = true, features = ["embedded-fonts", "scan-fonts"] }  # Vault, bundled and Device fonts
 comemo = "0.5"           # Typst's cache, evicted after every compile
@@ -51,6 +51,7 @@ self-replace = "1.5"    # the portable exe puts a new version in its own place
 
 [dev-dependencies]
 tempfile = "3"
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2"] }  # tests read a .docx back
 rusqlite = { version = "0.41.1", features = ["bundled"] }  # tests write files as another program would
 
 # Build profiles live in the workspace root Cargo.toml.

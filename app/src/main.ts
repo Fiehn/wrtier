@@ -877,34 +877,77 @@ $("preview-pdf").addEventListener("click", () => act(async () => {
   if (preview.shown) await exportPdf(preview.shown, preview.shownMilestone);
 }));
 
-/** Exports a Work as a manuscript .docx, and says what it couldn't carry. */
-async function exportDocx(id: string, milestone: { id: string; name: string } | null = null) {
-  await tabs.settled(id);
-  if (!milestone && !(await inclusionsReady(id))) return;
-  $("ask-docx-heading").textContent = `Export ${id.split("/").pop()} as .docx`;
-  const select = $<HTMLSelectElement>("ask-docx-font");
+/** This Device's choice, remembered in local storage (absent in a private window). */
+function deviceChoice(key: string): string | null {
   try {
-    select.value = localStorage.getItem("docx-font") ?? "Times New Roman";
+    return localStorage.getItem(key);
   } catch {
-    // nothing remembered
+    return null;
   }
-  if ((await ask($<HTMLDialogElement>("ask-docx"))) !== "export") return;
+}
+
+function keepDeviceChoice(key: string, value: string) {
   try {
-    localStorage.setItem("docx-font", select.value);
+    localStorage.setItem(key, value);
   } catch {
     // not remembered, then: no harm done
   }
-  type LeftOut = { line: number; what: string };
-  type Exported = { path: string; paragraphs: number; leftOut: LeftOut[] };
-  const done = await invoke<Exported | null>("export_docx", { id, font: select.value, milestone: milestone?.id ?? null });
+}
+
+/** The Look picker's "No Look (prose only)": the .docx keeps only the prose and its structure. */
+const PROSE_ONLY = "";
+
+/**
+ * Exports a Work as a .docx in a Look, or as prose only, with its Comments if asked, and lists
+ * what's worth knowing about it. `milestone`: the Work as it was then, never with Comments
+ * (they're on the text as it is now).
+ */
+async function exportDocx(id: string, milestone: { id: string; name: string } | null = null) {
+  await tabs.settled(id);
+  if (!milestone && !(await inclusionsReady(id))) return;
+  const { preamble } = await invoke<{ preamble: Preamble }>("get_preamble", { id });
+  const option = (value: string, text: string) => {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = text;
+    return o;
+  };
+  const select = $<HTMLSelectElement>("ask-docx-look");
+  select.replaceChildren(
+    option(PROSE_ONLY, "No Look (prose only)"),
+    ...preamble.looks.map((name, i) => option(name, i === 0 ? `${name} (the Work's own)` : name)),
+  );
+  select.value = deviceChoice("docx-prose-only") === "yes" ? PROSE_ONLY : (preview.lookFor(id) ?? preamble.looks[0] ?? PROSE_ONLY);
+  const comments = $<HTMLInputElement>("ask-docx-comments");
+  comments.checked = deviceChoice("docx-comments") === "yes";
+  $("ask-docx-comments-row").hidden = milestone !== null;
+  const what = milestone ? `“${milestone.name}” of ` : "";
+  $("ask-docx-heading").textContent = `Export ${what}${id.split("/").pop()} as .docx`;
+  if ((await ask($<HTMLDialogElement>("ask-docx"))) !== "export") return;
+  const plain = select.value === PROSE_ONLY;
+  keepDeviceChoice("docx-prose-only", plain ? "yes" : "no");
+  if (!milestone) keepDeviceChoice("docx-comments", comments.checked ? "yes" : "no");
+  type Exported = { path: string; report: string[] };
+  const done = await invoke<Exported | null>("export_docx", {
+    id,
+    look: plain ? null : select.value,
+    plain,
+    comments: !milestone && comments.checked,
+    milestone: milestone?.id ?? null,
+  });
   if (!done) return; // cancelled
-  let line = `Exported${milestone ? ` “${milestone.name}”` : ""} ${done.paragraphs} paragraphs to ${done.path}.`;
-  if (done.leftOut.length > 0) {
-    const shown = done.leftOut.slice(0, 3).map((l) => `line ${l.line}: ${l.what}`).join("; ");
-    const more = done.leftOut.length > 3 ? `, and ${done.leftOut.length - 3} more` : "";
-    line += ` Left out (a .docx can't carry it): ${shown}${more}.`;
+  const exported = `Exported${milestone ? ` “${milestone.name}”` : ""} to ${done.path}.`;
+  if (done.report.length === 0) {
+    showInfo(exported);
+    return;
   }
-  showInfo(line);
+  $("docx-report-path").textContent = `${exported} Worth knowing:`;
+  $("docx-report-list").replaceChildren(...done.report.map((line) => {
+    const li = document.createElement("li");
+    li.textContent = line;
+    return li;
+  }));
+  await ask($<HTMLDialogElement>("docx-report"));
 }
 
 $("preview-docx").addEventListener("click", () => act(async () => {
