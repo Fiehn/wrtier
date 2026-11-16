@@ -84,10 +84,19 @@ pub fn session_record(session: ChangeId) -> String {
     format!("session/{session}")
 }
 
+/// The record tying together the Changes of one Find and replace action (a Replace all, or one
+/// Replace that rewrote several words), so undo and the History view take them as one. Named
+/// by its first Change. Fields: `changes` (their IDs, joined by commas), `find` and `with`
+/// (what was searched for and the replacement, as typed) and `count` (how many matches).
+pub fn replace_record(first: ChangeId) -> String {
+    format!("replace/{first}")
+}
+
 /// Records that aren't part of the Work's content: returning to a Milestone leaves them alone.
-/// Comments aren't content either: feedback stays when the text goes back.
+/// Comments aren't content either: feedback stays when the text goes back. Nor is how Find
+/// and replace grouped its Changes.
 pub fn is_meta_record(record: &str) -> bool {
-    ["device/", "milestone/", "session/", "comment/", "reviewer/"].iter().any(|prefix| record.starts_with(prefix))
+    ["device/", "milestone/", "session/", "comment/", "reviewer/", "replace/"].iter().any(|prefix| record.starts_with(prefix))
 }
 
 /// The record holding a Work's Preamble: its Looks, extra Styles, Story elements and settings.

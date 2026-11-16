@@ -1,5 +1,6 @@
-// The Comments tab: the Work's Comments in text order, then the Detached ones, each with its
-// Replies; adding a Comment; and replying, editing, resolving and deleting.
+// The Comments tab: the Work comments, then the Work's Comments in text order, then the Detached
+// ones, each with its Replies; adding a Comment or a Work comment; and replying, editing,
+// resolving and deleting.
 //
 // It's drawn from the same answer from Rust as the editor's highlights, so the two always agree,
 // and drawn again whenever the History changed. A form being filled in survives that.
@@ -36,8 +37,8 @@ export type CommentsHooks = {
 /** An included Work's Comments shown on one of a Work's Inclusions. */
 export type IncludedMarks = { work: string; label: string; marks: Mark[] };
 
-/** Text selected in an Inclusion: its character, the selection in its text, what it includes. */
-export type IncludedTarget = { at: number; from: number; to: number; quote: string; label: string };
+/** Text selected in an Inclusion: its character, the selection in its text, what it includes (and its Work). */
+export type IncludedTarget = { at: number; from: number; to: number; quote: string; label: string; work: string | null };
 
 const AUTHOR = "author";
 const NEW_REVIEWER = "new";
@@ -86,6 +87,27 @@ function rememberSender(sender: string) {
   }
 }
 
+/**
+ * The sections folded on this Device: "work" (Work comments), "text", "detached", and
+ * "included:<Work>" for each included Work's.
+ */
+function foldedSections(): Set<string> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem("comments-folded") ?? "[]");
+    return new Set(Array.isArray(saved) ? saved.filter((k): k is string => typeof k === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function rememberFolded(folded: Set<string>) {
+  try {
+    localStorage.setItem("comments-folded", JSON.stringify([...folded]));
+  } catch {
+    // not remembered, then: no harm done
+  }
+}
+
 /** A form open in a card: its element stays across redraws, so nothing typed is lost. */
 type OpenForm = { comment: string; element: HTMLElement };
 
@@ -96,6 +118,8 @@ export class CommentsPanel {
   private form: OpenForm | null = null;
   /** The new Comment being written: its Work and its form. */
   private adding: { work: string; element: HTMLElement } | null = null;
+  /** The sections whose cards are hidden (see `foldedSections`). */
+  private folded = foldedSections();
 
   constructor(
     private readonly list: HTMLElement,
@@ -214,6 +238,7 @@ export class CommentsPanel {
           return;
         }
         rememberSender(sender!);
+        this.unfold("text");
         this.hooks.act(work, { op: "comment", from: at.from, to: at.to, sender: sender!, body });
         this.cancelAdding();
       },
@@ -221,6 +246,29 @@ export class CommentsPanel {
     });
     const heading = el("p", "comment-new-heading", "New Comment on the outlined text");
     element.prepend(heading);
+    this.adding = { work, element };
+    this.newArea.replaceChildren(element);
+    this.newArea.hidden = false;
+  }
+
+  /** Starts a new Work comment: on the Work as a whole, so no text is outlined. */
+  async startAddingWork(work: string) {
+    this.cancelAdding();
+    const picker = await this.senderPicker(work, lastSender());
+    const element = this.textForm({
+      initial: "",
+      placeholder: "Write the Comment…",
+      saveLabel: "Save",
+      picker,
+      save: (body, sender) => {
+        rememberSender(sender!);
+        this.unfold("work");
+        this.hooks.act(work, { op: "workComment", sender: sender!, body });
+        this.cancelAdding();
+      },
+      cancel: () => this.cancelAdding(),
+    });
+    element.prepend(el("p", "comment-new-heading", "New Comment on the whole Work"));
     this.adding = { work, element };
     this.newArea.replaceChildren(element);
     this.newArea.hidden = false;
@@ -240,6 +288,7 @@ export class CommentsPanel {
       picker,
       save: (body, sender) => {
         rememberSender(sender!);
+        if (target.work) this.unfold(`included:${target.work}`);
         this.cancelAdding();
         this.hooks.addIncluded(work, target, sender!, body).catch((e) => this.hooks.error(String(e)));
       },
@@ -262,11 +311,46 @@ export class CommentsPanel {
 
   // ---- Showing ----
 
-  /** Highlighted text was clicked: these Comments are marked and scrolled to. */
+  /** Highlighted text was clicked: these Comments are marked and scrolled to, their sections unfolded. */
   focus(ids: string[]) {
     this.focused = new Set(ids);
+    const work = this.hooks.work();
+    if (work) {
+      if (this.hooks.marks(work).some((m) => this.focused.has(m.id))) this.unfold("text");
+      for (const group of this.hooks.includedMarks(work)) {
+        if (group.marks.some((m) => this.focused.has(m.id))) this.unfold(`included:${group.work}`);
+      }
+    }
     this.render();
     this.list.querySelector(".comment-card.focused")?.scrollIntoView({ block: "nearest" });
+  }
+
+  // ---- Folding ----
+
+  private unfold(key: string) {
+    if (this.folded.delete(key)) rememberFolded(this.folded);
+  }
+
+  /**
+   * A section's heading, which folds and unfolds it: its title, how many it holds, and (folded)
+   * nothing below it. `rest` is what it shows when unfolded, note included.
+   */
+  private section(key: string, title: string, className: string, rest: HTMLElement[], count: number): HTMLElement[] {
+    const folded = this.folded.has(key);
+    const heading = el("h3", `comments-section-heading ${className}`);
+    const toggle = el("button", "comments-section-toggle");
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", String(!folded));
+    toggle.title = folded ? "Show them" : "Hide them (on this Device)";
+    toggle.append(el("span", "comments-section-title", title), el("span", "comments-section-count", String(count)));
+    toggle.addEventListener("click", () => {
+      if (this.folded.has(key)) this.folded.delete(key);
+      else this.folded.add(key);
+      rememberFolded(this.folded);
+      this.render();
+    });
+    heading.append(toggle);
+    return folded ? [heading] : [heading, ...rest];
   }
 
   /** Another Work is in front, or its Comments changed: draw the list again. */
@@ -279,13 +363,19 @@ export class CommentsPanel {
     if (this.form && !everyMark.some((m) => m.id === this.form!.comment)) this.form = null;
     this.hooks.counted(everyMark.filter((m) => !m.resolved).length);
     const shown = marks.filter((m) => this.hooks.showResolved() || !m.resolved);
-    const attached = shown.filter((m) => m.ranges.length > 0);
-    const detached = shown.filter((m) => m.ranges.length === 0);
+    const onWork = shown.filter((m) => m.onWork);
+    const attached = shown.filter((m) => !m.onWork && m.ranges.length > 0);
+    const detached = shown.filter((m) => !m.onWork && m.ranges.length === 0);
     const children: HTMLElement[] = [];
     // Comments on included text belong to the Work it comes from; acting on one acts there.
     const includedShown = included
       .map((g) => ({ ...g, marks: g.marks.filter((m) => this.hooks.showResolved() || !m.resolved) }))
       .filter((g) => g.marks.length > 0);
+    if (work) {
+      const add = button("Comment on this Work", () => void this.startAddingWork(work), "A Comment on the Work as a whole, not on any of its text");
+      add.classList.add("comments-on-work-button");
+      children.push(add);
+    }
     if (!work) {
       children.push(el("p", "muted", "Open a Work to see its Comments."));
     } else if (shown.length === 0 && includedShown.length === 0) {
@@ -297,16 +387,25 @@ export class CommentsPanel {
           : `No Comments yet. Select some text and right-click it${keyLabel("addComment") ? `, or press ${keyLabel("addComment")}` : ""}.`));
     }
     if (work) {
-      children.push(...attached.map((m) => this.card(work, m)));
+      // Each kind under a heading that folds it. Work comments first (Rust lists them oldest
+      // first), like a cover note above the rest.
+      if (onWork.length > 0) {
+        children.push(...this.section("work", "On the whole Work", "comments-on-work-heading", onWork.map((m) => this.card(work, m)), onWork.length));
+      }
+      if (attached.length > 0) {
+        children.push(...this.section("text", "On the text", "comments-on-text-heading", attached.map((m) => this.card(work, m)), attached.length));
+      }
       for (const group of includedShown) {
-        children.push(el("h3", "comments-included-heading", `In ${group.label}`));
-        children.push(el("p", "muted comments-included-note", `Kept in ${group.work.split("/").pop()}, and shown there too.`));
-        children.push(...group.marks.map((m) => this.card(group.work, m)));
+        children.push(...this.section(`included:${group.work}`, `In ${group.label}`, "comments-included-heading", [
+          el("p", "muted comments-included-note", `Kept in ${group.work.split("/").pop()}, and shown there too.`),
+          ...group.marks.map((m) => this.card(group.work, m)),
+        ], group.marks.length));
       }
       if (detached.length > 0) {
-        children.push(el("h3", "comments-detached-heading", "Detached"));
-        children.push(el("p", "muted comments-detached-note", "All of their text has been deleted. They're attached again if any of it comes back."));
-        children.push(...detached.map((m) => this.card(work, m)));
+        children.push(...this.section("detached", "Detached", "comments-detached-heading", [
+          el("p", "muted comments-detached-note", "All of their text has been deleted. They're attached again if any of it comes back."),
+          ...detached.map((m) => this.card(work, m)),
+        ], detached.length));
       }
     }
     this.list.replaceChildren(...children);
@@ -323,7 +422,8 @@ export class CommentsPanel {
     header.append(el("strong", "comment-name", mark.name), el("span", "comment-time", when(mark.timeMs)));
     if (mark.resolved) header.append(el("span", "comment-state", "Resolved"));
     card.append(header);
-    card.append(el("blockquote", "comment-quote", shorten(mark.quote, 120)));
+    // A Work comment has no text to quote.
+    if (!mark.onWork) card.append(el("blockquote", "comment-quote", shorten(mark.quote, 120)));
 
     const editingThis = this.form?.comment === mark.id && this.form.element.dataset.for === mark.id;
     if (editingThis) card.append(this.form!.element);

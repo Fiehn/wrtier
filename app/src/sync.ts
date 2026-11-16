@@ -24,9 +24,10 @@ type Op =
   | { op: "sync" }
   | { op: "marks" }
   | { op: "tints" }
-  | { op: "find"; first: string; last: string | null }
+  | { op: "locate"; first: string; last: string | null }
   | { op: "stretch"; from: number; to: number }
   | { op: "include"; at: number; work: string; chapter: number | null }
+  | { op: "replace"; edits: { from: number; to: number; text: string }[]; find: string; with: string; count: number }
   | CommentOp
   | HistoryOp;
 
@@ -40,6 +41,7 @@ export type HistoryOp =
 /** Something done to Comments. Sent in order with the typing; Rust closes the open burst first. */
 export type CommentOp =
   | { op: "comment"; from: number; to: number; sender: string; body: string }
+  | { op: "workComment"; sender: string; body: string }
   | { op: "reply"; comment: string; sender: string; body: string }
   | { op: "editComment"; id: string; body: string }
   | { op: "setCommentSender"; id: string; sender: string }
@@ -63,15 +65,17 @@ export type ReplyMark = {
 /** A Comment: its highlight, and what the Comments panel shows (work.rs `Mark`). Positions are UTF-16, in the editor's text. */
 export type Mark = {
   id: string;
-  /** Empty: the Comment is detached. */
+  /** Empty: the Comment is detached, or a Work comment. */
   ranges: [number, number][];
+  /** A Work comment: on the Work as a whole, with no text and no quote. */
+  onWork: boolean;
   sender: string;
   name: string;
   /** A colour slot, "author" or "unknown". */
   colour: string;
   body: string;
   resolved: boolean;
-  /** The text it was attached to, as selected. */
+  /** The text it was attached to, as selected; empty for a Work comment. */
   quote: string;
   timeMs: number;
   replies: ReplyMark[];
@@ -112,8 +116,8 @@ export type WorkState = {
   marks: Mark[] | null;
   /** The newest Sessions' text (in the answer to a batch that asked for it). */
   tints: Tint[] | null;
-  /** Where a Find's characters are (only in the answer to a batch with one); null: not shown any more. */
-  found?: [number, number] | null;
+  /** Where a `locate`'s characters are (only in the answer to a batch with one); null: not shown any more. */
+  located?: [number, number] | null;
   /** The text a "History of this text" picked, quoted (only in the answer to that); null: nothing there. */
   stretch?: string | null;
 };
@@ -123,9 +127,14 @@ export type Whereabouts = { kind: "renamed"; to: string } | { kind: "trashed" } 
 /** Marks the editor's own changes from Rust, so they aren't sent back. */
 export const fromHistory = Annotation.define<boolean>();
 
+/** What a Find and replace action was: its edits go to Rust as one `replace`, which undo takes back whole. */
+export type ReplaceInfo = { find: string; with: string; count: number };
+/** Marks the edits of a Find and replace action (find.ts). */
+export const replacing = Annotation.define<ReplaceInfo>();
+
 /** Something waiting to be sent. Positions are in the text as it was just before it. */
 type Item =
-  | { kind: "edit"; changes: ChangeSet; event: string; origin: Origin }
+  | { kind: "edit"; changes: ChangeSet; event: string; origin: Origin; replace?: ReplaceInfo }
   | { kind: "cursor"; pos: number }
   | { kind: "undo" }
   | { kind: "redo" }
@@ -134,7 +143,7 @@ type Item =
   | { kind: "tints" }
   | { kind: "comment"; op: CommentOp }
   | { kind: "history"; op: HistoryOp }
-  | { kind: "find"; first: string; last: string | null; answer: (range: [number, number] | null) => void }
+  | { kind: "locate"; first: string; last: string | null; answer: (range: [number, number] | null) => void }
   | { kind: "stretch"; from: number; to: number; answer: (quote: string | null) => void }
   | { kind: "include"; at: number; work: string; chapter: number | null };
 
@@ -158,8 +167,8 @@ function toOps(item: Item): Op[] {
     case "comment":
     case "history":
       return [item.op];
-    case "find":
-      return [{ op: "find", first: item.first, last: item.last }];
+    case "locate":
+      return [{ op: "locate", first: item.first, last: item.last }];
     case "stretch":
       return [{ op: "stretch", from: item.from, to: item.to }];
     case "include":
@@ -167,6 +176,8 @@ function toOps(item: Item): Op[] {
   }
   const parts: { from: number; to: number; text: string }[] = [];
   item.changes.iterChanges((from, to, _fromB, _toB, inserted) => parts.push({ from, to, text: inserted.toString() }));
+  // Find and replace: all its edits as one op, in the text as it was before them.
+  if (item.replace) return [{ op: "replace", edits: parts, ...item.replace }];
   if (item.event === "move.drop" && parts.length === 2) {
     const removed = parts.find((p) => p.text === "" && p.to > p.from);
     const added = parts.find((p) => p.from === p.to && p.text !== "");
@@ -242,7 +253,7 @@ export class WorkSync {
     if (tr.docChanged) {
       const event = EVENTS.find((e) => tr.isUserEvent(e)) ?? "edit";
       const origin: Origin = tr.isUserEvent("undo") ? "undo" : tr.isUserEvent("redo") ? "redo" : "input";
-      this.queue.push({ kind: "edit", changes: tr.changes, event, origin });
+      this.queue.push({ kind: "edit", changes: tr.changes, event, origin, replace: tr.annotation(replacing) });
     } else if (tr.selection) {
       // Only where the cursor ends up matters: a burst closes when the cursor leaves it.
       const pos = tr.newSelection.main.head;
@@ -317,9 +328,9 @@ export class WorkSync {
    * through the queue so the answer fits around everything typed meanwhile. Null if they
    * aren't shown any more.
    */
-  find(first: string, last: string | null): Promise<[number, number] | null> {
+  locate(first: string, last: string | null): Promise<[number, number] | null> {
     return new Promise((answer) => {
-      this.queue.push({ kind: "find", first, last, answer });
+      this.queue.push({ kind: "locate", first, last, answer });
       void this.flush();
     });
   }
@@ -427,7 +438,7 @@ export class WorkSync {
       const state = await invoke<WorkState>("edit", { id: this.id, ops: items.flatMap(toOps) });
       this.receive(state, len, undone, items);
     } catch (e) {
-      for (const item of items) if (item.kind === "find" || item.kind === "stretch") item.answer(null);
+      for (const item of items) if (item.kind === "locate" || item.kind === "stretch") item.answer(null);
       this.events.error(String(e));
       await this.resync();
     } finally {
@@ -473,14 +484,14 @@ export class WorkSync {
       const since = this.queue.flatMap((item) => (item.kind === "edit" ? [item.changes] : []));
       this.events.tints(fitTints(state.tints, since));
     }
-    if (items.some((item) => item.kind === "find")) {
+    if (items.some((item) => item.kind === "locate")) {
       // Like the highlights: for the text right after the batch, fitted around what was typed since.
-      let range = state.found ?? null;
+      let range = state.located ?? null;
       for (const item of this.queue) {
         if (range && item.kind === "edit") range = [item.changes.mapPos(range[0], 1), item.changes.mapPos(range[1], -1)];
       }
       if (range && range[1] < range[0]) range = [range[0], range[0]];
-      for (const item of items) if (item.kind === "find") item.answer(range);
+      for (const item of items) if (item.kind === "locate") item.answer(range);
     }
     for (const item of items) if (item.kind === "stretch") item.answer(state.stretch ?? null);
     this.noteBurst(state.burst, undone);

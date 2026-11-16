@@ -45,6 +45,23 @@ export type ChapterChoice = { title: string; at: number };
 export const setInclusions = StateEffect.define<InclusionView[]>();
 /** Folds or unfolds the Inclusion whose character is here. */
 const toggleFold = StateEffect.define<number>();
+/** Unfolds the Inclusion whose character is here (Find and replace's current match is in it). */
+export const unfoldInclusion = StateEffect.define<number>();
+
+/** Find and replace's matches in one Inclusion's text (UTF-16, in its text or its Raw view line). */
+export type IncludedFind = { ranges: [number, number][]; current: [number, number] | null };
+
+/** Find and replace's matches in each Inclusion, by its character (find.ts provides them). */
+export const includedFinds = Facet.define<Map<number, IncludedFind>, Map<number, IncludedFind>>({
+  combine: (values) => values[0] ?? new Map(),
+  compare: (a, b) => a.size === b.size && [...a].every(([at, f]) => JSON.stringify(f) === JSON.stringify(b.get(at))),
+});
+
+/**
+ * In the Reading panel (reading.ts): Inclusions are only read there, so their bar has no
+ * "Styles" and no note about a split Chapter, and "Go to" reads the included Work there.
+ */
+export const readOnlyInclusions = Facet.define<boolean, boolean>({ combine: (values) => values.some(Boolean) });
 
 type Shown = { views: InclusionView[]; folded: number[] };
 
@@ -65,25 +82,27 @@ const shownField = StateField.define<Shown>({
     for (const e of tr.effects) {
       if (e.is(setInclusions)) views = fitting(tr.newDoc, e.value);
       if (e.is(toggleFold)) folded = folded.includes(e.value) ? folded.filter((at) => at !== e.value) : [...folded, e.value];
+      if (e.is(unfoldInclusion) && folded.includes(e.value)) folded = folded.filter((at) => at !== e.value);
     }
     return views === value.views && folded === value.folded ? value : { views, folded };
   },
 });
 
 class IncludedText extends WidgetType {
-  constructor(readonly v: InclusionView, readonly folded: boolean) {
+  constructor(readonly v: InclusionView, readonly folded: boolean, readonly finds: IncludedFind | null) {
     super();
   }
 
   eq(other: IncludedText) {
     const a = this.v;
     const b = other.v;
-    return this.folded === other.folded && a.label === b.label && a.text === b.text && a.missing === b.missing && a.work === b.work && a.at === b.at
+    return this.folded === other.folded && JSON.stringify(this.finds) === JSON.stringify(other.finds) && a.label === b.label && a.text === b.text && a.missing === b.missing && a.work === b.work && a.at === b.at
       && JSON.stringify(a.comments) === JSON.stringify(b.comments) && JSON.stringify(a.split) === JSON.stringify(b.split) && JSON.stringify(a.styles) === JSON.stringify(b.styles);
   }
 
   toDOM(view: EditorView) {
     const v = this.v;
+    const readOnly = view.state.facet(readOnlyInclusions);
     const box = document.createElement("div");
     box.className = "cm-inclusion" + (v.missing ? " missing" : "") + (this.folded ? " folded" : "");
     box.contentEditable = "false";
@@ -129,13 +148,13 @@ class IncludedText extends WidgetType {
     styles.addEventListener("click", (e) => {
       box.dispatchEvent(new CustomEvent("wrtier-inclusion-styles", { bubbles: true, detail: { at: v.at, styles: v.styles ?? [], x: e.clientX, y: e.clientY } }));
     });
-    bar.append(styles);
+    if (!readOnly) bar.append(styles);
     if (v.work) {
       const go = document.createElement("button");
       go.type = "button";
       go.className = "cm-inclusion-go";
       go.textContent = "Go to";
-      go.title = `Open ${v.work} to change this text`;
+      go.title = readOnly ? `Read ${v.work} here` : `Open ${v.work} to change this text`;
       go.addEventListener("mousedown", (e) => e.preventDefault());
       go.addEventListener("click", () => {
         box.dispatchEvent(new CustomEvent("wrtier-open-work", { bubbles: true, detail: { work: v.work, at: v.starts } }));
@@ -143,7 +162,7 @@ class IncludedText extends WidgetType {
       bar.append(go);
     }
     box.append(bar);
-    if (v.split) box.append(this.splitNote(v, v.split));
+    if (v.split && !readOnly) box.append(this.splitNote(v, v.split));
     if (v.missing) {
       const why = document.createElement("p");
       why.className = "cm-inclusion-missing";
@@ -153,7 +172,7 @@ class IncludedText extends WidgetType {
       const text = document.createElement("div");
       text.className = "cm-inclusion-text";
       if (v.language) text.lang = v.language;
-      text.append(...readable(v.text, v.comments));
+      text.append(...readable(v.text, v.comments, this.finds));
       // A highlight clicked: its Comments, in the Comments panel.
       text.addEventListener("click", (e) => {
         const ids: string[] = [];
@@ -216,18 +235,18 @@ export function rawLine(v: InclusionView): string {
 
 /** An Inclusion in the Raw view: its one uneditable line. */
 class RawInclusion extends WidgetType {
-  constructor(readonly v: InclusionView) {
+  constructor(readonly v: InclusionView, readonly finds: IncludedFind | null) {
     super();
   }
 
   eq(other: RawInclusion) {
-    return rawLine(this.v) === rawLine(other.v) && this.v.at === other.v.at;
+    return rawLine(this.v) === rawLine(other.v) && this.v.at === other.v.at && JSON.stringify(this.finds) === JSON.stringify(other.finds);
   }
 
   toDOM() {
     const span = document.createElement("span");
     span.className = "cm-inclusion-raw" + (this.v.missing ? " missing" : "");
-    span.textContent = rawLine(this.v);
+    span.append(...marked(rawLine(this.v), 0, findHighlights(this.finds)));
     span.title = "An Inclusion: shown in full in the Formatted view and on the pages. Change its text in the Work it includes.";
     return span;
   }
@@ -241,8 +260,15 @@ class RawInclusion extends WidgetType {
 /** The Raw view is on: each Inclusion shows as its one `#inclusion(…)` line instead of the block. */
 export const rawInclusions = Facet.define<boolean, boolean>({ combine: (values) => values.some(Boolean) });
 
-/** A Comment's highlight in included text: where (UTF-16, in the included text) and whose. */
-type Highlight = { from: number; to: number; id: string; colour: string; resolved: boolean };
+/** A highlight in included text: where (UTF-16, in the included text), and a Comment's (whose) or a Find match. */
+type Highlight = { from: number; to: number } & ({ id: string; colour: string; resolved: boolean } | { find: "match" | "current" });
+
+/** Find and replace's matches as highlights. */
+function findHighlights(finds: IncludedFind | null): Highlight[] {
+  if (!finds) return [];
+  const current = finds.current;
+  return finds.ranges.map(([from, to]) => ({ from, to, find: current && current[0] === from && current[1] === to ? "current" as const : "match" as const }));
+}
 
 /** `text` (which starts at `start` in the included text) with the highlights over it. */
 function marked(text: string, start: number, highlights: Highlight[]): (Node | string)[] {
@@ -268,8 +294,12 @@ function marked(text: string, start: number, highlights: Highlight[]): (Node | s
     let node: Node = document.createTextNode(piece);
     for (const h of over) {
       const span = document.createElement("span");
-      span.className = `cm-comment cm-comment-${h.colour}${h.resolved ? " cm-comment-resolved" : ""}`;
-      span.dataset.comment = h.id;
+      if ("find" in h) {
+        span.className = h.find === "current" ? "cm-find-match cm-find-current" : "cm-find-match";
+      } else {
+        span.className = `cm-comment cm-comment-${h.colour}${h.resolved ? " cm-comment-resolved" : ""}`;
+        span.dataset.comment = h.id;
+      }
       span.append(node);
       node = span;
     }
@@ -284,8 +314,11 @@ function marked(text: string, start: number, highlights: Highlight[]): (Node | s
  * between blank lines. Each block says where its text starts in `text` (`data-from`), so a
  * selection in it can be traced back.
  */
-export function readable(text: string, comments: Mark[] = []): HTMLElement[] {
-  const highlights: Highlight[] = comments.flatMap((m) => m.ranges.map(([from, to]) => ({ from, to, id: m.id, colour: m.colour, resolved: m.resolved })));
+export function readable(text: string, comments: Mark[] = [], finds: IncludedFind | null = null): HTMLElement[] {
+  const highlights: Highlight[] = [
+    ...comments.flatMap((m) => m.ranges.map(([from, to]) => ({ from, to, id: m.id, colour: m.colour, resolved: m.resolved }))),
+    ...findHighlights(finds),
+  ];
   const out: HTMLElement[] = [];
   let paragraph: { from: number; lines: string[] } | null = null;
   const flush = () => {
@@ -348,13 +381,14 @@ function decorations(state: EditorState): DecorationSet {
   const { views, folded } = state.field(shownField);
   const doc = state.doc;
   const raw = state.facet(rawInclusions);
+  const finds = state.facet(includedFinds);
   const ranges = [...views].sort((a, b) => a.at - b.at).map((v) => {
-    if (raw) return Decoration.replace({ widget: new RawInclusion(v) }).range(v.at, v.at + 1);
+    if (raw) return Decoration.replace({ widget: new RawInclusion(v, finds.get(v.at) ?? null) }).range(v.at, v.at + 1);
     const line = doc.lineAt(v.at);
     // On a line of its own (as Rust puts it): a block. Anywhere else (typed oddly in another
     // editor): inline, so the rest of the line still shows.
     const alone = line.from === v.at && line.to === v.at + 1;
-    return Decoration.replace({ widget: new IncludedText(v, folded.includes(v.at)), block: alone }).range(v.at, v.at + 1);
+    return Decoration.replace({ widget: new IncludedText(v, folded.includes(v.at), finds.get(v.at) ?? null), block: alone }).range(v.at, v.at + 1);
   });
   return Decoration.set(ranges);
 }
@@ -363,7 +397,8 @@ const decorationField = StateField.define<DecorationSet>({
   create: (state) => decorations(state),
   update(deco, tr) {
     const same = tr.startState.field(shownField) === tr.state.field(shownField)
-      && tr.startState.facet(rawInclusions) === tr.state.facet(rawInclusions);
+      && tr.startState.facet(rawInclusions) === tr.state.facet(rawInclusions)
+      && tr.startState.facet(includedFinds) === tr.state.facet(includedFinds);
     return same ? deco.map(tr.changes) : decorations(tr.state);
   },
   provide: (field) => [EditorView.decorations.from(field), EditorView.atomicRanges.of((view) => view.state.field(field))],
@@ -385,12 +420,20 @@ const WORK_DRAG = "application/x-wrtier-work";
 let draggedWork: string | null = null;
 let forgetDrag: number | undefined;
 
-/** A Work's pill in the Vault browser started being dragged: it can be dropped in a Work's text. */
+/**
+ * A Work's pill in the Vault browser started being dragged: it can be dropped in a Work's text
+ * (a copy: it's included) or on a folder in the Vault browser (a move).
+ */
 export function startWorkDrag(event: DragEvent, work: string) {
   draggedWork = work;
   window.clearTimeout(forgetDrag);
   event.dataTransfer?.setData(WORK_DRAG, work);
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = "copy";
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "copyMove";
+}
+
+/** The Work (its ID) being dragged from the Vault browser in this drag, if one is. */
+export function workBeingDragged(event: DragEvent): string | null {
+  return (event.dataTransfer?.types.includes(WORK_DRAG) ? event.dataTransfer.getData(WORK_DRAG) : "") || draggedWork;
 }
 
 /** The drag ended (dropped, or let go elsewhere). */

@@ -1,7 +1,10 @@
 // A small right-click menu. It closes on a click elsewhere, Escape, scrolling, or the window
 // losing focus; arrow keys move between its items.
 
-export type MenuItem = { label: string; run: () => void } | "separator";
+/** One colour to pick in a row of them: `css` null is "no colour". */
+export type Swatch = { label: string; css: string | null; chosen: boolean; run: () => void };
+
+export type MenuItem = { label: string; run: () => void } | { swatches: Swatch[] } | "separator";
 
 let open: HTMLElement | null = null;
 
@@ -12,7 +15,12 @@ function close() {
   window.removeEventListener("keydown", keys, true);
   window.removeEventListener("blur", close);
   window.removeEventListener("resize", close);
-  window.removeEventListener("scroll", close, true);
+  window.removeEventListener("scroll", scrolled, true);
+}
+
+/** Scrolling anything but the menu itself (a long one scrolls) closes it. */
+function scrolled(e: Event) {
+  if (open && !open.contains(e.target as Node)) close();
 }
 
 function outside(e: PointerEvent) {
@@ -24,11 +32,12 @@ function keys(e: KeyboardEvent) {
   if (e.key === "Escape") {
     e.preventDefault();
     close();
-  } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+  } else if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(e.key)) {
     e.preventDefault();
     const buttons = [...open.querySelectorAll("button")];
     const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
-    const next = (at + (e.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length;
+    const forward = e.key === "ArrowDown" || e.key === "ArrowRight";
+    const next = (at + (forward ? 1 : buttons.length - 1)) % buttons.length;
     buttons[next]?.focus();
   }
 }
@@ -43,6 +52,28 @@ export function showMenu(x: number, y: number, items: MenuItem[]) {
   for (const item of items) {
     if (item === "separator") {
       menu.append(document.createElement("hr"));
+      continue;
+    }
+    if ("swatches" in item) {
+      const row = document.createElement("div");
+      row.className = "menu-swatches";
+      row.setAttribute("role", "radiogroup");
+      for (const swatch of item.swatches) {
+        const pick = document.createElement("button");
+        pick.type = "button";
+        pick.className = swatch.css ? "colour-pick" : "colour-pick colour-none";
+        pick.setAttribute("role", "radio");
+        pick.setAttribute("aria-checked", String(swatch.chosen));
+        pick.setAttribute("aria-label", swatch.label);
+        pick.title = swatch.label;
+        if (swatch.css) pick.style.background = swatch.css;
+        pick.addEventListener("click", () => {
+          close();
+          swatch.run();
+        });
+        row.append(pick);
+      }
+      menu.append(row);
       continue;
     }
     const button = document.createElement("button");
@@ -66,5 +97,5 @@ export function showMenu(x: number, y: number, items: MenuItem[]) {
   window.addEventListener("keydown", keys, true);
   window.addEventListener("blur", close);
   window.addEventListener("resize", close);
-  window.addEventListener("scroll", close, true);
+  window.addEventListener("scroll", scrolled, true);
 }

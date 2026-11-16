@@ -60,6 +60,39 @@ test("the Formatted view hides markup, and shows it while the cursor is inside",
   await expect.poll(() => textOf(app)).toContain("Morning came slowly. It was _quiet_ there.");
 });
 
+test("Ctrl+F finds in the whole Work, past the lines drawn, and Replace all is one op", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+  // Far more text than the editor draws at once, with the rain at the very end.
+  await page.addInitScript(() => {
+    const fake = (window as any).__fake;
+    fake.texts.Rain += "Filler line.\n\n".repeat(400) + "The *rain* had stopped at last.\n";
+  });
+  await page.goto("/");
+  await expect(line(page, "She walked home.")).toBeVisible();
+  await line(page, "She walked home.").click();
+  await page.keyboard.press("Control+f");
+  const bar = page.locator("#find-bar");
+  await expect(bar).toBeVisible();
+  await expect(page.locator("#find-input")).toBeFocused();
+  // As it reads: the stars around "rain" are hidden, so "rain had" finds it.
+  await page.keyboard.type("rain had");
+  await expect(page.locator("#find-count")).toHaveText("2 of 2"); // the first after the cursor is the far one
+  await expect(line(page, "had stopped at last.").locator(".cm-find-current")).toBeVisible();
+  await page.keyboard.press("Control+h");
+  await expect(page.locator("#replace-input")).toBeFocused();
+  await page.keyboard.type("snow has");
+  await page.locator("#replace-all").click();
+  await expect(page.locator("#find-note")).toHaveText("Replaced 2.");
+  await expect.poll(() => page.evaluate(() => (window as any).__fake.texts.Rain)).toContain("The *snow* has stopped at last.");
+  const sent = await page.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd === "edit").flatMap((e: any) => e.args.ops));
+  expect(sent.filter((op: Op) => op.op === "replace")).toHaveLength(1);
+  await page.keyboard.press("Escape");
+  await expect(bar).toBeHidden();
+  expect(errors, "errors in the page").toEqual([]);
+});
+
 test("the Raw view shows every mark, coloured by Typst", async ({ app }) => {
   await endOf(app, "She walked home.");
   await app.keyboard.press("Control+e");
@@ -111,6 +144,55 @@ test("right-click on a selection adds a Comment", async ({ app }) => {
   await expect(app.locator(".cm-comment", { hasText: "Morning came slowly." })).toBeVisible();
 });
 
+test("the Comments panel adds a Work comment, listed first with no quote", async ({ app }) => {
+  // One on the text first, so the Work comment has something to come before.
+  await selectLine(app, "Morning came slowly.");
+  await line(app, "Morning came slowly.").click({ button: "right", position: { x: 30, y: 8 } });
+  await app.getByRole("menuitem", { name: /Add Comment/ }).click();
+  await app.locator("#comments-new textarea").fill("Too slow?");
+  await app.locator("#comments-new").getByRole("button", { name: "Save" }).click();
+  await expect(app.locator(".comment-card")).toHaveCount(1);
+
+  await app.getByRole("button", { name: "Comment on this Work" }).click();
+  await expect(app.locator("#comments-new")).toContainText("New Comment on the whole Work");
+  await expect(app.locator(".cm-comment-pending")).toHaveCount(0);
+  await app.locator("#comments-new textarea").fill("The ending drags.");
+  await app.locator("#comments-new").getByRole("button", { name: "Save" }).click();
+
+  await expect.poll(async () => (await ops(app)).find((op) => op.op === "workComment")).toBeTruthy();
+  const sent = (await ops(app)).find((op) => op.op === "workComment")!;
+  expect([sent.sender, sent.body]).toEqual(["author", "The ending drags."]);
+  await expect(app.locator("#comments-new")).toBeHidden();
+  await expect(app.locator("#comments-list .comments-section-title")).toHaveText(["On the whole Work", "On the text"]);
+  const cards = app.locator(".comment-card");
+  await expect(cards).toHaveCount(2);
+  await expect(cards.first()).toContainText("The ending drags.");
+  await expect(cards.first().locator(".comment-quote")).toHaveCount(0);
+  await expect(cards.nth(1).locator(".comment-quote")).toHaveText("Morning came slowly.");
+
+  // Each kind folds under its heading, remembered on this Device.
+  const onWork = app.locator(".comments-on-work-heading button");
+  await onWork.click();
+  await expect(onWork).toHaveAttribute("aria-expanded", "false");
+  await expect(onWork).toContainText("1");
+  await expect(cards).toHaveCount(1);
+  await expect(cards.first()).toContainText("Too slow?");
+  expect(await app.evaluate(() => localStorage.getItem("comments-folded"))).toBe(JSON.stringify(["work"]));
+  await app.locator(".comments-on-text-heading button").click();
+  await expect(cards).toHaveCount(0);
+  await expect(app.locator("#comments-list .comments-section-title")).toHaveText(["On the whole Work", "On the text"]);
+  await onWork.click();
+  await expect(cards).toHaveCount(1);
+  await expect(cards.first()).toContainText("The ending drags.");
+
+  // Clicking a highlight unfolds the text's Comments to show it.
+  await app.locator(".cm-comment", { hasText: "Morning came slowly." }).click();
+  await expect(cards).toHaveCount(2);
+  await expect(app.locator(".comment-card.focused")).toContainText("Too slow?");
+  await app.locator(".comments-on-work-heading button").click();
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/work-comment.png` : undefined });
+});
+
 test("the sidebar and the right panel hide and show", async ({ app }) => {
   const sidebar = app.locator("#sidebar");
   const panel = app.locator("#side-panel");
@@ -125,6 +207,239 @@ test("the sidebar and the right panel hide and show", async ({ app }) => {
   await expect(panel).toBeVisible({ visible: !panelShown });
   await app.keyboard.press("Control+Shift+P");
   await expect(panel).toBeVisible({ visible: panelShown });
+});
+
+test("the panels are resized by dragging their edges, and the widths are remembered", async ({ app }) => {
+  const sidebar = app.locator("#sidebar");
+  const panel = app.locator("#side-panel");
+  const sidebarEdge = app.locator("#sidebar-resizer");
+  const panelEdge = app.locator("#panel-resizer");
+  const width = (l: Locator) => l.evaluate((e) => Math.round(e.getBoundingClientRect().width));
+  /** Drags a handle sideways by `by` pixels, in a few steps as a hand would. */
+  async function drag(handle: Locator, ...steps: number[]) {
+    const box = (await handle.boundingBox())!;
+    let x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await app.mouse.move(x, y);
+    await app.mouse.down();
+    for (const by of steps) await app.mouse.move((x += by), y, { steps: 3 });
+    await app.mouse.up();
+  }
+  if (!(await panel.isVisible())) await app.keyboard.press("Control+Shift+P");
+  await expect(panel).toBeVisible();
+
+  // Today's widths, at first.
+  expect(await width(sidebar)).toBe(280);
+  expect(await width(panel)).toBe(538); // 42% of 1280
+
+  await drag(panelEdge, -40); // the Side panel's edge is on its left
+  expect(await width(panel)).toBe(578);
+  // As wide as it can go: the editor keeps 400px.
+  await drag(panelEdge, -400);
+  expect(await width(panel)).toBe(1280 - 280 - 400);
+  await panelEdge.dblclick();
+  expect(await width(panel)).toBe(538);
+
+  // A wider Vault browser: the Side panel gives way so the editor keeps its 400px.
+  await drag(sidebarEdge, 100);
+  expect(await width(sidebar)).toBe(380);
+  expect(await width(panel)).toBe(1280 - 380 - 400);
+
+  // Dragged all the way: hidden, and dragging back out before letting go brings it back.
+  await drag(sidebarEdge, -300, 150);
+  await expect(sidebar).toBeVisible();
+  expect(await width(sidebar)).toBe(230);
+  // Hidden by dragging, it comes back at the width it had before that drag.
+  await drag(sidebarEdge, -200);
+  await expect(sidebar).toBeHidden();
+  await expect(sidebarEdge).toBeHidden();
+  await app.keyboard.press("Control+\\");
+  await expect(sidebar).toBeVisible();
+  expect(await width(sidebar)).toBe(230);
+
+  // The keyboard: arrows move the edge, Enter goes back to the default.
+  await panelEdge.focus();
+  await app.keyboard.press("ArrowLeft");
+  expect(await width(panel)).toBe(538 + 16);
+  await app.keyboard.press("Shift+ArrowRight");
+  expect(await width(panel)).toBe(538 + 16 - 64);
+  await app.keyboard.press("Home");
+  expect(await width(panel)).toBe(260);
+  await app.keyboard.press("Enter");
+  expect(await width(panel)).toBe(538);
+  await drag(panelEdge, -40);
+
+  // A narrower window shows them narrower (the Side panel first) without forgetting.
+  await app.setViewportSize({ width: 850, height: 800 });
+  expect(await width(panel)).toBe(260);
+  expect(await width(sidebar)).toBe(850 - 400 - 260);
+  await app.setViewportSize({ width: 1280, height: 800 });
+  expect(await width(sidebar)).toBe(230);
+  expect(await width(panel)).toBe(578);
+
+  // Remembered on this Device.
+  await app.reload();
+  await expect(line(app, "She walked home.")).toBeVisible();
+  expect(await width(sidebar)).toBe(230);
+  expect(await width(panel)).toBe(578);
+});
+
+test("the Page preview zooms by its menu, its keys and Ctrl + wheel, keeping the spot in view", async ({ app }) => {
+  const panel = app.locator("#side-panel");
+  const list = app.locator("#preview-pages");
+  const zoom = app.locator("#preview-zoom");
+  const first = list.locator(".page").first();
+  const width = (l: Locator) => l.evaluate((e) => Math.round(e.getBoundingClientRect().width));
+  /** The page in the middle of the view. */
+  const middlePage = () =>
+    list.evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return (hit?.closest(".page") as HTMLElement | null)?.dataset.page ?? null;
+    });
+
+  // Eight A5 pages (420 × 595 points).
+  if (await panel.isVisible()) await app.keyboard.press("Control+Shift+P");
+  await app.evaluate(() => {
+    (window as any).__fake.pages = Array.from({ length: 8 }, () => ({ width: 420, height: 595 }));
+  });
+  await app.keyboard.press("Control+Shift+P");
+  await app.locator("#panel-tab-pages").click();
+  await expect(list.locator(".page img")).not.toHaveCount(0);
+
+  // Fit width at first: as wide as the column.
+  await expect(zoom).toHaveValue("width");
+  const column = await list.evaluate((el) => el.clientWidth - 32);
+  expect(await width(first)).toBe(column);
+
+  // 100% is the real size: 420pt is 560 CSS pixels, wider than the panel, so it scrolls sideways.
+  await zoom.selectOption("1");
+  expect(await width(first)).toBe(560);
+  expect(await list.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+
+  // Fit page: a whole page in view.
+  await zoom.selectOption("page");
+  const room = await list.evaluate((el) => el.clientHeight - 8 - 14);
+  expect(await first.evaluate((e) => Math.round(e.getBoundingClientRect().height))).toBe(room);
+
+  // The keys, while the pages have the focus; the spot in the middle stays there.
+  await zoom.selectOption("1");
+  await list.evaluate((el) => (el.scrollTop = el.scrollHeight / 2));
+  const middle = await middlePage();
+  expect(middle).not.toBeNull();
+  await list.focus();
+  await app.keyboard.press("Control+=");
+  await expect(zoom).toHaveValue("1.25");
+  expect(await width(first)).toBe(700);
+  expect(await middlePage()).toBe(middle);
+  await app.keyboard.press("Control+-");
+  await app.keyboard.press("Control+-");
+  await expect(zoom).toHaveValue("0.75");
+  expect(await middlePage()).toBe(middle);
+  await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/zoom.png` : undefined });
+  await app.keyboard.press("Control+0");
+  await expect(zoom).toHaveValue("width");
+
+  // Ctrl + wheel over the pages: about 10% a notch, and the menu shows where it landed.
+  await zoom.selectOption("1");
+  await first.hover();
+  await app.keyboard.down("Control");
+  await app.mouse.wheel(0, -100);
+  await app.keyboard.up("Control");
+  await expect.poll(() => width(first)).toBeGreaterThan(560);
+  const landed = Number(await zoom.inputValue());
+  expect(landed).toBeGreaterThan(1);
+  expect(landed).toBeLessThanOrEqual(1.25);
+
+  // In the editor, the keys do nothing to the pages.
+  await line(app, "She walked home.").click();
+  const before = await width(first);
+  await app.keyboard.press("Control+=");
+  expect(await width(first)).toBe(before);
+
+  // Remembered on this Device.
+  await app.reload();
+  await expect(line(app, "She walked home.")).toBeVisible();
+  await expect(zoom).toHaveValue(String(landed));
+});
+
+test("Find in Vault finds in every Work, opens matches in a passing tab, and keeps up", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+  await page.addInitScript(() => {
+    const fake = (window as any).__fake;
+    fake.texts["Zampanò"] += "\n= Ending\n\nA *lighthouse* -- far off.\n";
+    fake.texts.Salt = "= Shore\n\nThe lighthouse stood alone.\n";
+  });
+  await page.goto("/");
+  await expect(line(page, "She walked home.")).toBeVisible();
+
+  const panel = page.locator("#vault-find");
+  const input = page.locator("#vault-find-input");
+  const summary = page.locator("#vault-find-summary");
+  const group = (name: string) => page.locator(".vf-work", { has: page.locator(".vf-work-name", { hasText: name }) });
+  const tab = (name: string) => page.locator(".tab", { has: page.locator(".tab-name", { hasText: name }) });
+
+  // Ctrl+Shift+F: in place of the Works list, the cursor in the field.
+  await page.keyboard.press("Control+Shift+F");
+  await expect(panel).toBeVisible();
+  await expect(page.locator("#works")).toBeHidden();
+  await expect(input).toBeFocused();
+
+  // As it reads: markup hidden, -- a dash; each match under its Chapter. Rain (open) has none.
+  await input.fill("lighthouse");
+  await expect(summary).toHaveText("2 matches in 2 Works");
+  await expect(group("Zampanò").locator(".vf-chapter")).toHaveText("Ending");
+  await expect(group("Zampanò").locator(".vf-match")).toHaveText("A lighthouse – far off.");
+  await expect(group("Salt").locator(".vf-match mark")).toHaveText("lighthouse");
+  await expect(group("Rain")).toHaveCount(0);
+
+  // A match opens its Work in a passing tab; the next Work found takes its place.
+  await group("Zampanò").locator(".vf-match").click();
+  await expect(tab("Zampanò")).toHaveClass(/passing/);
+  await expect(tab("Zampanò")).toHaveClass(/active/);
+  await expect(page.locator(".cm-line", { hasText: "far off" }).first()).toBeVisible();
+  await group("Salt").locator(".vf-match").click();
+  await expect(tab("Salt")).toHaveClass(/passing/);
+  await expect(tab("Zampanò")).toHaveCount(0);
+  await expect(tab("Rain")).not.toHaveClass(/passing/); // open before: untouched
+  // Double-clicked, it stays.
+  await tab("Salt").locator(".tab-name").dblclick();
+  await expect(tab("Salt")).not.toHaveClass(/passing/);
+
+  // Up and Down go through the matches, keeping the focus in the list.
+  await input.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator(".vf-match.current")).toHaveCount(1);
+  await expect(page.locator("#vault-find-results")).toBeFocused();
+
+  // The list keeps up with typing in an open Work.
+  await tab("Rain").locator(".tab-name").click();
+  await endOf(page, "The end.");
+  await page.keyboard.type(" A lighthouse.");
+  await expect(summary).toHaveText("3 matches in 3 Works");
+  await expect(group("Rain").locator(".vf-chapter")).toHaveText("Three");
+  await page.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/find-in-vault.png` : undefined });
+
+  // Open with Find and replace: an ordinary tab, Find showing the same search, for Replace all there.
+  await group("Zampanò").locator(".vf-open-find").click();
+  await expect(tab("Zampanò")).not.toHaveClass(/passing/);
+  await expect(page.locator("#find-bar")).toBeVisible();
+  await expect(page.locator("#find-input")).toHaveValue("lighthouse");
+  await expect(page.locator("#find-replace-row")).toBeVisible();
+
+  // Esc: the Works come back; the search is still there next time.
+  await input.focus();
+  await page.keyboard.press("Escape");
+  await expect(panel).toBeHidden();
+  await expect(page.locator("#works")).toBeVisible();
+  await page.locator("#open-find-in-vault").click();
+  await expect(input).toHaveValue("lighthouse");
+  await expect(summary).toHaveText("3 matches in 3 Works");
+
+  expect(errors, "errors in the page").toEqual([]);
+  expect(await page.evaluate(() => (window as any).__fake.unknown), "commands the fake doesn't know").toEqual([]);
 });
 
 test("a Vault theme wins over the built-in colours it starts from", async ({ page }) => {
@@ -152,11 +467,14 @@ test("Settings shows the App version, and an update found is saved for, download
     (window as any).__fake.update = { kind: "available", current: "0.1.2", version: "0.2.0" };
   });
   await app.locator("#open-settings").click();
+  await app.locator("#settings-tab-app").click();
   await expect(app.locator("#app-version")).toHaveText("Wrtier 0.1.2");
   await app.locator("#check-updates").click();
 
   const dialog = app.locator("#update");
   await expect(app.locator("#update-message")).toHaveText("Version 0.2.0 is available (you have 0.1.2).");
+  // The check is over: no moving bar until a download starts.
+  await expect(app.locator("#update-progress")).toBeHidden();
   await expect(app.locator("#update-close")).toHaveText("Not now");
   await app.locator("#update-whats-new").click();
   await app.locator("#update-install").click();
@@ -173,8 +491,10 @@ test("Settings shows the App version, and an update found is saved for, download
 
 test("with no newer version, the dialog says so and offers nothing to install", async ({ app }) => {
   await app.locator("#open-settings").click();
+  await app.locator("#settings-tab-app").click();
   await app.locator("#check-updates").click();
   await expect(app.locator("#update-message")).toHaveText("You have the newest version (0.1.2).");
+  await expect(app.locator("#update-progress")).toBeHidden(); // the check is over: nothing moving
   await expect(app.locator("#update-install")).toBeHidden();
   await expect(app.locator("#update-whats-new-row")).toBeHidden();
   await app.locator("#update-close").click();
@@ -186,6 +506,7 @@ test("Uninstall names writing that would be lost, saves first, and only goes on 
     (window as any).__fake.uninstallCheck = { problem: null, unsaved: [{ vault: "C:/Fake Vault", work: "Rain" }] };
   });
   await app.locator("#open-settings").click();
+  await app.locator("#settings-tab-app").click();
   await app.locator("#open-uninstall").click();
   const dialog = app.locator("#uninstall");
   await expect(app.locator("#uninstall-unsaved-list")).toHaveText("Rain (in C:/Fake Vault)");
@@ -209,10 +530,69 @@ test("Uninstall says why when the app can't delete itself, and offers no button"
     (window as any).__fake.uninstallCheck = { problem: "The app can't change its own folder.", unsaved: [] };
   });
   await app.locator("#open-settings").click();
+  await app.locator("#settings-tab-app").click();
   await app.locator("#open-uninstall").click();
   await expect(app.locator("#uninstall-error")).toHaveText("The app can't change its own folder.");
   await expect(app.locator("#uninstall-go")).toBeHidden();
   await expect(app.locator("#uninstall-unsaved")).toBeHidden();
+});
+
+test("Settings has its tabs, and opens again on the one last shown", async ({ app }) => {
+  const dialog = app.locator("#settings");
+  await app.locator("#open-settings").click();
+  await expect(app.locator("#settings-tab-editor")).toHaveAttribute("aria-selected", "true");
+  await expect(app.locator("#settings-editor")).toBeVisible();
+  await expect(app.locator("#settings-vault")).toBeHidden();
+  // Switching tabs never resizes the dialog.
+  const height = (await dialog.boundingBox())!.height;
+  await app.locator("#settings-tab-shortcuts").click();
+  await expect(app.locator("#shortcuts-list h3").first()).toBeVisible();
+  await app.locator("#settings-tab-reviewers").focus();
+  await app.keyboard.press("ArrowRight");
+  await expect(app.locator("#settings-tab-vault")).toBeFocused();
+  await expect(app.locator("#settings-vault")).toBeVisible();
+  expect((await dialog.boundingBox())!.height).toBe(height);
+  await app.locator("#settings button[value=done]").click();
+  await expect(dialog).toBeHidden();
+  await app.locator("#open-settings").click();
+  await expect(app.locator("#settings-vault")).toBeVisible();
+});
+
+test("a setting only on this device shows what the others use, and unticking goes back to that", async ({ app }) => {
+  await app.locator("#open-settings").click();
+  const other = app.locator("#font-size-other");
+  await expect(other).toBeHidden();
+  await app.locator("#font-size-here").check();
+  await expect(other).toHaveText("Other devices: 17");
+  await app.locator("#font-size").fill("20");
+  await app.locator("#font-size").press("Tab");
+  await expect(other).toHaveText("Other devices: 17");
+  const asked = () => app.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd.startsWith("set_setting")).map((e: any) => [e.cmd, e.args]));
+  expect(await asked()).toContainEqual(["set_setting", { name: "fontSize", value: "20", here: true }]);
+  // Unticking: back on the shared 17, without setting it for every device.
+  await app.locator("#font-size-here").uncheck();
+  await expect(other).toBeHidden();
+  await expect(app.locator("#font-size")).toHaveValue("17");
+  expect(await asked()).toContainEqual(["set_setting_here", { name: "fontSize", here: false }]);
+  expect(await asked()).not.toContainEqual(["set_setting", { name: "fontSize", value: "20", here: false }]);
+});
+
+test("with no Vault open, Settings has only the App tab", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+  await page.addInitScript(() => {
+    (window as any).__fake.lastVault = null;
+  });
+  await page.goto("/");
+  await page.locator("#open-settings").click();
+  await expect(page.locator("#settings-app")).toBeVisible();
+  await expect(page.locator("#settings-tabs")).toBeHidden();
+  await expect(page.locator("#settings-editor")).toBeHidden();
+  await expect(page.locator("#check-updates")).toBeVisible();
+  const cmds = await page.evaluate(() => (window as any).__fake.log.map((e: any) => e.cmd) as string[]);
+  expect(cmds).not.toContain("get_settings");
+  expect(errors, "errors in the page").toEqual([]);
 });
 
 test("a Sync problem from a newer version of the app offers Check for updates", async ({ page }) => {
@@ -328,7 +708,7 @@ test.describe("at phone width", () => {
     await selectLine(app, "She walked home.");
     await app.locator('#write-toolbar [data-command="strong"]').click();
     await expect.poll(() => textOf(app)).toContain("*She walked home.*");
-    await expect(app.locator(".cm-content")).toBeFocused();
+    await expect(app.locator("#panes .cm-content")).toBeFocused();
 
     // Comment: a new Comment on the selection, on the Comments screen.
     await selectLine(app, "Morning came slowly.");
@@ -410,7 +790,7 @@ test("a Comment on included text is kept in the Work it comes from, and shown he
   expect(sent).toMatchObject({ id: "Rain", from: 23 + "It measured a ".length, to: 23 + "It measured a quarter inch".length, body: "How much, exactly?" });
   // Shown on the Inclusion, and in the Comments panel under the Inclusion.
   await expect(app.locator(".cm-inclusion .cm-comment")).toHaveText("quarter inch");
-  await expect(app.locator(".comments-included-heading")).toHaveText("In Zampanò: The Navidson Record");
+  await expect(app.locator(".comments-included-heading .comments-section-title")).toHaveText("In Zampanò: The Navidson Record");
   const card = app.locator(".comment-card", { hasText: "How much, exactly?" });
   await expect(card).toBeVisible();
   await expect(app.locator("#counts")).toContainText("(12 included)");
@@ -545,4 +925,189 @@ test("in the Raw view an Inclusion is one line saying what it includes", async (
   // Back in the Formatted view: the block again.
   await app.locator("#view-mode").click();
   await expect(app.locator(".cm-inclusion .cm-inclusion-label")).toHaveText("Zampanò: The Navidson Record");
+});
+
+test("with the Colours Vault Mod, a Work is coloured from its right-click menu", async ({ app }) => {
+  const rain = app.locator("#works li.work-entry", { hasText: "Rain" });
+  // Without the Mod, there's no Colour… to choose.
+  await rain.locator(".entry-name").click({ button: "right" });
+  await expect(app.locator("#menu button", { hasText: "Mods…" })).toBeVisible();
+  await expect(app.locator("#menu button", { hasText: "Colour…" })).toHaveCount(0);
+  await app.keyboard.press("Escape");
+  // Switched on in Settings, for the whole Vault.
+  await app.locator("#open-settings").click();
+  await app.locator("#settings-tab-vault").click();
+  await app.locator("#vault-mods label", { hasText: "Colours" }).locator("input").check();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.vaultMods)).toEqual(["colours"]);
+  await app.locator("#settings button[value=done]").click();
+  await rain.locator(".entry-name").click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Colour…" }).click();
+  await app.locator("#menu .colour-pick[aria-label=Red]").click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.colours.works.Rain)).toBe("red");
+  await expect(rain).toHaveClass(/coloured/);
+  const red = await app.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--reviewer-red").trim());
+  const shown = await rain.locator(".entry-name").evaluate((el) => getComputedStyle(el).color);
+  const probe = await app.evaluate((c) => {
+    const el = document.createElement("span");
+    el.style.color = c;
+    document.body.append(el);
+    const rgb = getComputedStyle(el).color;
+    el.remove();
+    return rgb;
+  }, red);
+  expect(shown).toBe(probe);
+  // No colour again.
+  await rain.locator(".entry-name").click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Colour…" }).click();
+  await app.locator("#menu .colour-pick[aria-label='No colour']").click();
+  await expect(rain).not.toHaveClass(/coloured/);
+});
+
+test("Works and folders move by dragging onto a folder, or with Move to…", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+  await page.addInitScript(() => {
+    const fake = (window as any).__fake;
+    fake.texts["Short stories/Storm"] = "= Storm\n\nThunder.\n";
+    fake.vaultFolders = ["Notes"];
+  });
+  await page.goto("/");
+  await expect(line(page, "She walked home.")).toBeVisible();
+  const renames = () => page.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd.startsWith("rename_")).map((e: any) => [e.cmd, e.args]));
+  const folderRow = (name: string) => page.locator("#works li.folder > .folder-toggle", { hasText: name }).first();
+
+  // Rain (open in its tab) dragged onto a closed folder: it moves in, the folder opens and the
+  // row flashes; the tab follows it.
+  await page.locator("#works li.work-entry", { hasText: "Rain" }).locator(".entry").dragTo(folderRow("Short stories"));
+  await expect.poll(renames).toEqual([["rename_work", { id: "Rain", name: "Short stories/Rain" }]]);
+  const moved = page.locator('#works li.work-entry[data-id="Short stories/Rain"]');
+  await expect(moved).toBeVisible();
+  await expect(moved).toHaveClass(/just-moved/);
+  await expect(line(page, "She walked home.")).toBeVisible();
+
+  // A folder dragged onto another goes in.
+  await folderRow("Notes").dragTo(folderRow("Short stories"));
+  await expect.poll(async () => (await renames()).at(-1)).toEqual(["rename_folder", { path: "Notes", name: "Short stories/Notes" }]);
+  await expect(page.locator('#works li.folder[data-path="Short stories/Notes"]')).toBeVisible();
+  // But not into one inside itself: nothing moves, and the info line says why.
+  await folderRow("Short stories").dragTo(folderRow("Notes"));
+  await expect(page.locator("#info")).toHaveText("A folder can't go inside itself.");
+  expect(await renames()).toHaveLength(2);
+
+  // Move to…: from the right-click menu, to the top of the Vault.
+  await page.locator("#works li.work-entry", { hasText: "Storm" }).locator(".entry-name").click({ button: "right" });
+  await page.locator("#menu button", { hasText: "Move to…" }).click();
+  await expect(page.locator("#menu button")).toHaveText(["Top of the Vault", "Short stories/Notes"]);
+  await page.locator("#menu button", { hasText: "Top of the Vault" }).click();
+  await expect.poll(async () => (await renames()).at(-1)).toEqual(["rename_work", { id: "Short stories/Storm", name: "Storm" }]);
+  await expect(page.locator('#works > li.work-entry[data-id="Storm"]')).toBeVisible();
+
+  expect(errors, "errors in the page").toEqual([]);
+  expect(await page.evaluate(() => (window as any).__fake.unknown), "commands the fake doesn't know").toEqual([]);
+});
+
+test("the Style library and the trash are pinned under the Works, above the Chapters", async ({ app }) => {
+  const order = await app.evaluate(() => [...document.querySelectorAll("#sidebar > *")].map((el) => el.id));
+  expect(order).toEqual(["sidebar-top", "sidebar-vault", "sidebar-shelf", "chapters"]);
+  await expect(app.locator("#sidebar-shelf #library")).toBeVisible();
+  // However the Works scroll, the shelf stays where it is.
+  const before = await app.locator("#sidebar-shelf").boundingBox();
+  await app.locator("#sidebar-vault").evaluate((el) => (el.scrollTop = 1000));
+  expect(await app.locator("#sidebar-shelf").boundingBox()).toEqual(before);
+});
+
+// ---- The Reading panel (reading.ts) ----
+
+const reading = (page: Page) => page.locator("#reading-panel");
+const readLine = (page: Page, text: string): Locator => reading(page).locator(".cm-line", { hasText: text }).first();
+const savedReading = (page: Page) =>
+  page.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd === "save_layout").map((e: any) => e.args.layout.reading).pop());
+
+test("another Work is read beside the one being written: read-only, found in, and closed", async ({ app }) => {
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Read beside" }).click();
+  await expect(reading(app).locator("#reading-name")).toHaveText("Zampanò");
+  await expect(readLine(app, "The hallway was not there before.")).toBeVisible();
+  // The Work in front is still the one being written.
+  await expect(app.locator("#tabbar .tab.active")).toHaveText(/Rain/);
+  await expect(app.locator("#tabbar .tab")).toHaveCount(1);
+  // Nothing can be typed in it.
+  await readLine(app, "The hallway was not there before.").click();
+  await app.keyboard.type("Nope");
+  await expect(readLine(app, "The hallway was not there before.")).toHaveText("The hallway was not there before.");
+  expect(await app.evaluate(() => (window as any).__fake.texts["Zampanò"])).not.toContain("Nope");
+  // Its Chapters, to go to.
+  await expect(app.locator("#reading-chapters option")).toHaveText(["Go to Chapter…", "Exploration A", "The Navidson Record"]);
+  // Find finds in it, at its top, and never replaces there.
+  await app.keyboard.press("Control+f");
+  await expect(reading(app).locator("#find-bar")).toBeVisible();
+  await expect(app.locator("#find-toggle-replace")).toBeHidden();
+  await app.keyboard.type("quarter inch");
+  await expect(app.locator("#find-count")).toHaveText("1 of 1");
+  await app.keyboard.press("Control+h");
+  await expect(app.locator("#find-replace-row")).toBeHidden();
+  await app.keyboard.press("Escape");
+  await expect(app.locator("#find-bar")).toBeHidden();
+  // Remembered on this Device, then closed.
+  await expect.poll(() => savedReading(app)).toMatchObject({ work: "Zampanò" });
+  await app.locator("#reading-close").click();
+  await expect(reading(app)).toBeHidden();
+  await expect.poll(() => savedReading(app)).toBeNull();
+  // Find is back above the editor, for the Work in front.
+  await line(app, "She walked home.").click();
+  await app.keyboard.press("Control+f");
+  await expect(app.locator("main #find-bar")).toBeVisible();
+  await expect(app.locator("#find-toggle-replace")).toBeVisible();
+});
+
+test("the Work in front, read beside itself, follows the typing at once", async ({ app }) => {
+  await app.locator("#tabbar .tab", { hasText: "Rain" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Read beside" }).click();
+  await expect(readLine(app, "Morning came slowly.")).toBeVisible();
+  await endOf(app, "The end.");
+  await app.keyboard.type(" Really, the end.");
+  await expect(readLine(app, "The end. Really, the end.")).toBeVisible();
+});
+
+test("a Comment in the Work being read shows as a card, and opens in its Comments panel", async ({ app }) => {
+  await app.evaluate(() => {
+    const fake = (window as any).__fake;
+    const text: string = fake.texts["Zampanò"];
+    const from = text.indexOf("hallway");
+    fake.readingMarks = { "Zampanò": [{
+      id: "c1", ranges: [[from, from + 7]], onWork: false, sender: "reviewer/anna", name: "Anna", colour: "teal",
+      body: "Which hallway?", resolved: false, quote: "hallway", timeMs: 0, otherBody: null,
+      replies: [{ id: "r1", sender: "author", name: "Author", colour: "author", body: "The one on Ash Tree Lane.", timeMs: 0, otherBody: null }],
+    }] };
+  });
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Read beside" }).click();
+  const highlight = reading(app).locator(".cm-comment", { hasText: "hallway" });
+  await expect(highlight).toBeVisible();
+  await highlight.click();
+  const card = app.locator("#reading-card");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Which hallway?");
+  await expect(card).toContainText("The one on Ash Tree Lane.");
+  await card.locator("button", { hasText: "Open in the Comments panel" }).click();
+  await expect(app.locator("#tabbar .tab.active")).toHaveText(/Zampanò/);
+  await expect(app.locator("#comments-pane")).toBeVisible();
+  // It's open in a tab now: the panel shows the tab's text from here on.
+  await expect(readLine(app, "The hallway was not there before.")).toBeVisible();
+});
+
+test("the Work being read is back after a restart, and a Work dragged onto the panel is read there", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+  await page.addInitScript(() => {
+    (window as any).__fake.reading = { work: "Rain", identity: null, top: 0 };
+  });
+  await page.goto("/");
+  await expect(readLine(page, "Morning came slowly.")).toBeVisible();
+  await page.locator("#works li.work-entry", { hasText: "Zampanò" }).locator(".entry").dragTo(readLine(page, "Morning came slowly."));
+  await expect(page.locator("#reading-name")).toHaveText("Zampanò");
+  await expect(readLine(page, "The hallway was not there before.")).toBeVisible();
+  expect(errors, "errors in the page").toEqual([]);
 });

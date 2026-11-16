@@ -51,6 +51,10 @@
     --session-tint-2: rgb(226 194 48 / 0.16);
     --session-tint-3: rgb(226 194 48 / 0.1);
     --session-tint-4: rgb(226 194 48 / 0.06);
+    /* Find and replace (find.ts): every match, and the current one. */
+    --find-match: rgb(232 150 0 / 0.25);
+    --find-current: rgb(232 130 0 / 0.55);
+    --find-current-edge: #a85f00;
     /* Typst colouring in the Raw view and Style library tabs (colouring.ts). */
     --syntax-comment: #8a857b;
     --syntax-keyword: #8a3b6e;
@@ -104,6 +108,9 @@
       --session-tint-2: rgb(240 214 110 / 0.11);
       --session-tint-3: rgb(240 214 110 / 0.07);
       --session-tint-4: rgb(240 214 110 / 0.045);
+      --find-match: rgb(250 190 70 / 0.2);
+      --find-current: rgb(250 165 50 / 0.5);
+      --find-current-edge: #f0b050;
       --syntax-comment: #8b867c;
       --syntax-keyword: #d59ac4;
       --syntax-function: #8fc0d8;
@@ -156,6 +163,9 @@
     --session-tint-2: rgb(240 214 110 / 0.11);
     --session-tint-3: rgb(240 214 110 / 0.07);
     --session-tint-4: rgb(240 214 110 / 0.045);
+    --find-match: rgb(250 190 70 / 0.2);
+    --find-current: rgb(250 165 50 / 0.5);
+    --find-current-edge: #f0b050;
     --syntax-comment: #8b867c;
     --syntax-keyword: #d59ac4;
     --syntax-function: #8fc0d8;
@@ -198,6 +208,50 @@ body {
   display: none;
 }
 
+/* A panel's edge next to the editor, dragged to change its width (panelsizes.ts). It sits over
+   the panel's border line and takes no room: the negative margins cancel its width. */
+.resizer {
+  flex: none;
+  position: relative;
+  z-index: 5;
+  width: 7px;
+  margin: 0 -3px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.resizer[hidden] {
+  display: none;
+}
+
+.resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 3px;
+  background: transparent;
+  transition: background-color 0.1s;
+}
+
+.resizer:hover::after,
+.resizer:focus-visible::after,
+.resizer.dragging::after {
+  background: var(--accent);
+}
+
+.resizer:focus-visible {
+  outline: none;
+}
+
+/* While dragging, the pointer stays the resize arrow and nothing gets selected. */
+body.resizing,
+body.resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
 .row {
   display: flex;
   gap: 6px;
@@ -216,6 +270,7 @@ kbd {
 
 /* ---- The Vault browser ---- */
 
+/* Its width is set by panelsizes.ts; 280px is the default it uses too. */
 #sidebar {
   width: 280px;
   flex: none;
@@ -226,12 +281,32 @@ kbd {
   min-height: 0;
 }
 
-/* The top part: the Vault, its Works, the Style library and the trash. */
+/* The Vault and its Works, scrolling by themselves. */
 #sidebar-vault {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   padding: 12px;
+}
+
+/* The Style library and the trash, pinned under the Works and above the Chapters. An open
+   Style library scrolls by itself here rather than pushing the Works out of sight. Out of the
+   way while Find in Vault has the room, and gone when neither is shown (no Vault open). */
+#sidebar-shelf {
+  flex: none;
+  max-height: 40%;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+  padding: 2px 12px 8px;
+}
+
+#sidebar-shelf:not(:has(> :not([hidden]))),
+#sidebar-vault.finding ~ #sidebar-shelf {
+  display: none;
+}
+
+#sidebar-shelf > details {
+  margin-top: 6px;
 }
 
 /* The top part: Open Vault…, Settings, and the open Vault's path, under them a line. */
@@ -253,6 +328,149 @@ kbd {
 
 #vault-actions {
   margin-bottom: 10px;
+}
+
+/* ---- Find in Vault (findinvault.ts): in place of the Works list while it's open ---- */
+
+#sidebar-vault.finding > :not(#vault-actions, #vault-find) {
+  display: none;
+}
+
+#vault-find:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vf-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#vault-find-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 4px 6px;
+}
+
+#vault-find-summary {
+  margin: 0;
+  font-size: 12px;
+}
+
+#vault-find-results:focus {
+  outline: none;
+}
+
+.vf-work-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 4px 2px;
+  text-align: left;
+  font-weight: 600;
+}
+
+.vf-work-head:hover {
+  background: var(--chip);
+}
+
+.vf-work-head .chevron {
+  display: inline-block;
+  color: var(--muted);
+  transition: transform 0.1s;
+}
+
+.vf-work-head[aria-expanded="true"] .chevron {
+  transform: rotate(90deg);
+}
+
+.vf-work-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.vf-work-name small,
+.vf-count {
+  font-weight: normal;
+  color: var(--muted);
+}
+
+.vf-count {
+  font-size: 12px;
+}
+
+.vf-matches {
+  margin: 0 0 8px 14px;
+}
+
+.vf-matches[hidden] {
+  display: none;
+}
+
+.vf-chapter {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 6px 0 2px;
+}
+
+/* A match's few words: wrapping onto a second line in a narrow Vault browser, never more. */
+.vf-match {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  width: 100%;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  padding: 3px 6px;
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.vf-match:hover {
+  background: var(--chip);
+}
+
+.vf-match.current {
+  background: var(--chip-open);
+}
+
+.vf-match mark {
+  background: var(--find-current);
+  color: inherit;
+  border-radius: 2px;
+}
+
+.vf-open-find {
+  font-size: 12px;
+  margin: 4px 0 0 6px;
+}
+
+.vf-cap {
+  font-size: 12px;
+  margin: 8px 0;
+}
+
+.vf-unsearched p {
+  margin: 4px 0;
+  font-size: 12px;
+}
+
+/* The Work in front is in a Hidden folder, so it isn't in the list: where it is, and Unhide. */
+.hidden-note {
+  font-size: 12px;
+  margin: 0 0 6px;
 }
 
 #works,
@@ -382,6 +600,41 @@ kbd {
   transform: rotate(90deg);
 }
 
+/* The Colours Vault Mod: a Work's or folder's own colour (--item-colour, one of the Reviewer
+   slots) on its name, and on a folder's chevron and the line down what's in it. Never passed
+   down: a Work in a coloured folder keeps its own. */
+#works li.work-entry.coloured > .entry .entry-name,
+#works li.folder.coloured > .folder-toggle,
+#works li.folder.coloured > .folder-toggle .chevron {
+  color: var(--item-colour);
+}
+
+/* Moving by dragging: the folder it would go into is shaded (the whole list, for the top of the
+   Vault), and the row it went to flashes once it's there. */
+#works li.folder.drop-target > .folder-toggle {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+#works.drop-target {
+  border-radius: 6px;
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+#works li.just-moved > .entry,
+#works li.just-moved > .folder-toggle {
+  animation: just-moved 1.6s ease-out;
+}
+
+@keyframes just-moved {
+  0%, 40% { box-shadow: 0 0 0 2px var(--accent); }
+  100% { box-shadow: 0 0 0 2px transparent; }
+}
+
+#works li.folder.coloured > ul {
+  border-left-color: color-mix(in srgb, var(--item-colour) 55%, transparent);
+}
+
 .folder-empty {
   font-size: 12px;
   padding: 2px 4px;
@@ -393,6 +646,8 @@ kbd {
   position: fixed;
   z-index: 10;
   min-width: 190px;
+  max-height: 70vh;
+  overflow-y: auto;
   padding: 4px;
   background: var(--bg);
   color: var(--text);
@@ -414,6 +669,38 @@ kbd {
 #menu button:hover,
 #menu button:focus {
   background: var(--chip);
+}
+
+/* A row of colours to pick (Colour… on a Work or folder), with "no colour" first. */
+#menu .menu-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  max-width: 200px;
+}
+
+#menu .menu-swatches .colour-pick {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+#menu .menu-swatches .colour-pick:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+#menu .menu-swatches .colour-pick[aria-checked="true"] {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+/* No colour: an empty ring, struck through. */
+#menu .menu-swatches .colour-none {
+  border: 1px solid var(--muted);
+  background: linear-gradient(to top right, transparent calc(50% - 1px), var(--muted) calc(50% - 1px), var(--muted) calc(50% + 1px), transparent calc(50% + 1px));
 }
 
 #menu hr {
@@ -517,6 +804,13 @@ kbd {
   font-style: italic;
 }
 
+/* A passing tab (Find in Vault): the next Work found takes its place. Faint as well as italic,
+   so it isn't taken for a library file's. */
+.tab.passing .tab-name {
+  font-style: italic;
+  color: var(--muted);
+}
+
 #trash {
   margin-top: 16px;
   color: var(--muted);
@@ -603,6 +897,7 @@ main > :not(#panes) {
 
 /* ---- The side panel: Pages | Comments, one at a time ---- */
 
+/* Its width is set by panelsizes.ts, which has the same default. */
 #side-panel {
   width: min(42%, 640px);
   min-width: 260px;
@@ -626,7 +921,8 @@ main > :not(#panes) {
   border-bottom: 1px solid var(--line);
 }
 
-.panel-tabs [role="tab"] {
+.panel-tabs [role="tab"],
+.settings-tabs [role="tab"] {
   border: none;
   border-bottom: 2px solid transparent;
   border-radius: 0;
@@ -636,7 +932,8 @@ main > :not(#panes) {
   margin-bottom: -1px; /* the selected tab's line sits on the row's own */
 }
 
-.panel-tabs [role="tab"][aria-selected="true"] {
+.panel-tabs [role="tab"][aria-selected="true"],
+.settings-tabs [role="tab"][aria-selected="true"] {
   color: var(--text);
   border-bottom-color: var(--accent);
   font-weight: 600;
@@ -658,10 +955,113 @@ main > :not(#panes) {
   font-size: 13px;
 }
 
+/* ---- The Reading panel (reading.ts): one Work's text to read, between the editor and the
+   Side panel. Its width is set by panelsizes.ts, which has the same default. ---- */
+
+#reading-panel {
+  width: min(34%, 600px);
+  min-width: 260px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: var(--bg);
+  border-left: 1px solid var(--line);
+}
+
+#reading-panel[hidden],
+#reading-panel [hidden] {
+  display: none;
+}
+
+.reading-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.reading-header strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reading-header .spacer {
+  flex: 1;
+}
+
+#reading-chapters {
+  max-width: 9em;
+  min-width: 0;
+}
+
+.reading-header button {
+  flex: none;
+  white-space: nowrap;
+}
+
+#reading-close {
+  font-size: 17px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+#reading-find-slot #find-bar {
+  margin: 8px 12px 0;
+}
+
+#reading-why {
+  margin: 0;
+  padding: 16px;
+}
+
+#reading-text {
+  flex: 1;
+  min-height: 0;
+}
+
+#reading-panel .editor .cm-scroller {
+  padding: 0 16px;
+}
+
+/* A Comment's card, by the highlight clicked: read-only. */
+.reading-card {
+  position: absolute;
+  z-index: 20;
+  max-height: 50%;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+}
+
+.reading-card-comment + .reading-card-comment {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.reading-card p {
+  margin: 4px 0 8px;
+  white-space: pre-wrap;
+}
+
+.reading-card .reading-card-reply {
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+}
+
 /* ---- The Page preview ---- */
 
 #preview header {
   display: flex;
+  flex-wrap: wrap; /* a narrow panel puts the Export links on a line of their own */
   align-items: baseline;
   gap: 6px;
   padding: 10px 16px 8px;
@@ -709,11 +1109,27 @@ main > :not(#panes) {
   max-width: 50%;
 }
 
+#preview-zoom {
+  font: inherit;
+  font-size: 13px;
+}
+
+/* Focusable, so the zoom keys work after clicking beside the pages (zoom.ts). Zoomed in past
+   the panel's width, a page scrolls sideways; narrower pages stay centred. */
 #preview-pages {
   flex: 1;
-  overflow-y: auto;
+  overflow: auto;
   padding: 8px 16px 24px;
   position: relative; /* pages measure their place from here, for following the cursor */
+}
+
+#preview-pages:focus {
+  outline: none;
+}
+
+#preview-pages:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 #preview-pages .page {
@@ -1204,24 +1620,136 @@ dialog h2 {
   margin: 0 0 12px;
 }
 
-#settings label {
-  display: block;
-  margin-top: 10px;
-}
+/* ---- Settings: five tabs (main.ts), along the top as the Side panel's ---- */
 
-/* ---- The Reviewers dialog ---- */
-
-dialog#reviewers {
+/* One size whichever tab shows, so switching never resizes it; the tab scrolls inside. With
+   no Vault open there's only the App tab, and the dialog is as tall as that. */
+dialog#settings {
   max-width: 560px;
   max-height: calc(100vh - 32px);
 }
 
-.reviewers-form > p.muted {
+dialog#settings:not(.app-only) {
+  height: min(640px, calc(100vh - 32px));
+}
+
+dialog#settings[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.settings-tabs {
+  display: flex;
+  flex: none;
+  overflow-x: auto; /* sideways on a narrow screen, never on two lines */
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-tabs[hidden] {
+  display: none;
+}
+
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 2px 0;
+}
+
+#settings p.tab-note {
   font-size: 13px;
   margin: 0 0 12px;
 }
 
-/* App updates: the download's progress in the Updates dialog. */
+/* The Editor tab: each setting on the left, its "This device only" box in a column on the right. */
+.setting-row {
+  display: grid;
+  grid-template-columns: 1fr 7.5em;
+  gap: 8px;
+  align-items: start;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.setting-row > input[type="checkbox"] {
+  justify-self: center;
+  margin-top: 8px;
+}
+
+.setting-row.setting-head {
+  padding: 0 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.setting-row.setting-head > span:last-child {
+  text-align: center;
+}
+
+#settings .setting-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+
+#settings .setting-field > select,
+#settings .setting-field > input {
+  flex: 0 1 14em;
+  min-width: 8em;
+}
+
+#settings-editor label.check {
+  display: block;
+  padding-top: 6px;
+}
+
+#settings .setting-row p.row {
+  margin: 8px 0 0;
+}
+
+/* What the other Devices use, under a setting this Device has its own value of. */
+.setting-other {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* The Shortcuts tab: its "Only on this device" box beside Reset all. */
+.shortcuts-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.shortcuts-top label.check {
+  flex: 1;
+  font-size: 13px;
+}
+
+#settings-app p {
+  margin: 0 0 10px;
+}
+
+/* ---- The Reviewers tab ---- */
+
+/* App updates: the download's progress in the Updates dialog. Only while downloading: without
+   a value it's an indeterminate bar, moving back and forth, so it must really be gone when hidden
+   (the display below would otherwise beat the hidden attribute). */
+.update-progress[hidden] {
+  display: none;
+}
+
 .update-progress {
   display: block;
   width: 100%;
@@ -1336,14 +1864,14 @@ dialog#reviewers {
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 
-#settings label.here {
-  margin-top: 4px;
-  font-size: 13px;
-  color: var(--muted);
+#settings-vault label {
+  display: block;
 }
 
-#settings label.check {
-  margin-top: 14px;
+#settings-vault > label.here {
+  margin: 4px 0;
+  font-size: 13px;
+  color: var(--muted);
 }
 
 /* A chosen theme that's missing, and files in themes/ that aren't themes. */
@@ -1378,6 +1906,106 @@ dialog#reviewers {
 #switcher-list li.chosen,
 #switcher-list li:hover {
   background: var(--line);
+}
+
+/* ---- Find and replace (findbar.ts, find.ts) ---- */
+
+#find-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+#find-bar[hidden],
+#find-bar [hidden] {
+  display: none;
+}
+
+.find-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+#find-input,
+#replace-input {
+  flex: 1 1 14em;
+  min-width: 8em;
+}
+
+.find-toggle,
+.find-toggle-space {
+  width: 2em;
+  flex: none;
+}
+
+.find-toggle {
+  border: none;
+  background: none;
+  color: var(--muted);
+  padding: 2px;
+}
+
+#find-count {
+  min-width: 6em;
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
+.find-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
+#find-close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 1.2em;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+#find-close:hover,
+.find-toggle:hover {
+  color: var(--text);
+  background: var(--chip);
+}
+
+#find-note {
+  margin: 0 0 0 2.6em;
+  font-size: 0.9em;
+}
+
+#find-open {
+  margin-bottom: 6px;
+  white-space: nowrap;
+}
+
+.cm-find-match {
+  background-color: var(--find-match);
+  border-radius: 2px;
+}
+
+.cm-find-current {
+  background-color: var(--find-current);
+  box-shadow: 0 0 0 1px var(--find-current-edge);
+}
+
+/* A Replace all in a Session's History: one line, taken back whole. */
+.history-replacement.reverted > span:first-child {
+  text-decoration: line-through;
+  color: var(--muted);
 }
 
 /* ---- Comment highlights (comments.ts) ---- */
@@ -1675,10 +2303,50 @@ dialog#reviewers {
   font-size: 13px;
 }
 
-.comments-detached-heading,
-.comments-included-heading {
+.comments-section-heading {
   font-size: 13px;
   margin: 14px 0 2px;
+}
+
+.comments-on-work-heading,
+.comments-on-text-heading {
+  margin-bottom: 8px;
+}
+
+/* The heading folds its section: a caret, the title, and how many it holds. */
+.comments-section-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.comments-section-toggle::before {
+  content: "▾";
+  width: 10px;
+  color: var(--muted);
+}
+
+.comments-section-toggle[aria-expanded="false"]::before {
+  content: "▸";
+}
+
+.comments-section-count {
+  color: var(--muted);
+  font-weight: normal;
+  font-size: 12px;
+}
+
+.comments-on-work-button {
+  display: block;
+  margin: 0 0 8px;
 }
 
 .comments-detached-note,
@@ -1687,25 +2355,9 @@ dialog#reviewers {
   margin: 0 0 8px;
 }
 
-/* ---- The Keyboard shortcuts dialog ---- */
+/* ---- The Shortcuts tab in Settings ---- */
 
-dialog#shortcuts {
-  max-width: 520px;
-  max-height: calc(100vh - 32px);
-}
-
-#shortcuts p.muted {
-  font-size: 13px;
-  margin: 0 0 10px;
-}
-
-#shortcuts label.check {
-  display: block;
-  font-size: 13px;
-  margin-bottom: 10px;
-}
-
-#shortcuts h3 {
+#shortcuts-list h3 {
   font-size: 13px;
   color: var(--muted);
   margin: 14px 0 4px;
@@ -1737,10 +2389,6 @@ dialog#shortcuts {
 .shortcut-key.recording {
   border-color: var(--accent);
   outline: 2px solid var(--accent);
-}
-
-#shortcuts menu {
-  justify-content: space-between;
 }
 
 /* ---- The History tab ---- */
@@ -2173,13 +2821,6 @@ button.folder-row small {
   white-space: nowrap;
 }
 
-/* Bottom left of Settings, on the line with Done. */
-button.licenses-link {
-  margin-right: auto;
-  padding: 0;
-  align-self: center;
-}
-
 dialog#licenses {
   max-width: 640px;
   max-height: calc(100vh - 32px);
@@ -2232,6 +2873,30 @@ dialog#licenses {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+/* Settings' Hidden folders: each path, with Unhide (or a note and Remove, for one that's gone). */
+.hidden-folders {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.hidden-folders li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.hidden-folders li.muted {
+  font-size: 13px;
+}
+
+.hidden-folders small {
+  color: var(--muted);
 }
 
 .mod-row {
@@ -2497,8 +3162,19 @@ body.phone #app {
 
 body.phone #app > #sidebar,
 body.phone #app > main,
-body.phone #app > #side-panel {
+body.phone #app > #reading-panel,
+body.phone #app > #side-panel,
+body.phone #app > .resizer {
   display: none;
+}
+
+body.phone #app[data-screen="read"] > #reading-panel:not([hidden]) {
+  display: flex;
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  min-height: 0;
+  border-left: none;
 }
 
 body.phone #app[data-screen="works"] > #sidebar {
@@ -2588,6 +3264,7 @@ body.phone #tabbar .tab {
 }
 
 body.phone #chapters-open,
+body.phone #find-open,
 body.phone #view-mode {
   margin-bottom: 0;
 }
@@ -2617,6 +3294,31 @@ dialog#chapters-sheet {
 
 #chapters-sheet menu {
   margin-top: 8px;
+}
+
+/* Settings fills the screen; each Editor row puts its label above its control, the box column
+   still on the right. */
+body.phone dialog#settings {
+  max-width: none;
+  width: calc(100% - 32px);
+}
+
+body.phone dialog#settings:not(.app-only) {
+  height: calc(100vh - 32px);
+}
+
+body.phone #settings .setting-field {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+body.phone #settings .setting-field > select,
+body.phone #settings .setting-field > input {
+  flex: none;
+}
+
+body.phone .setting-row {
+  grid-template-columns: 1fr 5.5em;
 }
 
 /* No keyboard keys to show on the phone; the toolbar does what they do. */

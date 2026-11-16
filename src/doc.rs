@@ -17,10 +17,12 @@ use std::collections::{HashMap, HashSet};
 mod colours;
 mod compare;
 mod history;
+mod replace;
 mod snippets;
 pub use colours::SessionText;
 pub use compare::{Comparison, Stretch, Version};
 pub use history::{LeftOut, Reverted, SessionPart, Summary};
+pub use replace::{Replacement, ReplaceEdit};
 pub use snippets::{FieldLine, MovedFrom, Segment, SegmentKind, Snippet, Snippets};
 
 pub struct Doc {
@@ -164,11 +166,13 @@ pub struct CommentView {
     pub sender: String,
     pub body: String,
     pub resolved: bool,
-    /// The text it was attached to, as selected.
+    /// The text it was attached to, as selected; empty for a Work comment.
     pub quote: String,
+    /// A Work comment: on the Work as a whole, not on any of its text (ADR 0017).
+    pub on_work: bool,
     /// Where its visible characters are in the text the Author sees (`text()`): start..end in
     /// characters, in reading order. Several when a Move split its text or text was Moved into
-    /// it; empty when it's a Detached comment.
+    /// it; empty when it's a Detached comment or a Work comment.
     pub ranges: Vec<(usize, usize)>,
     /// Its Replies still in effect, in the fixed Change order.
     pub replies: Vec<ReplyView>,
@@ -176,8 +180,9 @@ pub struct CommentView {
 
 impl CommentView {
     /// None of its text is visible: it's listed apart, with its quote, until some comes back.
+    /// A Work comment has no text, so it's never one.
     pub fn is_detached(&self) -> bool {
-        self.ranges.is_empty()
+        !self.on_work && self.ranges.is_empty()
     }
 }
 
@@ -677,23 +682,7 @@ impl Doc {
     /// if there's nothing to record. Updates what's shown directly instead of `refresh`; in
     /// debug builds that's checked against a full recompute.
     fn commit_text(&mut self, left: Option<u32>, doomed: &[u32], text: &str, reserved: Option<ChangeId>, now_ms: u64) -> Option<Change> {
-        let ranges = self.ranges_of(doomed);
-        if ranges.is_empty() && text.is_empty() {
-            if let Some(id) = reserved {
-                self.unreserve(id); // an empty burst records nothing, not even a gap in the counters
-            }
-            return None;
-        }
-        // Where the new text goes, worked out before anything changes.
-        let (left_id, into) = self.placement_after(left);
-        let (parent, side, right_origin) = self.tree.place_after(left_id);
-        let run = InsertRun { text: text.to_string(), parent, side, right_origin, into };
-        let kind = match (ranges.is_empty(), text.is_empty()) {
-            (true, _) => ChangeKind::Insert(run),
-            (false, true) => ChangeKind::Delete(ranges),
-            (false, false) => ChangeKind::Replace { deleted: ranges, inserted: run },
-        };
-        let change = self.new_change(reserved, kind, now_ms);
+        let (change, into) = self.text_change(left, doomed, text, reserved, now_ms)?;
 
         // Shortcut instead of `refresh`. A deletion moves nothing: it only hides characters.
         // New text lands right after `left` in the tree, shows right after it on screen, and
@@ -712,6 +701,28 @@ impl Doc {
         self.place_burst();
         self.debug_check();
         Some(change)
+    }
+
+    /// The Change that deletes `doomed` and puts `text` right after `left` (see `commit_text`),
+    /// with the piece the text goes into; nothing is applied yet. None if there's nothing to record.
+    fn text_change(&mut self, left: Option<u32>, doomed: &[u32], text: &str, reserved: Option<ChangeId>, now_ms: u64) -> Option<(Change, Option<CharId>)> {
+        let ranges = self.ranges_of(doomed);
+        if ranges.is_empty() && text.is_empty() {
+            if let Some(id) = reserved {
+                self.unreserve(id); // an empty burst records nothing, not even a gap in the counters
+            }
+            return None;
+        }
+        // Where the new text goes, worked out before anything changes.
+        let (left_id, into) = self.placement_after(left);
+        let (parent, side, right_origin) = self.tree.place_after(left_id);
+        let run = InsertRun { text: text.to_string(), parent, side, right_origin, into };
+        let kind = match (ranges.is_empty(), text.is_empty()) {
+            (true, _) => ChangeKind::Insert(run),
+            (false, true) => ChangeKind::Delete(ranges),
+            (false, false) => ChangeKind::Replace { deleted: ranges, inserted: run },
+        };
+        Some((self.new_change(reserved, kind, now_ms), into))
     }
 
     /// Visible nodes (in reading order) as ranges of consecutive characters of one Change.
@@ -1180,6 +1191,13 @@ impl Doc {
         self.commit_local(ChangeKind::Comment { pieces, quote, sender: sender.to_string(), body: body.to_string() }, now_ms)
     }
 
+    /// Adds a Work comment: on the Work as a whole, not on any of its text. It's a Comment with
+    /// no pieces and no quote (ADR 0017), which a Comment on text can never be.
+    pub fn work_comment_local(&mut self, sender: &str, body: &str, now_ms: u64) -> Change {
+        self.assert_no_burst();
+        self.commit_local(ChangeKind::Comment { pieces: Vec::new(), quote: String::new(), sender: sender.to_string(), body: body.to_string() }, now_ms)
+    }
+
     /// Ranges in the tree's fixed order that hold exactly the `selected` nodes: a new piece
     /// starts wherever a visible character that wasn't selected lies between them in the tree
     /// (such as text Moved out of the passage earlier, now shown elsewhere). Deleted characters
@@ -1228,8 +1246,9 @@ impl Doc {
         self.set_field_local(&comment_record(id), "resolved", if resolved { "yes" } else { "no" }, now_ms)
     }
 
-    /// The Comments not deleted (reverted), as they are now: Comments with visible text in text
-    /// order, then Detached comments in the fixed Change order. Every Device gets the same list.
+    /// The Comments not deleted (reverted), as they are now: Work comments in the fixed Change
+    /// order, then Comments with visible text in text order, then Detached comments in the fixed
+    /// Change order. Every Device gets the same list.
     /// A deleted Comment's Replies go with it.
     pub fn comments(&self) -> Vec<CommentView> {
         if self.comments.is_empty() {
@@ -1278,6 +1297,7 @@ impl Doc {
                     body: self.field(&record, "body").unwrap_or(&c.body).to_string(),
                     resolved: self.field(&record, "resolved") == Some("yes"),
                     quote: c.quote.clone(),
+                    on_work: c.pieces.is_empty(),
                     ranges,
                     replies: replies.into_iter().map(|r| {
                         let record = comment_record(r.id);
@@ -1291,8 +1311,9 @@ impl Doc {
                 }
             })
             .collect();
-        // Attached ones by where they start; Detached ones after them; ties in the fixed Change order.
-        list.sort_by_key(|c| (c.ranges.first().map_or(usize::MAX, |r| r.0), c.hlc, c.id.device));
+        // Work comments first; then attached ones by where they start; Detached ones after them;
+        // ties in the fixed Change order.
+        list.sort_by_key(|c| (!c.on_work, c.ranges.first().map_or(usize::MAX, |r| r.0), c.hlc, c.id.device));
         list
     }
 
@@ -2548,6 +2569,35 @@ mod test {
         let order: Vec<ChangeId> = doc.comments().iter().map(|c| c.id).collect();
         assert_eq!(order, [early, late, gone]);
         assert!(doc.comments()[2].is_detached());
+    }
+
+    #[test]
+    fn a_work_comment_has_no_text_comes_first_and_is_never_detached() {
+        let mut doc = abcdef();
+        let on_text = doc.comment_local(0, 2, AUTHOR, "ab", 2000).id;
+        let earlier = doc.work_comment_local(AUTHOR, "too short overall", 3000).id;
+        let later = doc.work_comment_local("reviewer/anna", "the ending drags", 4000).id;
+        let order: Vec<ChangeId> = doc.comments().iter().map(|c| c.id).collect();
+        assert_eq!(order, [earlier, later, on_text], "Work comments first, in the fixed Change order");
+        let c = doc.comments().into_iter().find(|c| c.id == later).unwrap();
+        assert_eq!((c.on_work, c.quote.as_str(), c.ranges.as_slice(), c.is_detached()), (true, "", [].as_slice(), false));
+        assert_eq!((c.sender.as_str(), c.body.as_str()), ("reviewer/anna", "the ending drags"));
+        assert!(!doc.comments().iter().find(|c| c.id == on_text).unwrap().on_work);
+
+        // Deleting every character leaves it as it was; the Comment on text is Detached.
+        doc.delete_local(0, 6, 5000);
+        let comments = doc.comments();
+        assert!(comments.iter().filter(|c| c.on_work).all(|c| !c.is_detached()));
+        assert!(comments.iter().find(|c| c.id == on_text).unwrap().is_detached());
+
+        // Replies, edits, resolving and deleting work as on any Comment.
+        doc.reply_local(later, AUTHOR, "agreed", 6000);
+        doc.edit_comment_local(later, "the ending drags a lot", 7000);
+        doc.resolve_comment_local(later, true, 8000);
+        let c = doc.comments().into_iter().find(|c| c.id == later).unwrap();
+        assert_eq!((c.body.as_str(), c.resolved, c.replies.len()), ("the ending drags a lot", true, 1));
+        doc.revert_local(later, false, 9000);
+        assert!(doc.comments().iter().all(|c| c.id != later));
     }
 
     #[test]

@@ -11,36 +11,55 @@
   <body>
     <div id="app">
       <aside id="sidebar">
-        <!-- Three parts: opening a Vault and Settings at the top, then the Vault (scrolling by
-             itself), and at the bottom the Chapters of the Work in front. -->
+        <!-- Four parts: opening a Vault and Settings at the top, then the Vault's Works (scrolling
+             by themselves), then the Style library and the trash pinned under them, and at the
+             bottom the Chapters of the Work in front. -->
         <header id="sidebar-top">
           <div class="row">
             <button id="choose-vault" type="button">Open Vault…</button>
-            <button id="open-settings" type="button" title="Settings, Reviewers and keyboard shortcuts" hidden>Settings</button>
+            <button id="open-settings" type="button" title="The editor, Reviewers, the Vault, keyboard shortcuts and the app">Settings</button>
           </div>
           <div id="vault-root" class="muted"></div>
           <button id="sync-status" type="button" class="sync-status" hidden></button>
         </header>
         <div id="sidebar-vault">
         <div id="vault-actions" class="row" hidden>
-          <button id="open-switcher" type="button" title="Find a Work (Ctrl+O)">Find… <kbd id="open-switcher-key">Ctrl+O</kbd></button>
+          <button id="open-switcher" type="button" title="Open a Work (Ctrl+O)">Open… <kbd id="open-switcher-key">Ctrl+O</kbd></button>
+          <button id="open-find-in-vault" type="button" title="Find some text in every Work (Ctrl+Shift+F)">Find in Vault <kbd id="find-in-vault-key">Ctrl+Shift+F</kbd></button>
         </div>
-        <ul id="works"></ul>
-        <details id="library" hidden>
-          <summary>Style library</summary>
-          <div id="library-conflicts"></div>
-          <div id="library-list"></div>
-          <div class="row library-new">
-            <button type="button" class="link" id="new-style">New Style…</button>
-            <button type="button" class="link" id="new-look">New Look…</button>
-            <button type="button" class="link" id="new-element">New Story element…</button>
+        <!-- Find in Vault (findinvault.ts): in place of the Works list while it's open. -->
+        <div id="vault-find" role="search" aria-label="Find in Vault" hidden>
+          <div class="vf-field">
+            <input id="vault-find-input" type="text" placeholder="Find in every Work" aria-label="Find in every Work" autocomplete="off" spellcheck="false" />
+            <button id="vault-find-close" type="button" class="link" title="Back to the Works (Esc)" aria-label="Close Find in Vault">✕</button>
           </div>
-        </details>
-        <details id="trash" hidden>
-          <summary>Trash</summary>
-          <ul id="trash-list"></ul>
-          <button id="empty-trash" type="button" class="link">Empty the trash…</button>
-        </details>
+          <div class="row vf-options">
+            <label class="check"><input type="checkbox" id="vault-find-case" /> Match case</label>
+            <label class="check"><input type="checkbox" id="vault-find-words" /> Whole words</label>
+          </div>
+          <p id="vault-find-summary" class="muted" aria-live="polite" hidden></p>
+          <div id="vault-find-results" tabindex="0" aria-label="Matches"></div>
+        </div>
+        <p id="hidden-note" class="hidden-note muted" hidden></p>
+        <ul id="works"></ul>
+        </div>
+        <!-- The Style library and the trash: always in reach under the Works, however long they are. -->
+        <div id="sidebar-shelf">
+          <details id="library" hidden>
+            <summary>Style library</summary>
+            <div id="library-conflicts"></div>
+            <div id="library-list"></div>
+            <div class="row library-new">
+              <button type="button" class="link" id="new-style">New Style…</button>
+              <button type="button" class="link" id="new-look">New Look…</button>
+              <button type="button" class="link" id="new-element">New Story element…</button>
+            </div>
+          </details>
+          <details id="trash" hidden>
+            <summary>Trash</summary>
+            <ul id="trash-list"></ul>
+            <button id="empty-trash" type="button" class="link">Empty the trash…</button>
+          </details>
         </div>
         <!-- The Chapter list Mod: the Chapters of the Work in front, if it has the Mod here. -->
         <details id="chapters" open hidden>
@@ -49,6 +68,8 @@
           <p id="chapters-none" class="muted" hidden>No Chapters yet. A line starting with “= ” starts one.</p>
         </details>
       </aside>
+      <!-- The panels' edges next to the editor, dragged to change their widths (panelsizes.ts). -->
+      <div id="sidebar-resizer" class="resizer" role="separator" aria-orientation="vertical" aria-controls="sidebar" aria-label="Width of the Vault browser" tabindex="0" title="Drag to change the width, or drag all the way to hide. Double-click for the default width."></div>
 
       <main>
         <div id="problems" hidden></div>
@@ -58,6 +79,7 @@
           <button id="sidebar-toggle" type="button" title="Hide the Works (Ctrl+\)" aria-label="Show or hide the Works">☰</button>
           <nav id="tabbar"></nav>
           <button id="chapters-open" type="button" class="link" hidden>Chapters</button>
+          <button id="find-open" type="button" class="link" title="Find and replace (Ctrl+F)" hidden>Find</button>
           <button id="view-mode" type="button" class="link" title="Ctrl+E" hidden>Raw view</button>
           <button id="panel-toggle" type="button" class="link" title="The Page preview, the Comments and the History (Ctrl+Shift+P)" hidden>Show panel</button>
         </div>
@@ -65,6 +87,27 @@
         <div id="style-notice" hidden></div>
         <div id="moved" hidden></div>
         <div id="status" hidden></div>
+        <!-- Find and replace (findbar.ts): in the tab in front. -->
+        <div id="find-bar" role="search" aria-label="Find and replace" hidden>
+          <div class="find-row">
+            <button type="button" id="find-toggle-replace" class="find-toggle" aria-expanded="false" title="Replace (Ctrl+H)">▸</button>
+            <input id="find-input" type="search" placeholder="Find" aria-label="Find" autocomplete="off" spellcheck="false" />
+            <span id="find-count" class="muted" aria-live="polite"></span>
+            <button type="button" id="find-prev" title="Previous match (Shift+Enter)" aria-label="Previous match">↑</button>
+            <button type="button" id="find-next" title="Next match (Enter)" aria-label="Next match">↓</button>
+            <label class="find-option"><input type="checkbox" id="find-case" /> Match case</label>
+            <label class="find-option"><input type="checkbox" id="find-words" /> Whole words</label>
+            <label class="find-option" id="find-scope-label" hidden><input type="checkbox" id="find-scope" /> In selection</label>
+            <button type="button" id="find-close" title="Close (Escape)" aria-label="Close">×</button>
+          </div>
+          <div class="find-row" id="find-replace-row" hidden>
+            <span class="find-toggle-space"></span>
+            <input id="replace-input" type="text" placeholder="Replace with" aria-label="Replace with" autocomplete="off" spellcheck="false" />
+            <button type="button" id="replace-one" title="Replace this match (Enter)">Replace</button>
+            <button type="button" id="replace-all" title="Replace every match, as one action (Ctrl+Enter)">Replace all</button>
+          </div>
+          <p id="find-note" class="muted" hidden></p>
+        </div>
         <div id="panes"></div>
         <!-- The word and character count Mod: the Work in front's counts, if it has the Mod here. -->
         <div id="counts" hidden></div>
@@ -81,8 +124,28 @@
         <p id="empty" class="muted">Open a Vault, then choose a Work on the left, or press Ctrl+O.</p>
       </main>
 
+      <!-- The Reading panel (reading.ts): one Work's text to read beside the one being written.
+           Nothing is typed in it. Shown only while a Work is being read; × closes it. -->
+      <div id="reading-resizer" class="resizer" role="separator" aria-orientation="vertical" aria-controls="reading-panel" aria-label="Width of the Reading panel" tabindex="0" title="Drag to change the width. Double-click for the default width." hidden></div>
+      <aside id="reading-panel" aria-label="Reading panel" hidden>
+        <header class="reading-header">
+          <span class="reading-kind muted">Reading</span>
+          <strong id="reading-name"></strong>
+          <span class="spacer"></span>
+          <select id="reading-chapters" aria-label="Go to a Chapter of the Work being read"></select>
+          <button id="reading-write" type="button" class="link" title="Write in this Work: bring it to the front, at the place being read">Write in it</button>
+          <button id="reading-close" type="button" class="link" title="Close the Reading panel" aria-label="Close the Reading panel">×</button>
+        </header>
+        <!-- Find and replace's bar comes here while it finds in the Work being read. -->
+        <div id="reading-find-slot"></div>
+        <p id="reading-why" class="muted" hidden></p>
+        <div id="reading-text" class="editor"></div>
+        <div id="reading-card" class="reading-card" role="dialog" aria-label="Comments" hidden></div>
+      </aside>
+
       <!-- The panel beside the editor: the Page preview, the Comments and the History, one tab
            at a time. Shown and hidden as a whole. -->
+      <div id="panel-resizer" class="resizer" role="separator" aria-orientation="vertical" aria-controls="side-panel" aria-label="Width of the side panel" tabindex="0" title="Drag to change the width, or drag all the way to hide. Double-click for the default width." hidden></div>
       <aside id="side-panel" hidden>
         <header class="panel-tabs">
           <div role="tablist" aria-label="Panel">
@@ -96,12 +159,13 @@
           <header>
             <select id="preview-version" title="The Work now, or as it was at one of its Milestones" hidden></select>
             <select id="preview-look" title="Which of the Work's Looks the pages are in (remembered on this Device)" hidden></select>
+            <select id="preview-zoom" aria-label="Zoom" title="How big the pages are shown (remembered on this Device). Ctrl + mouse wheel or a pinch over the pages zooms too."></select>
             <span class="spacer"></span>
             <button id="preview-pdf" type="button" class="link" title="Export the Work as a PDF">PDF…</button>
             <button id="preview-docx" type="button" class="link" title="Export the Work as a manuscript .docx">.docx…</button>
           </header>
           <div id="preview-bar" hidden></div>
-          <div id="preview-pages"></div>
+          <div id="preview-pages" tabindex="0" aria-label="Pages"></div>
         </section>
         <section id="comments-pane" role="tabpanel" aria-labelledby="panel-tab-comments" hidden>
           <label class="check"><input type="checkbox" id="comments-show-resolved" /> Show resolved</label>
@@ -122,6 +186,7 @@
       <nav id="phone-bar" aria-label="Screens">
         <button type="button" data-screen="works">Works</button>
         <button type="button" data-screen="write">Write</button>
+        <button type="button" data-screen="read" id="phone-read" hidden>Read</button>
         <button type="button" data-screen="pages">Pages</button>
         <button type="button" data-screen="comments">Comments</button>
         <button type="button" data-screen="history">History</button>
@@ -337,46 +402,9 @@
       </form>
     </dialog>
 
-    <dialog id="reviewers">
-      <form method="dialog" class="reviewers-form">
-        <h2>Reviewers</h2>
-        <p class="muted">The people whose feedback you record as Comments. They belong to the Vault, so they can comment on any Work, and their colour is the same everywhere.</p>
-        <p id="reviewers-error" class="dialog-error" hidden></p>
-        <ul id="reviewers-list" class="reviewer-list"></ul>
-        <p id="reviewers-none" class="muted" hidden>No Reviewers yet.</p>
-        <div class="row reviewer-add">
-          <input id="reviewer-name" maxlength="100" placeholder="Name" autocomplete="off" />
-          <input id="reviewer-role" maxlength="60" placeholder="Role, e.g. editor" autocomplete="off" />
-          <button type="button" id="reviewer-add">Add</button>
-        </div>
-        <details id="reviewers-removed-box" hidden>
-          <summary>Removed</summary>
-          <p class="muted">No longer offered when adding a Comment. Their Comments keep their name and colour.</p>
-          <ul id="reviewers-removed" class="reviewer-list"></ul>
-        </details>
-        <menu>
-          <button value="done">Done</button>
-        </menu>
-      </form>
-    </dialog>
-
-    <dialog id="shortcuts">
-      <form method="dialog">
-        <h2>Keyboard shortcuts</h2>
-        <p class="muted">Click a key, then press the new one. Esc keeps the old key; Backspace leaves the command without one.</p>
-        <label class="check"><input type="checkbox" id="shortcuts-here" /> Only on this device (for a different keyboard). Otherwise every device that opens the Vault uses these.</label>
-        <p id="shortcuts-error" class="dialog-error" hidden></p>
-        <div id="shortcuts-list"></div>
-        <menu>
-          <button type="button" id="shortcuts-reset">Reset all…</button>
-          <button value="done">Done</button>
-        </menu>
-      </form>
-    </dialog>
-
     <dialog id="switcher">
       <form method="dialog">
-        <input id="switcher-input" placeholder="Find a Work…" autocomplete="off" />
+        <input id="switcher-input" placeholder="Open a Work…" autocomplete="off" />
         <ul id="switcher-list"></ul>
       </form>
     </dialog>
@@ -439,49 +467,130 @@
       </form>
     </dialog>
 
+    <!-- Settings (main.ts): five tabs by topic. With no Vault open, only the App tab. -->
     <dialog id="settings">
-      <form method="dialog">
+      <form method="dialog" class="settings-form">
         <h2>Settings</h2>
-        <label>Theme
-          <select id="theme">
-            <option value="system">Follow the system</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
-        </label>
-        <label class="here"><input type="checkbox" id="theme-here" /> Only on this device</label>
-        <p id="theme-missing" class="theme-line" hidden></p>
-        <p id="theme-problems" class="theme-line" hidden></p>
-        <p class="row">
-          <button type="button" id="import-theme" title="Copy a theme's .css file into the Vault's themes folder">Import theme…</button>
-        </p>
-        <label>Editor font size
-          <input id="font-size" type="number" min="10" max="40" />
-        </label>
-        <label class="here"><input type="checkbox" id="font-size-here" /> Only on this device</label>
-        <label class="check"><input type="checkbox" id="line-numbers" /> Line numbers</label>
-        <label class="here"><input type="checkbox" id="line-numbers-here" /> Only on this device</label>
-        <label class="check"><input type="checkbox" id="highlight-line" /> Shade the line the cursor is on</label>
-        <label class="here"><input type="checkbox" id="highlight-line-here" /> Only on this device</label>
-        <label class="check"><input type="checkbox" id="preview-follows" /> The Page preview follows the cursor</label>
-        <label class="here"><input type="checkbox" id="preview-follows-here" /> Only on this device</label>
-        <label class="check"><input type="checkbox" id="comment-highlights" /> Show Comment highlights in the text</label>
-        <label class="here"><input type="checkbox" id="comment-highlights-here" /> Only on this device</label>
-        <p class="row">
-          <button type="button" id="open-reviewers" title="The people whose feedback you record as Comments">Reviewers…</button>
-          <button type="button" id="open-shortcuts">Keyboard shortcuts…</button>
-        </p>
-        <h3>Mods for new Works</h3>
-        <ul id="new-work-mods" class="mod-list"></ul>
-        <p class="muted">Settings are kept in the Vault, so every device that opens it uses them, unless it has its own.</p>
-        <h3>App</h3>
-        <p class="row app-row">
-          <span id="app-version" class="muted"></span>
-          <button type="button" id="check-updates" title="Look for a newer version of the app on GitHub">Check for updates…</button>
-          <button type="button" id="open-uninstall" title="Remove the app from this PC. Your Vault stays." hidden>Uninstall…</button>
-        </p>
+        <div id="settings-tabs" class="settings-tabs" role="tablist" aria-label="Settings">
+          <button id="settings-tab-editor" type="button" role="tab" aria-controls="settings-editor" data-tab="editor">Editor</button>
+          <button id="settings-tab-reviewers" type="button" role="tab" aria-controls="settings-reviewers" data-tab="reviewers">Reviewers</button>
+          <button id="settings-tab-vault" type="button" role="tab" aria-controls="settings-vault" data-tab="vault">Vault</button>
+          <button id="settings-tab-shortcuts" type="button" role="tab" aria-controls="settings-shortcuts" data-tab="shortcuts">Shortcuts</button>
+          <button id="settings-tab-app" type="button" role="tab" aria-controls="settings-app" data-tab="app">App</button>
+        </div>
+        <div class="settings-body">
+          <section id="settings-editor" role="tabpanel" aria-labelledby="settings-tab-editor">
+            <p class="muted tab-note">Kept in the Vault for every device that opens it, unless ticked for this one.</p>
+            <div class="setting-row setting-head">
+              <span></span>
+              <span>This device only</span>
+            </div>
+            <div class="setting-row">
+              <div>
+                <label class="setting-field">Theme
+                  <select id="theme">
+                    <option value="system">Follow the system</option>
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                  </select>
+                </label>
+                <p id="theme-other" class="setting-other" hidden></p>
+                <p id="theme-missing" class="theme-line" hidden></p>
+                <p id="theme-problems" class="theme-line" hidden></p>
+                <p class="row">
+                  <button type="button" id="import-theme" title="Copy a theme's .css file into the Vault's themes folder">Import theme…</button>
+                </p>
+              </div>
+              <input type="checkbox" id="theme-here" aria-label="Theme only on this device" />
+            </div>
+            <div class="setting-row">
+              <div>
+                <label class="setting-field">Editor font size
+                  <input id="font-size" type="number" min="10" max="40" />
+                </label>
+                <p id="font-size-other" class="setting-other" hidden></p>
+              </div>
+              <input type="checkbox" id="font-size-here" aria-label="Editor font size only on this device" />
+            </div>
+            <div class="setting-row">
+              <div>
+                <label class="check"><input type="checkbox" id="line-numbers" /> Line numbers</label>
+                <p id="line-numbers-other" class="setting-other" hidden></p>
+              </div>
+              <input type="checkbox" id="line-numbers-here" aria-label="Line numbers only on this device" />
+            </div>
+            <div class="setting-row">
+              <div>
+                <label class="check"><input type="checkbox" id="highlight-line" /> Shade the line the cursor is on</label>
+                <p id="highlight-line-other" class="setting-other" hidden></p>
+              </div>
+              <input type="checkbox" id="highlight-line-here" aria-label="Shading the cursor's line only on this device" />
+            </div>
+            <div class="setting-row">
+              <div>
+                <label class="check"><input type="checkbox" id="preview-follows" /> The Page preview follows the cursor</label>
+                <p id="preview-follows-other" class="setting-other" hidden></p>
+              </div>
+              <input type="checkbox" id="preview-follows-here" aria-label="The Page preview following the cursor only on this device" />
+            </div>
+            <div class="setting-row">
+              <div>
+                <label class="check"><input type="checkbox" id="comment-highlights" /> Show Comment highlights in the text</label>
+                <p id="comment-highlights-other" class="setting-other" hidden></p>
+              </div>
+              <input type="checkbox" id="comment-highlights-here" aria-label="Comment highlights only on this device" />
+            </div>
+          </section>
+
+          <section id="settings-reviewers" role="tabpanel" aria-labelledby="settings-tab-reviewers" hidden>
+            <p class="muted tab-note">The people whose feedback you record as Comments. They belong to the Vault, so they can comment on any Work, and their colour is the same everywhere.</p>
+            <p id="reviewers-error" class="dialog-error" hidden></p>
+            <ul id="reviewers-list" class="reviewer-list"></ul>
+            <p id="reviewers-none" class="muted" hidden>No Reviewers yet.</p>
+            <div class="row reviewer-add">
+              <input id="reviewer-name" maxlength="100" placeholder="Name" autocomplete="off" />
+              <input id="reviewer-role" maxlength="60" placeholder="Role, e.g. editor" autocomplete="off" />
+              <button type="button" id="reviewer-add">Add</button>
+            </div>
+            <details id="reviewers-removed-box" hidden>
+              <summary>Removed</summary>
+              <p class="muted">No longer offered when adding a Comment. Their Comments keep their name and colour.</p>
+              <ul id="reviewers-removed" class="reviewer-list"></ul>
+            </details>
+          </section>
+
+          <section id="settings-vault" role="tabpanel" aria-labelledby="settings-tab-vault" hidden>
+            <p class="muted tab-note">How this Vault is organised, for every device that opens it.</p>
+            <h3>Hidden folders</h3>
+            <label class="here"><input type="checkbox" id="hidden-folders-here" /> Only on this device</label>
+            <ul id="hidden-folders" class="hidden-folders"></ul>
+            <h3>Mods for the whole Vault</h3>
+            <ul id="vault-mods" class="mod-list"></ul>
+            <h3>Mods for new Works</h3>
+            <ul id="new-work-mods" class="mod-list"></ul>
+          </section>
+
+          <section id="settings-shortcuts" role="tabpanel" aria-labelledby="settings-tab-shortcuts" hidden>
+            <p class="muted tab-note">Click a key, then press the new one. Esc keeps the old key; Backspace leaves the command without one.</p>
+            <div class="shortcuts-top">
+              <label class="check"><input type="checkbox" id="shortcuts-here" /> Only on this device (for a different keyboard). Otherwise every device that opens the Vault uses these.</label>
+              <button type="button" id="shortcuts-reset">Reset all…</button>
+            </div>
+            <p id="shortcuts-error" class="dialog-error" hidden></p>
+            <div id="shortcuts-list"></div>
+          </section>
+
+          <section id="settings-app" role="tabpanel" aria-labelledby="settings-tab-app" hidden>
+            <p class="muted tab-note">This device's copy of the app. Nothing here is kept in the Vault.</p>
+            <p id="app-version"></p>
+            <p class="row app-row">
+              <button type="button" id="check-updates" title="Look for a newer version of the app on GitHub">Check for updates…</button>
+              <button type="button" id="open-uninstall" title="Remove the app from this PC. Your Vault stays." hidden>Uninstall…</button>
+              <button type="button" id="open-licenses" title="The open-source libraries and fonts the app is built with">Licenses…</button>
+            </p>
+          </section>
+        </div>
         <menu>
-          <button type="button" id="open-licenses" class="link licenses-link" title="The open-source libraries and fonts the app is built with">Licenses</button>
           <button value="done">Done</button>
         </menu>
       </form>

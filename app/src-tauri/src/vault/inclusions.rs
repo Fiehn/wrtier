@@ -140,7 +140,7 @@ pub(super) struct Ctx<'a> {
 }
 
 /// An included Work: the open one, or one read from disk.
-enum DocRef<'a> {
+pub(super) enum DocRef<'a> {
     Open(&'a Doc),
     Read(Arc<Doc>),
 }
@@ -157,7 +157,7 @@ impl std::ops::Deref for DocRef<'_> {
 
 impl<'a> Ctx<'a> {
     /// An included Work, as it is now or at `version`.
-    fn doc(&mut self, located: &Located, version: Option<&[(DeviceId, u32)]>) -> Result<DocRef<'a>, String> {
+    pub(super) fn doc(&mut self, located: &Located, version: Option<&[(DeviceId, u32)]>) -> Result<DocRef<'a>, String> {
         let works = self.works;
         if version.is_none() {
             if let Some(open) = works.values().find(|w| w.db == located.db) {
@@ -343,7 +343,7 @@ fn committed_at(doc: &Doc, at: usize) -> usize {
 
 /// The included Work's Comments on its own text in `plain` (`runs` says where that is), with
 /// their ranges in `plain` (UTF-16). A Comment none of whose text is shown there is left out.
-fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]) -> Vec<crate::work::Mark> {
+pub(super) fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]) -> Vec<crate::work::Mark> {
     let comments = doc.comments();
     if comments.is_empty() || runs.is_empty() {
         return Vec::new();
@@ -367,12 +367,14 @@ fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]) -> Vec<cr
                 }
             }
         }
+        // Detached ones aren't shown on the Inclusion, and nor are Work comments: they're
+        // about the included Work as a whole, so they show only in it.
         if ranges.is_empty() {
             return None;
         }
         let id = c.id.to_string();
         Some(crate::work::Mark {
-            id, ranges, sender: c.sender, name: String::new(), colour: String::new(), body: c.body,
+            id, ranges, on_work: false, sender: c.sender, name: String::new(), colour: String::new(), body: c.body,
             resolved: c.resolved, quote: c.quote, time_ms: c.hlc.0, other_body: None,
             replies: c.replies.into_iter().map(|r| crate::work::ReplyMark {
                 id: r.id.to_string(), sender: r.sender, name: String::new(), colour: String::new(),
@@ -607,13 +609,19 @@ impl Vault {
         index
     }
 
-    /// A `.db`'s Work ID (`storage::identity`), read once and kept.
-    fn identity_of(&mut self, db: &Path) -> Option<String> {
-        if let Some(known) = self.identities.get(db) {
-            return known.clone();
+    /// A `.db`'s Work ID (`storage::identity`), read once and kept while the file is unchanged.
+    /// A different Work can come to have the same path (one renamed away, another made or moved
+    /// there), and an empty one gets its ID with its first Change: either way the file's time
+    /// differs, so it's read again.
+    pub(super) fn identity_of(&mut self, db: &Path) -> Option<String> {
+        let stamp = std::fs::metadata(db).and_then(|m| m.modified()).ok();
+        if let Some((at, known)) = self.identities.get(db) {
+            if stamp.is_some() && *at == stamp {
+                return known.clone();
+            }
         }
         let read = storage::identity(db).ok().flatten();
-        self.identities.insert(db.to_path_buf(), read.clone());
+        self.identities.insert(db.to_path_buf(), (stamp, read.clone()));
         read
     }
 
@@ -751,7 +759,7 @@ impl Vault {
     }
 
     /// The name and colour of a Comment's sender in an included Work (`author`: its author name).
-    fn included_sender(&self, author: &str, sender: &str) -> (String, String) {
+    pub(super) fn included_sender(&self, author: &str, sender: &str) -> (String, String) {
         match sender.strip_prefix("reviewer/") {
             None => (if author.trim().is_empty() { "Author".into() } else { author.to_string() }, "author".into()),
             Some(id) => match self.reviewer(id) {

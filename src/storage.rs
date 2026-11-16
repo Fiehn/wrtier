@@ -738,7 +738,8 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
             }
             "comment" => {
                 let (sender, body, quote) = comments.remove(&id).ok_or(format!("Missing Comment for change {}", id))?;
-                let pieces = comment_pieces.remove(&id).ok_or(format!("Missing Comment pieces for change {}", id))?;
+                // A Work comment has no pieces (ADR 0017).
+                let pieces = comment_pieces.remove(&id).unwrap_or_default();
                 ChangeKind::Comment { pieces, quote, sender, body }
             }
             "reply" => {
@@ -1342,6 +1343,22 @@ mod test {
         let conn = Connection::open(&path).unwrap();
         let text: String = conn.query_row("SELECT text FROM history WHERE kind = 'milestone'", [], |r| r.get(0)).unwrap();
         assert_eq!(text, "Draft 2, sent to editor");
+    }
+
+    #[test]
+    fn a_work_comment_round_trips_with_no_pieces() {
+        use crate::change::AUTHOR;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work.db");
+        let (mut doc, mut changes) = named_history();
+        let on_work = doc.work_comment_local(AUTHOR, "too short overall", 5000);
+        changes.push(on_work.clone());
+        changes.push(doc.reply_local(on_work.id, AUTHOR, "agreed", 6000));
+        save(&path, &changes, &doc).unwrap();
+        let (loaded, loaded_doc) = load(&path, DeviceId(1)).unwrap();
+        assert!(loaded.contains(&on_work));
+        let c = &loaded_doc.comments()[0];
+        assert_eq!((c.id, c.on_work, c.body.as_str(), c.replies.len()), (on_work.id, true, "too short overall", 1));
     }
 
     #[test]

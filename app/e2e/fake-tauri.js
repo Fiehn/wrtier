@@ -24,9 +24,17 @@
     changes: 1,
     /** Mods each Work has (the Chapter list is on Rain). */
     mods: { Rain: ["chapters", "counts"] },
+    /** The Vault Mods the Vault has (none unless a test adds one). */
+    vaultMods: [],
+    /** The Vault's folders, besides those its Works are in (none unless a test adds some). */
+    vaultFolders: [],
+    /** The colours of Works and folders (vault/colours.rs). */
+    colours: { works: {}, folders: {} },
     /** Vault themes: file → { name, dark, css }. A test adds some before the page loads. */
     themes: {},
     settings: null,
+    /** The Vault the app opens at the start (null: none, as on a first start). */
+    lastVault: "C:/Fake Vault",
     /** Android's shared storage, for the folder browser: each folder and the folders in it. */
     folders: {
       "/storage/emulated/0": ["Download", "Sync"],
@@ -42,6 +50,8 @@
     update: { kind: "newest", current: "0.1.2" },
     /** What "Uninstall…" finds before asking (lib.rs's UninstallCheck). */
     uninstallCheck: { problem: null, unsaved: [] },
+    /** The pages a compile gives (their sizes in points). None unless a test adds some. */
+    pages: [],
   };
   window.__fake = fake;
 
@@ -49,7 +59,8 @@
     theme: "light", fontSize: 17, themeHere: false, fontSizeHere: false,
     lineNumbers: false, lineNumbersHere: false, highlightLine: false, highlightLineHere: false,
     previewFollows: true, previewFollowsHere: false, commentHighlights: true, commentHighlightsHere: false,
-    shortcuts: {}, shortcutsHere: false,
+    shortcuts: {}, shortcutsHere: false, hiddenFoldersHere: false,
+    shared: { theme: "light", fontSize: 17, lineNumbers: false, highlightLine: false, previewFollows: true, commentHighlights: true },
   };
 
   /** Applies one of the editor's edit ops to a Work's text (positions are UTF-16, as JS counts). */
@@ -64,6 +75,10 @@
       case "cut":
         t = t.slice(0, op.from) + t.slice(op.to);
         break;
+      case "replace":
+        // Find and replace: word edits in the text as it was, applied last first.
+        for (const e of [...op.edits].sort((x, y) => y.from - x.from)) t = t.slice(0, e.from) + e.text + t.slice(e.to);
+        break;
       case "move": {
         // `at` is where the text goes, counted in the text before the move.
         const piece = t.slice(op.from, op.to);
@@ -74,8 +89,15 @@
       }
       case "comment":
         fake.comments.push({
-          id: `c${fake.comments.length + 1}`, ranges: [[op.from, op.to]], sender: op.sender, name: "Author", colour: "author",
+          id: `c${fake.comments.length + 1}`, ranges: [[op.from, op.to]], onWork: false, sender: op.sender, name: "Author", colour: "author",
           body: op.body, resolved: false, quote: t.slice(op.from, op.to), timeMs: now, replies: [], otherBody: null,
+        });
+        break;
+      case "workComment":
+        // Rust lists Work comments first, oldest first.
+        fake.comments.splice(fake.comments.filter((c) => c.onWork).length, 0, {
+          id: `c${fake.comments.length + 1}`, ranges: [], onWork: true, sender: op.sender, name: "Author", colour: "author",
+          body: op.body, resolved: false, quote: "", timeMs: now, replies: [], otherBody: null,
         });
         break;
       case "include": {
@@ -101,25 +123,85 @@
   }
 
   const handlers = {
-    startup: () => ({ lastVault: "C:/Fake Vault" }),
+    startup: () => ({ lastVault: fake.lastVault }),
     open_vault: ({ path }) => ({ status: "opened", root: path, deviceName: "Laptop", suggestedName: "Laptop" }),
     get_settings: () => settings,
-    set_setting: ({ name, value }) => {
-      settings[name] = name === "fontSize" ? Number(value) : value === "on" ? true : value === "off" ? false : value;
+    set_setting: ({ name, value, here }) => {
+      const v = name === "fontSize" ? Number(value) : value === "on" ? true : value === "off" ? false : value;
+      settings[name] = v;
+      if (!here) {
+        settings.shared[name] = v;
+        settings[`${name}Here`] = false;
+      }
       return settings;
     },
-    list_works: () => ({ entries: Object.keys(fake.texts).map((id) => ({ id, name: id, kind: "work" })), problems: fake.problems, folders: [] }),
+    // Ticking keeps the value in use; unticking goes back to the shared one (vault/settings.rs).
+    set_setting_here: ({ name, here }) => {
+      settings[`${name}Here`] = here;
+      if (!here) settings[name] = settings.shared[name];
+      return settings;
+    },
+    list_works: () => {
+      const ids = Object.keys(fake.texts);
+      // Every folder a Work is in, and the folders those are in.
+      const inFolders = ids.flatMap((id) => id.split("/").slice(0, -1).map((_, i, parts) => parts.slice(0, i + 1).join("/")));
+      return {
+        entries: ids.map((id) => ({ id, name: id.split("/").pop(), kind: "work" })),
+        problems: fake.problems, folders: [...new Set([...fake.vaultFolders, ...inFolders])].sort(), hidden: [], colours: fake.colours,
+      };
+    },
+    rename_work: ({ id, name }) => {
+      fake.texts[name] = fake.texts[id];
+      delete fake.texts[id];
+      return name;
+    },
+    rename_folder: ({ path, name }) => {
+      const moved = (p) => (p === path || p.startsWith(`${path}/`) ? name + p.slice(path.length) : p);
+      for (const id of Object.keys(fake.texts)) {
+        const to = moved(id);
+        if (to !== id) {
+          fake.texts[to] = fake.texts[id];
+          delete fake.texts[id];
+        }
+      }
+      fake.vaultFolders = fake.vaultFolders.map(moved);
+      return [];
+    },
     list_trash: () => [],
     get_library: () => ({
       items: [{ kind: "style", name: "Courier voice", title: "Courier voice", path: "styles/Courier voice.typ", description: "", problems: [], writtenAs: null, shownAs: null, docx: null, styles: [] }],
       conflicts: [], builtIn: [],
     }),
-    get_layout: () => ({ tabs: ["Rain"], active: "Rain", cursors: {} }),
+    get_layout: () => ({ tabs: ["Rain"], active: "Rain", cursors: {}, reading: fake.reading ?? null }),
     save_layout: () => null,
     open_work: ({ id }) => ({ id, name: id, text: fake.texts[id], problems: [], notice: null }),
+    /** Find in Vault: a Work's text, stamped with how many edits the fake has had. */
+    text_for_finding: ({ id, known }) => {
+      if (!(id in fake.texts)) return { kind: "unreadable", reason: "isn't in the Vault any more" };
+      const stamp = String(fake.changes);
+      return known === stamp ? { kind: "unchanged" } : { kind: "text", stamp, text: fake.texts[id] };
+    },
+    /** The Reading panel: a Work's text, read without opening it (vault/reading.rs). */
+    read_work: ({ work, known }) => {
+      const name = work.split("/").pop();
+      if (!(work in fake.texts)) return { kind: "unreadable", id: work, name, identity: null, reason: `${name} isn't in the Vault any more.` };
+      const marks = fake.readingMarks?.[work] ?? [];
+      const stamp = `${fake.changes}:${JSON.stringify(marks)}`;
+      if (known === stamp) return { kind: "unchanged" };
+      return { kind: "text", id: work, name, identity: `id-${name}`, stamp, text: fake.texts[work], inclusions: [], marks, elements: [] };
+    },
     leave_work: () => null,
     close_work: () => null,
-    get_mods: ({ id }) => ({ work: fake.mods[id] ?? [], newWorks: [], hidden: [] }),
+    get_mods: ({ id }) => ({ work: fake.mods[id] ?? [], newWorks: [], vault: fake.vaultMods, hidden: [] }),
+    set_vault_mod: ({ name, on }) => {
+      fake.vaultMods = on ? [...new Set([...fake.vaultMods, name])] : fake.vaultMods.filter((m) => m !== name);
+      return { work: [], newWorks: [], vault: fake.vaultMods, hidden: [] };
+    },
+    set_work_colour: ({ id, colour }) => {
+      if (colour) fake.colours.works[id] = colour;
+      else delete fake.colours.works[id];
+      return null;
+    },
     get_reviewers: () => [],
     get_preamble: () => ({ preamble: { looks: ["Paperback"], styles: [], elements: [], title: "Rain", author: "", language: "en", raw: "" }, rawOther: null }),
     get_milestones: () => fake.milestones ?? [],
@@ -170,7 +252,14 @@
       fake.included[id][k].settled = true;
       return null;
     },
-    compile_preview: () => ({ pages: [], stale: false, errors: [], warnings: [], deviceFonts: [], ms: 1 }),
+    compile_preview: () => ({ pages: fake.pages, stale: false, errors: [], warnings: [], deviceFonts: [], ms: 1 }),
+    /** A plain page with its number on it. */
+    preview_page: ({ page }) => {
+      const { width, height } = fake.pages[page];
+      const hash = `page-${page}`;
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}"><text x="40" y="80" font-size="24">Page ${page + 1}</text></svg>`;
+      return { hash, svg };
+    },
     forget_preview: () => null,
     preview_locate: () => null,
     get_history: () => ({ sessions: [], milestones: [], notices: [], more: false }),
@@ -178,7 +267,7 @@
       let changed = false;
       for (const op of ops) changed = apply(id, op) || changed;
       if (changed) fake.changes += 1;
-      const wantsMarks = ops.some((op) => op.op === "marks" || op.op === "comment");
+      const wantsMarks = ops.some((op) => op.op === "marks" || op.op === "comment" || op.op === "workComment");
       return workState(id, wantsMarks ? { marks: fake.comments } : {});
     },
     work_text: ({ id }) => ({ text: fake.texts[id], state: workState(id) }),

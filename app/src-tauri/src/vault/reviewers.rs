@@ -244,6 +244,7 @@ mod tests {
         comment(&mut doc, "Later she would read it again, slowly.", &ben, "Split by a Move: shows in two places.");
         comment(&mut doc, "This sentence is about to be deleted.", &anna, "Detached: its text is gone.");
         changes.push(doc.resolve_comment_local(resolved, true, now));
+        changes.push(doc.work_comment_local(&anna, "Work comment: the ending drags, and the middle third could lose a scene.", now));
         let from = at(&doc, "slowly.");
         changes.push(doc.move_local(from, count("slowly."), at(&doc, "= Rain") + count("= Rain\n"), now));
         let gone = at(&doc, "This sentence");

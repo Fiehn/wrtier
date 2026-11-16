@@ -153,6 +153,34 @@ fn open_work(state: State<AppState>, id: String) -> Result<OpenedWork, String> {
     with_app(&state, |app| open_vault_of(app)?.open_work(&id, now_ms()))
 }
 
+/// A Work's own text, for Find in Vault, unless it still has the stamp `known`. It runs off the
+/// main thread, and takes the app's lock only to find the Work's files: reading a History can
+/// take a while, and typing in an open Work mustn't wait for it.
+#[tauri::command]
+async fn text_for_finding(handle: AppHandle, id: String, known: Option<String>) -> Result<vault::TextForFinding, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = with_app(&handle.state::<AppState>(), |app| open_vault_of(app)?.text_source(&id))?;
+        Ok(source.read(known.as_deref()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// A Work for the Reading panel (vault/reading.rs), unless it still has the stamp `known`: found
+/// by its Work ID (`identity`) if it has one, else by `work`. It's never opened, and nothing is
+/// recorded. The file is read without the app's lock, as for Find in Vault.
+#[tauri::command]
+async fn read_work(handle: AppHandle, work: String, identity: Option<String>, known: Option<String>) -> Result<vault::Reading, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<AppState>();
+        let source = with_app(&state, |app| Ok(open_vault_of(app)?.reading_source(&work, identity.as_deref())))?;
+        let loaded = source.load();
+        with_app(&state, |app| Ok(open_vault_of(app)?.reading(source, loaded, known.as_deref())))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Makes a new, empty Work and opens it.
 #[tauri::command]
 fn create_work(state: State<AppState>, id: String) -> Result<OpenedWork, String> {
@@ -744,7 +772,37 @@ fn create_folder(state: State<AppState>, path: String) -> Result<String, String>
 /// Renames (or moves) a folder. Returns the old and new ID of each Work open in it.
 #[tauri::command]
 fn rename_folder(state: State<AppState>, path: String, name: String) -> Result<Vec<(String, String)>, String> {
-    with_app(&state, |app| open_vault_of(app)?.rename_folder(&path, &name))
+    with_app(&state, |app| open_vault_of(app)?.rename_folder(&path, &name, now_ms()))
+}
+
+/// Adds a Vault Mod (such as Colours) to the whole Vault, or removes it.
+#[tauri::command]
+fn set_vault_mod(state: State<AppState>, name: String, on: bool) -> Result<vault::Mods, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_vault_mod(&name, on, now_ms()))
+}
+
+/// Gives a Work a colour (one of the Reviewers' slots), or none ("").
+#[tauri::command]
+fn set_work_colour(state: State<AppState>, id: String, colour: String) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.set_work_colour(&id, &colour, now_ms()))
+}
+
+/// Gives a folder a colour, or none ("").
+#[tauri::command]
+fn set_folder_colour(state: State<AppState>, path: String, colour: String) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.set_folder_colour(&path, &colour, now_ms()))
+}
+
+/// Hides a folder in the Vault browser, or shows it again. Returns the folders hidden now.
+#[tauri::command]
+fn set_folder_hidden(state: State<AppState>, path: String, hidden: bool) -> Result<Vec<String>, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_folder_hidden(&path, hidden, now_ms()))
+}
+
+/// This Device keeps its own list of hidden folders, or goes back to the Vault's.
+#[tauri::command]
+fn set_hidden_folders_here(state: State<AppState>, here: bool) -> Result<vault::Settings, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_hidden_folders_here(here, now_ms()))
 }
 
 /// Moves a folder, with everything in it, to the Vault's trash.
@@ -806,6 +864,12 @@ fn get_settings(state: State<AppState>) -> Result<vault::Settings, String> {
 #[tauri::command]
 fn set_setting(state: State<AppState>, name: String, value: String, here: bool) -> Result<vault::Settings, String> {
     with_app(&state, |app| open_vault_of(app)?.set_setting(&name, &value, here, now_ms()))
+}
+
+/// This Device gets its own value of a Vault setting, or goes back to the shared one.
+#[tauri::command]
+fn set_setting_here(state: State<AppState>, name: String, here: bool) -> Result<vault::Settings, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_setting_here(&name, here, now_ms()))
 }
 
 /// Gives commands keyboard shortcuts: [command, key] pairs; key "none" for no key, "" for the default.
@@ -1112,6 +1176,8 @@ pub fn run() {
             work_text,
             get_inclusions,
             chapters_of,
+            text_for_finding,
+            read_work,
             check_inclusion,
             create_collection,
             missing_inclusions,
@@ -1127,11 +1193,17 @@ pub fn run() {
             empty_trash,
             create_folder,
             rename_folder,
+            set_folder_hidden,
+            set_vault_mod,
+            set_work_colour,
+            set_folder_colour,
+            set_hidden_folders_here,
             trash_folder,
             discard_work,
             save_as_new,
             get_settings,
             set_setting,
+            set_setting_here,
             get_mods,
             set_mod,
             set_new_work_mod,

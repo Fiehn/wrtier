@@ -4,7 +4,7 @@ import { marksForTests, setMarks } from "./comments";
 import { fitMarks, type Mark } from "./sync";
 
 const mark = (id: string, ranges: [number, number][], resolved = false): Mark => ({
-  id, ranges, sender: "author", name: "Author", colour: "author", body: "too abrupt?", resolved,
+  id, ranges, onWork: false, sender: "author", name: "Author", colour: "author", body: "too abrupt?", resolved,
   quote: "bcd", timeMs: 0, replies: [], otherBody: null,
 });
 

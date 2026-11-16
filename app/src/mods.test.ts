@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { inUse, modExtensions, modNamed, unknownMods } from "./mods";
+import { inUse, modExtensions, modNamed, unknownMods, unknownVaultMods, vaultModInUse, VAULT_MODS } from "./mods";
 import { COMMANDS, normalize, problemWith } from "./keys";
 
-const state = (work: string[], hidden: string[] = []) => ({ work, newWorks: [], hidden });
+const state = (work: string[], hidden: string[] = [], vault: string[] = []) => ({ work, newWorks: [], vault, hidden });
 
 describe("which Mods are at work in a Work", () => {
   it("is the Work's own, less those this device hides", () => {
@@ -16,6 +16,21 @@ describe("which Mods are at work in a Work", () => {
   it("leaves out a Mod from a newer version of the app, and names it", () => {
     expect(inUse(state(["dialogue", "spellcheck"])).map((m) => m.id)).toEqual(["spellcheck"]);
     expect(unknownMods(["dialogue", "spellcheck"])).toEqual(["dialogue"]);
+  });
+});
+
+describe("Vault Mods", () => {
+  it("are at work when the Vault has them and this device doesn't hide them", () => {
+    expect(vaultModInUse(state([], [], ["colours"]), "colours")).toBe(true);
+    expect(vaultModInUse(state([], ["colours"], ["colours"]), "colours")).toBe(false);
+    expect(vaultModInUse(state([], [], []), "colours")).toBe(false);
+  });
+
+  it("are never a Work's Mods, and one from a newer version is named", () => {
+    // Even listed on a Work (by hand, or a mistake), a Vault Mod isn't at work there.
+    expect(inUse(state(["colours", "spellcheck"])).map((m) => m.id)).toEqual(["spellcheck"]);
+    for (const m of VAULT_MODS) expect(modNamed(m.id), m.id).toBeUndefined();
+    expect(unknownVaultMods(["colours", "tags"])).toEqual(["tags"]);
   });
 });
 

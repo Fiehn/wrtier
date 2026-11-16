@@ -6,6 +6,7 @@
 // that did stay, faded, under a bar with the first error.
 
 import { invoke } from "@tauri-apps/api/core";
+import { PageZoom } from "./zoom";
 
 // The same shapes as the Rust side's (typeset.rs).
 type PageSize = { width: number; height: number };
@@ -75,6 +76,8 @@ export class PagePreview {
   private generation = 0;
   private inView = new Set<number>();
   private readonly observer: IntersectionObserver;
+  /** How big the pages are shown (zoom.ts). */
+  readonly zoom: PageZoom;
 
   /** The Look the pages are in: picked here, remembered on this Device for each Work. */
   private look: string | null = null;
@@ -93,8 +96,10 @@ export class PagePreview {
     private readonly list: HTMLElement,
     private readonly picker: HTMLSelectElement,
     private readonly versionPicker: HTMLSelectElement,
+    zoomMenu: HTMLSelectElement,
     private readonly hooks: PreviewHooks,
   ) {
+    this.zoom = new PageZoom(list, zoomMenu, () => this.pages);
     this.versionPicker.addEventListener("change", () => {
       this.milestone = this.milestones.find((m) => m.id === this.versionPicker.value) ?? null;
       this.clear();
@@ -192,6 +197,14 @@ export class PagePreview {
     const bottom = top + this.list.clientHeight;
     if (always || y < top + FOLLOW_MARGIN || y > bottom - FOLLOW_MARGIN) {
       this.list.scrollTo({ top: Math.max(0, y - this.list.clientHeight / 3) });
+    }
+    // Zoomed in past the panel's width: sideways too.
+    if (this.list.scrollWidth > this.list.clientWidth) {
+      const x = page.el.offsetLeft + spot.x * scale;
+      const left = this.list.scrollLeft;
+      if (always || x < left + FOLLOW_MARGIN || x > left + this.list.clientWidth - FOLLOW_MARGIN) {
+        this.list.scrollLeft = Math.max(0, x - this.list.clientWidth / 2);
+      }
     }
     if (!always) {
       // A caret about one line high, ending on the baseline.
@@ -351,6 +364,7 @@ export class PagePreview {
       page.height = size.height;
       page.el.style.aspectRatio = `${size.width} / ${size.height}`;
     });
+    this.zoom.pagesChanged();
     this.list.dataset.empty = compiled.pages.length === 0 ? (compiled.errors.length ? "error" : "blank") : "";
     this.showBar(compiled);
     this.drawInView();
@@ -380,6 +394,7 @@ export class PagePreview {
     this.mark.remove();
     for (const page of this.pages) this.removePage(page);
     this.pages = [];
+    this.zoom.cleared();
     this.list.classList.remove("stale");
     this.list.dataset.empty = "";
   }

@@ -54,8 +54,9 @@ pub struct Vault {
     library_generation: u64,
     /// Why the default Styles couldn't be written, if they couldn't.
     defaults_problem: Option<String>,
-    /// Each `.db`'s Work ID, read once: how Inclusions find the Works they include.
-    identities: HashMap<PathBuf, Option<String>>,
+    /// Each `.db`'s Work ID, read once (and again if the file changes): how Inclusions find the
+    /// Works they include, and how a Work keeps its colour.
+    identities: HashMap<PathBuf, (Option<std::time::SystemTime>, Option<String>)>,
     /// Included Works read from disk (see `inclusions::DocCache`).
     included_docs: inclusions::DocCache,
 }
@@ -100,12 +101,19 @@ pub struct PreambleView {
 /// one field per file, holding the version written.
 const DEFAULTS_RECORD: &str = "defaults";
 
+mod colours;
+mod find;
+mod hidden;
 mod history;
 mod inclusions;
+mod reading;
 mod mods;
 mod moves;
 mod reviewers;
 mod settings;
+pub use colours::Colours;
+pub use find::TextForFinding;
+pub use reading::{Reading, ReadingSource};
 pub use inclusions::{ChapterChoice, InclusionView, Target};
 pub use history::{ComparisonView, HistoryView, RestorePreview, ReturnPreview, RevertPreview, SnippetsView};
 pub use mods::Mods;
@@ -189,6 +197,10 @@ pub struct Listing {
     pub problems: Vec<SyncProblem>,
     /// Every folder Works can be in ("Short stories", "Short stories/Old"), empty ones too.
     pub folders: Vec<String>,
+    /// The Folders hidden on this Device (hidden.rs), ones gone from the Vault too.
+    pub hidden: Vec<String>,
+    /// The colours of Works and Folders (colours.rs), kept whether or not the Colours Mod is on.
+    pub colours: Colours,
 }
 
 #[derive(Serialize, Debug)]
@@ -499,7 +511,8 @@ impl Vault {
         entries.sort_by_key(|e| e.id.to_lowercase());
         let mut folders: Vec<String> = files.folders.iter().map(|dir| self.relative(dir)).collect();
         folders.sort_by_key(|f| f.to_lowercase());
-        Listing { entries, problems, folders }
+        let colours = self.colours(&histories);
+        Listing { entries, problems, folders, hidden: self.hidden_folders(), colours }
     }
 
     /// Absorbs the Conflict copies of a Work that isn't open, into a History loaded just for
@@ -788,10 +801,10 @@ impl Vault {
                 *target = Some(found);
             }
         }
-        let edits = ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks | Op::Tints | Op::Find { .. } | Op::Stretch { .. }));
+        let edits = ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks | Op::Tints | Op::Locate { .. } | Op::Stretch { .. }));
         // What might add or remove an Inclusion (not plain typing).
         let reshapes = ops.iter().any(|op| match op {
-            Op::Cursor { .. } | Op::Marks | Op::Tints | Op::Find { .. } | Op::Stretch { .. } => false,
+            Op::Cursor { .. } | Op::Marks | Op::Tints | Op::Locate { .. } | Op::Stretch { .. } => false,
             Op::Type { from, to, .. } => from != to,
             _ => true,
         });

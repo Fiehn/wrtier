@@ -1,4 +1,6 @@
-# Builds the app and attaches it to a draft GitHub release when a version tag is pushed:
+# Builds the app and attaches it to a draft GitHub release when a version tag is pushed. The
+# easy way: `npm run release -- 0.1.4` in app/ (app/scripts/release.mjs) sets the version in
+# every file, commits, tags and pushes. By hand, once the version is set everywhere:
 #
 #   git tag v0.1.0
 #   git push origin v0.1.0

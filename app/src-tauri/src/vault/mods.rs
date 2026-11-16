@@ -16,19 +16,23 @@ fn work_record(identity: &str) -> String {
 
 /// A Mod for new Works: the field "new_work_mod.<mod>" of the shared settings record.
 const NEW_WORK: &str = "new_work_mod.";
+/// A Vault Mod, on for the whole Vault: the field "vault_mod.<mod>" of the shared settings record.
+const VAULT_MOD: &str = "vault_mod.";
 /// A Mod this Device hides: the field "hide_mod.<mod>" of its own record.
 const HIDDEN: &str = "hide_mod.";
 /// The record of the settings every Device shares (as in settings.rs).
 const SHARED: &str = "settings";
 
-/// Which Mods a Work has, which new Works get, and which this Device hides. Each holds only the
-/// Mods switched on; a Mod this app doesn't know is listed too.
+/// Which Mods a Work has, which new Works get, which Vault Mods the Vault has, and which this
+/// Device hides. Each holds only the Mods switched on; a Mod this app doesn't know is listed too.
 #[derive(Serialize, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Mods {
     /// The Work's Mods (empty when no Work was asked about).
     pub work: Vec<String>,
     pub new_works: Vec<String>,
+    /// The Vault Mods: added once, for every Work and every Device.
+    pub vault: Vec<String>,
     pub hidden: Vec<String>,
 }
 
@@ -41,7 +45,7 @@ fn check_mod(name: &str) -> Result<(), String> {
 
 impl Vault {
     /// What tells a Work from every other (`storage::identity`), open or not.
-    fn work_identity(&self, id: &str) -> Result<String, String> {
+    pub(super) fn work_identity(&self, id: &str) -> Result<String, String> {
         let id = self.current_id(id);
         let identity = match self.works.get(&id) {
             Some(work) => work.identity().map(str::to_string),
@@ -73,6 +77,7 @@ impl Vault {
         Ok(Mods {
             work,
             new_works: self.mods_in(SHARED, NEW_WORK),
+            vault: self.mods_in(SHARED, VAULT_MOD),
             hidden: self.mods_in(&device_record(self.device), HIDDEN),
         })
     }
@@ -100,6 +105,13 @@ impl Vault {
     pub fn set_new_work_mod(&mut self, name: &str, on: bool, now_ms: u64) -> Result<Mods, String> {
         check_mod(name)?;
         self.switch(SHARED, &format!("{NEW_WORK}{name}"), on, now_ms)?;
+        self.mods(None)
+    }
+
+    /// Adds a Vault Mod to the whole Vault, or removes it. Its data (such as the colours) stays.
+    pub fn set_vault_mod(&mut self, name: &str, on: bool, now_ms: u64) -> Result<Mods, String> {
+        check_mod(name)?;
+        self.switch(SHARED, &format!("{VAULT_MOD}{name}"), on, now_ms)?;
         self.mods(None)
     }
 

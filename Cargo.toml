@@ -1,6 +1,6 @@
 [package]
 name = "wrtier"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 license = "Apache-2.0"
 publish = false  # also keeps it off the app's Licenses page (app/src-tauri/about.toml)

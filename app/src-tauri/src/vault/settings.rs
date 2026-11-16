@@ -37,7 +37,33 @@ pub struct Settings {
     pub shortcuts: BTreeMap<String, String>,
     /// This Device has its own shortcuts (for a different keyboard), instead of the Vault's.
     pub shortcuts_here: bool,
+    /// This Device keeps its own list of Hidden folders (hidden.rs), instead of the Vault's.
+    pub hidden_folders_here: bool,
+    /// What the other Devices use: the shared values, for the settings this Device overrides.
+    pub shared: Shared,
 }
+
+/// The shared value of each single setting, whether or not this Device overrides it.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Shared {
+    pub theme: String,
+    pub font_size: u32,
+    pub line_numbers: bool,
+    pub highlight_line: bool,
+    pub preview_follows: bool,
+    pub comment_highlights: bool,
+}
+
+/// Each single setting: its name in the interface, its field, and its default.
+const SINGLE: [(&str, &str, &str); 6] = [
+    ("theme", "theme", "system"),
+    ("fontSize", "font_size", "17"),
+    ("lineNumbers", "line_numbers", "off"),
+    ("highlightLine", "highlight_line", "off"),
+    ("previewFollows", "preview_follows", "on"),
+    ("commentHighlights", "comment_highlights", "on"),
+];
 
 /// A shortcut is the field "shortcut.<command>" of the shared record, or of this Device's own
 /// if it has its own shortcuts. An empty value means the app's default.
@@ -81,8 +107,13 @@ impl Vault {
         let here = self.vault_doc.field(&device_record(self.device), field).filter(|v| !v.is_empty());
         match here {
             Some(value) => (value.to_string(), true),
-            None => (self.vault_doc.field(SHARED, field).filter(|v| !v.is_empty()).unwrap_or(default).to_string(), false),
+            None => (self.shared_setting(field, default), false),
         }
+    }
+
+    /// A setting's shared value, else `default`.
+    fn shared_setting(&self, field: &str, default: &str) -> String {
+        self.vault_doc.field(SHARED, field).filter(|v| !v.is_empty()).unwrap_or(default).to_string()
     }
 
     pub fn settings(&self) -> Settings {
@@ -107,6 +138,15 @@ impl Vault {
             comment_highlights_here,
             shortcuts: self.shortcuts(),
             shortcuts_here: self.shortcuts_here(),
+            hidden_folders_here: self.hidden_folders_here(),
+            shared: Shared {
+                theme: self.shared_setting("theme", "system"),
+                font_size: self.shared_setting("font_size", "17").parse().unwrap_or(17),
+                line_numbers: self.shared_setting("line_numbers", "off") == "on",
+                highlight_line: self.shared_setting("highlight_line", "off") == "on",
+                preview_follows: self.shared_setting("preview_follows", "on") == "on",
+                comment_highlights: self.shared_setting("comment_highlights", "on") == "on",
+            },
         }
     }
 
@@ -185,7 +225,7 @@ impl Vault {
     }
 
     /// Sets a setting for every Device, or (`here`) only for this one. Setting it for every
-    /// Device also drops this Device's override, so it follows the shared value again.
+    /// Device also drops any override left here, so this Device follows the shared value again.
     pub fn set_setting(&mut self, name: &str, value: &str, here: bool, now_ms: u64) -> Result<Settings, String> {
         let (field, value) = check(name, value)?;
         let mine = device_record(self.device);
@@ -199,6 +239,22 @@ impl Vault {
             }
         }
         self.save_vault(&changes)?;
+        Ok(self.settings())
+    }
+
+    /// This Device gets its own value of a setting (starting as the value it uses now), or goes
+    /// back to the shared one. Going back never changes the setting for the other Devices.
+    pub fn set_setting_here(&mut self, name: &str, here: bool, now_ms: u64) -> Result<Settings, String> {
+        let Some(&(_, field, default)) = SINGLE.iter().find(|(n, _, _)| *n == name) else {
+            return Err(format!("Not a setting: {name}"));
+        };
+        let mine = device_record(self.device);
+        let (value, is_here) = self.setting(field, default);
+        if here == is_here {
+            return Ok(self.settings());
+        }
+        let change = self.vault_doc.set_field_local(&mine, field, if here { &value } else { "" }, now_ms);
+        self.save_vault(&[change])?;
         Ok(self.settings())
     }
 }
@@ -217,7 +273,11 @@ mod tests {
             line_numbers: false, line_numbers_here: false, highlight_line: false, highlight_line_here: false,
             preview_follows: true, preview_follows_here: false,
             comment_highlights: true, comment_highlights_here: false,
-            shortcuts: BTreeMap::new(), shortcuts_here: false,
+            shortcuts: BTreeMap::new(), shortcuts_here: false, hidden_folders_here: false,
+            shared: Shared {
+                theme: "system".into(), font_size: 17, line_numbers: false, highlight_line: false,
+                preview_follows: true, comment_highlights: true,
+            },
         });
         vault.set_setting("commentHighlights", "off", false, 400).unwrap();
         assert!(!vault.settings().comment_highlights);
@@ -237,6 +297,25 @@ mod tests {
         // Setting it for every Device drops the override here.
         vault.set_setting("fontSize", "18", false, 3000).unwrap();
         assert_eq!((vault.settings().font_size, vault.settings().font_size_here), (18, false));
+    }
+
+    #[test]
+    fn going_back_to_the_shared_value_leaves_the_other_devices_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut laptop = open(dir.path());
+        laptop.set_setting("fontSize", "17", false, 1000).unwrap();
+        let Opened::Vault(mut phone) = Vault::open(dir.path(), DeviceId(2), false, &dir.path().join(".recovery2")).unwrap() else { panic!() };
+        // Ticking keeps the value in use, now as the phone's own; then it's changed there.
+        let settings = phone.set_setting_here("fontSize", true, 2000).unwrap();
+        assert_eq!((settings.font_size, settings.font_size_here), (17, true));
+        let settings = phone.set_setting("fontSize", "20", true, 3000).unwrap();
+        assert_eq!((settings.font_size, settings.shared.font_size), (20, 17));
+        // Unticking: the phone is back on 17, and the laptop never saw 20.
+        let settings = phone.set_setting_here("fontSize", false, 4000).unwrap();
+        assert_eq!((settings.font_size, settings.font_size_here), (17, false));
+        laptop.absorb_vault_copies(&mut Vec::new());
+        assert_eq!(laptop.settings().font_size, 17);
+        assert!(phone.set_setting_here("colour", true, 5000).is_err());
     }
 
     #[test]

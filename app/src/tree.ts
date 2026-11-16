@@ -49,3 +49,28 @@ export function foldersOf(id: string): string[] {
   const parts = id.split("/").slice(0, -1);
   return parts.map((_, i) => parts.slice(0, i + 1).join("/"));
 }
+
+/** The folder a Work is in ("Short stories/Old/Rain" → "Short stories/Old"; "" for none). */
+export function folderOf(id: string): string {
+  const slash = id.lastIndexOf("/");
+  return slash === -1 ? "" : id.slice(0, slash);
+}
+
+/** The outermost of the `hidden` folders that `folder` is, or is inside; null if none. */
+export function hiddenFolderAt(folder: string, hidden: string[]): string | null {
+  if (folder === "" || hidden.length === 0) return null;
+  return foldersOf(`${folder}/`).find((f) => hidden.includes(f)) ?? null;
+}
+
+/**
+ * What the Vault browser shows: the Works and folders, without those at or inside a Hidden
+ * folder. `shut` is the Hidden folders that are in the Vault and not inside another Hidden
+ * folder (so each is counted once, and one that's gone isn't counted).
+ */
+export function withoutHidden<E extends { id: string }>(items: E[], folders: string[], hidden: string[]): { items: E[]; folders: string[]; shut: string[] } {
+  return {
+    items: items.filter((e) => hiddenFolderAt(folderOf(e.id), hidden) === null),
+    folders: folders.filter((f) => hiddenFolderAt(f, hidden) === null),
+    shut: hidden.filter((h) => folders.includes(h) && hiddenFolderAt(folderOf(h), hidden) === null),
+  };
+}
