@@ -1151,3 +1151,18 @@ test("the Dialogue checker marks dialogue, and a Suggestion is accepted as typin
   await app.waitForTimeout(1200);
   await expect(app.locator(".cm-mark")).toHaveCount(0);
 });
+
+test("a Mark's Suggestion is accepted by clicking it on the card", async ({ app }) => {
+  await app.evaluate(() => (window as any).__fake.mods.Rain.push("dialogue"));
+  await app.locator("#works li.work-entry", { hasText: "Rain" }).locator(".entry-name").click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Mods…" }).click();
+  await app.locator("#mods button[value=done]").click();
+  await endOf(app, "She walked home.");
+  await app.keyboard.type(' "hey dudes" He said.');
+  const mark = app.locator(".cm-mark-rule");
+  await expect(mark).toHaveCount(1, { timeout: 5000 });
+  await mark.click();
+  await app.locator(".cm-mark-card .cm-mark-suggestion").first().click();
+  await expect.poll(() => textOf(app)).toContain('She walked home. "hey dudes," he said.');
+  await expect(app.locator(".cm-mark-rule")).toHaveCount(0);
+});

@@ -393,7 +393,8 @@ class Tab {
     // A click anywhere in the writing area (the margins beside the text, the space below it)
     // puts the cursor in the text, at the nearest place.
     this.pane.addEventListener("mousedown", (e) => {
-      if (e.button !== 0 || (e.target as Element).closest(".cm-content, .cm-gutters")) return;
+      // (Not on a tooltip: a Mark's card has buttons of its own.)
+      if (e.button !== 0 || (e.target as Element).closest(".cm-content, .cm-gutters, .cm-tooltip")) return;
       e.preventDefault();
       const box = this.view.contentDOM.getBoundingClientRect();
       const x = Math.min(Math.max(e.clientX, box.left + 1), box.right - 1);
