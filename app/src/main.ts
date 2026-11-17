@@ -20,6 +20,7 @@ import { browseForVault, ensureFilesAccess, onAndroid } from "./android";
 import { PhoneLayout } from "./phone";
 import { PanelSizes } from "./panelsizes";
 import { fillNewWorkMods, fillVaultMods, openMods } from "./modsdialog";
+import { fillDictionaries } from "./spellmod";
 import { inUse, modNamed, noSettings, vaultModInUse, type ModContext, type ModSettings, type ModsState } from "./mods";
 import { LEVEL_NAMES, type MarkCounts, type MarkLevel } from "./marks";
 import { ChapterList } from "./chapterlist";
@@ -757,8 +758,14 @@ function showMarkCounts() {
   }));
 }
 
+// A Dictionary was downloaded, updated or removed (spellmod.ts): every Spellchecker looks again.
+window.addEventListener("wrtier-dictionaries-changed", () => {
+  tabs.forgetMods();
+  void refreshMods();
+});
+
 async function editMods(id: string) {
-  await openMods(id, id.split("/").pop() ?? id, (state) => setModsOf(id, state), () => {
+  await openMods(id, id.split("/").pop() ?? id, languageOf.get(id) ?? "", (state) => setModsOf(id, state), () => {
     // The Vault's settings (the Speech verbs) are every Work's; Dismissed Marks shown again come back.
     void refreshMods();
     tabs.requestDismissed(id);
@@ -2373,6 +2380,7 @@ async function openSettings(tab?: SettingsTab) {
       });
     });
     await fillNewWorkMods($("new-work-mods"));
+    await fillDictionaries($("dictionaries"));
     await reviewersSettings.show();
     shortcutsSettings.show(settings);
   }

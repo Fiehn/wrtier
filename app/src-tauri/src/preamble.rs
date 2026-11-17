@@ -35,7 +35,8 @@ pub struct Preamble {
     pub elements: Vec<String>,
     pub title: String,
     pub author: String,
-    /// E.g. "en" or "da": decides quotation marks and hyphenation.
+    /// E.g. "en", "da" or, with a region, "en-GB": decides quotation marks, hyphenation and
+    /// which spellings are right (the Spellchecker's Dictionary).
     pub language: String,
     /// Typst for this Work only, after everything else.
     pub raw: String,
@@ -51,6 +52,24 @@ fn record(kind: Kind, name: &str) -> String {
         Kind::Style => format!("style/{name}"),
         Kind::Look => format!("look/{name}"),
         Kind::StoryElement => format!("element/{name}"),
+    }
+}
+
+/// A language as it's kept: the language in small letters and the region in capitals ("en-GB").
+pub fn normal_language(language: &str) -> String {
+    let language = language.trim();
+    match language.split_once('-') {
+        Some((lang, region)) => format!("{}-{}", lang.to_ascii_lowercase(), region.to_ascii_uppercase()),
+        None => language.to_ascii_lowercase(),
+    }
+}
+
+/// A language as `#set text(…)`'s arguments: `lang: "en"`, and `region: "GB"` if it has one.
+pub fn text_language(language: &str) -> String {
+    let language = normal_language(language);
+    match language.split_once('-') {
+        Some((lang, region)) => format!("lang: {}, region: {}", string(lang), string(region)),
+        None => format!("lang: {}", string(&language)),
     }
 }
 
@@ -75,9 +94,12 @@ impl Preamble {
                 return Err(format!("Not a name in the Style library: {name:?}"));
             }
         }
-        let lang = self.language.trim();
-        if !lang.is_empty() && (!(2..=3).contains(&lang.len()) || !lang.chars().all(|c| c.is_ascii_lowercase())) {
-            return Err("The language is a two- or three-letter code, such as en, da or de.".into());
+        let language = normal_language(&self.language);
+        let (lang, region) = language.split_once('-').map_or((language.as_str(), None), |(l, r)| (l, Some(r)));
+        let lang_ok = (2..=3).contains(&lang.len()) && lang.chars().all(|c| c.is_ascii_lowercase());
+        let region_ok = region.is_none_or(|r| r.len() == 2 && r.chars().all(|c| c.is_ascii_uppercase()));
+        if !language.is_empty() && !(lang_ok && region_ok) {
+            return Err("The language is a two- or three-letter code, such as en, da or de, with a region if you like: en-GB, en-US, de-CH.".into());
         }
         Ok(())
     }
@@ -108,7 +130,7 @@ impl Preamble {
         set(doc, ELEMENTS, current.elements.join("\n"), self.elements.join("\n"));
         set(doc, TITLE, current.title, self.title.trim().to_string());
         set(doc, AUTHOR, current.author, self.author.trim().to_string());
-        set(doc, LANGUAGE, current.language, self.language.trim().to_string());
+        set(doc, LANGUAGE, current.language, normal_language(&self.language));
         if settle_raw && current.raw == self.raw {
             changes.push(doc.set_field_local(PREAMBLE_RECORD, RAW, &self.raw, now_ms));
         } else {
@@ -397,7 +419,7 @@ pub fn header(doc: &Doc, uses: Uses, look: Option<&str>) -> Header {
         h.text.push_str(&format!("#set document({})\n", document.join(", ")));
     }
     if !preamble.language.is_empty() {
-        h.text.push_str(&format!("#set text(lang: {})\n", string(&preamble.language)));
+        h.text.push_str(&format!("#set text({})\n", text_language(&preamble.language)));
     }
     let add = |h: &mut Header, used: &Used| {
         let start = h.text.len();
@@ -466,6 +488,23 @@ mod tests {
         q.looks.reverse();
         assert_eq!(q.record(&mut doc, 3000).len(), 1, "reordering the Looks is one Change");
         assert!(Preamble { language: "English".into(), ..p.clone() }.check().is_err());
+    }
+
+    #[test]
+    fn a_language_may_have_a_region_which_typst_is_told_too() {
+        let check = |language: &str| Preamble { language: language.into(), ..paperback() }.check();
+        for ok in ["", "en", "da", "en-GB", "en-gb", "de-CH", "fur"] {
+            assert!(check(ok).is_ok(), "{ok}");
+        }
+        for bad in ["English", "en-", "en-GBR", "en_GB", "e", "en-G1"] {
+            assert!(check(bad).is_err(), "{bad}");
+        }
+        // Kept as the language in small letters and the region in capitals.
+        let mut doc = Doc::new(DeviceId(1));
+        Preamble { language: " en-gb ".into(), ..paperback() }.record(&mut doc, 1000);
+        assert_eq!(Preamble::of(&doc).language, "en-GB");
+        assert_eq!(text_language("en-GB"), "lang: \"en\", region: \"GB\"");
+        assert_eq!(text_language("da"), "lang: \"da\"");
     }
 
     #[test]

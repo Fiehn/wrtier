@@ -1,13 +1,16 @@
 // Marks (CONTEXT.md, the v2 plan): wavy underlines under text where a Mod found something, in
 // three kinds shared by every Mod: a Mistake (red), a Rule break (yellow) and a Query (blue).
 // They're the app's, not the Mods': a Mod only says where a Mark goes, its kind, why, its
-// Suggestions and at most one action of its own (`markSources`). Everything else is here, the
-// same whichever Mod made a Mark: drawing it, the card (hover, click, tap, Ctrl+.), accepting a
+// Suggestions and any actions of its own (`markSources`). Everything else is here, the same
+// whichever Mod made a Mark: drawing it, the card (hover, click, tap, Ctrl+.), accepting a
 // Suggestion (an ordinary edit by the Author, as if typed: one undo step), dismissing it (kept by
 // the Vault, ADR 0018), going from one to the next (F8), and counting them.
 //
 // A Mod looks at the whole Work, but only once the typing pauses, so a Mark never flashes while
-// a sentence is half written. Marks the typing since touched are dropped until then.
+// a sentence is half written. Marks the typing since touched are dropped until then. A Mod may
+// answer later (the Spellchecker asks Rust, ADR 0019); an answer about text that has changed
+// since is dropped, and the Mods look again once the typing pauses. A Mark's Suggestions may
+// also come later, asked for only when its card or the right-click menu shows them.
 
 import { Facet, Prec, StateEffect, StateField, type EditorState, type Extension, type Transaction } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, hoverTooltip, keymap, showTooltip, ViewPlugin, type Tooltip, type ViewUpdate } from "@codemirror/view";
@@ -20,6 +23,11 @@ export const LEVEL_NAMES: Record<MarkLevel, string> = { mistake: "Mistake", rule
 
 export type MarkEdit = { from: number; to: number; insert: string };
 
+/** What the text reads like after it (`label`), and its edits. */
+export type MarkSuggestion = { label: string; edits: MarkEdit[] };
+
+export type MarkAction = { label: string; run: () => void };
+
 export type Mark = {
   /** The Mod that made it (mods.ts) and its rule: together, what a dismissal is kept under. */
   mod: string;
@@ -30,14 +38,24 @@ export type Mark = {
   to: number;
   /** One line in plain words. */
   why: string;
-  /** What the text reads like after each (`label`), and its edits. */
-  suggestions: { label: string; edits: MarkEdit[] }[];
-  /** The Mod's own action, if it has one ("Treat “grinned” as a Speech verb"). */
-  action?: { label: string; run: () => void };
+  suggestions: MarkSuggestion[];
+  /**
+   * Its Suggestions, if the Mod works them out only when they're shown (they take a while):
+   * for the Mark where it is now in `state`. Once they're in, `suggestions` holds them.
+   */
+  suggest?: (mark: Mark, state: EditorState) => Promise<MarkSuggestion[]>;
+  /** The Mod's own actions ("Treat “grinned” as a Speech verb", "Allow in Work"). */
+  actions?: MarkAction[];
+  /** What a dismissal is kept under instead of its rule, when several rules share one (the Spellchecker's). */
+  dismissAs?: string;
+  /** Dismissed only on exactly its characters, none of them deleted and none typed in (the Spellchecker's: a changed word is a new word). Otherwise on any of them. */
+  dismissExact?: boolean;
+  /** What Dismiss is called on its card, if it needs saying ("Dismiss here only"). */
+  dismissLabel?: string;
 };
 
-/** A Mod that makes Marks: the Marks it finds in the editor's text. */
-export type MarkSource = { mod: string; find(state: EditorState): Mark[] };
+/** A Mod that makes Marks: the Marks it finds in the editor's text, now or later. */
+export type MarkSource = { mod: string; find(state: EditorState): Mark[] | Promise<Mark[]> };
 
 /** The Mods making Marks in an editor. */
 export const markSources = Facet.define<MarkSource>();
@@ -63,14 +81,26 @@ export const setFound = StateEffect.define<Mark[]>();
 /** Where the Dismissed Marks are, as the Vault last said (and any dismissed since). */
 export const setDismissed = StateEffect.define<DismissedMark[]>();
 const addDismissed = StateEffect.define<DismissedMark>();
+/** A Mark's Suggestions came in (`Mark.suggest`). */
+const setSuggestions = StateEffect.define<{ mark: Mark; suggestions: MarkSuggestion[] }>();
 
 const keyOf = (m: Mark) => `${m.mod}/${m.rule}`;
+const sameMark = (a: Mark, b: Mark) => keyOf(a) === keyOf(b) && a.from === b.from && a.to === b.to;
+
+/** What dismissing a Mark is kept under: "<mod>/<rule>" (or the rule it's dismissed as). */
+export const dismissKey = (m: Mark) => `${m.mod}/${m.dismissAs ?? m.rule}`;
 
 /** The Marks, mapped through edits since the Mods last looked; one an edit touched is dropped until they look again. */
 const foundField = StateField.define<Mark[]>({
   create: () => [],
   update(marks, tr) {
-    for (const e of tr.effects) if (e.is(setFound)) return e.value;
+    for (const e of tr.effects) {
+      if (e.is(setFound)) return e.value;
+      if (e.is(setSuggestions)) {
+        const { mark, suggestions } = e.value;
+        marks = marks.map((m) => (sameMark(m, mark) ? { ...m, suggestions, suggest: undefined } : m));
+      }
+    }
     if (!tr.docChanged || marks.length === 0) return marks;
     const out: Mark[] = [];
     for (const m of marks) {
@@ -103,18 +133,33 @@ const dismissedField = StateField.define<DismissedMark[]>({
       if (e.is(addDismissed)) list = [...list, e.value];
     }
     if (!tr.docChanged) return list;
-    return list.map((d) => ({
-      ...d,
-      ranges: d.ranges
-        .map(([f, t]): [number, number] => [tr.changes.mapPos(f, 1), tr.changes.mapPos(t, -1)])
-        .filter(([f, t]) => f < t),
-    }));
+    return list.map((d) => {
+      // Something deleted from it, or typed inside it: no longer whole (for exact dismissals).
+      let whole = d.whole !== false;
+      if (whole) {
+        tr.changes.iterChangedRanges((fromA, toA) => {
+          for (const [f, t] of d.ranges) if (fromA < t && toA > f && (toA > fromA || fromA > f)) whole = false;
+        });
+      }
+      return {
+        ...d,
+        whole,
+        ranges: d.ranges
+          .map(([f, t]): [number, number] => [tr.changes.mapPos(f, 1), tr.changes.mapPos(t, -1)])
+          .filter(([f, t]) => f < t),
+      };
+    });
   },
 });
 
-/** Is this Mark dismissed: the same Mod and rule, on any of the same characters? */
+/**
+ * Is this Mark dismissed: the same Mod and rule (or what it's dismissed as), on any of the same
+ * characters; or, for an exact dismissal, on exactly them, all still there and nothing typed in.
+ */
 const isDismissed = (m: Mark, dismissed: DismissedMark[]) =>
-  dismissed.some((d) => d.key === keyOf(m) && d.ranges.some(([f, t]) => f < m.to && t > m.from));
+  dismissed.some((d) => d.key === dismissKey(m) && (m.dismissExact
+    ? d.whole !== false && d.ranges.length === 1 && d.ranges[0][0] === m.from && d.ranges[0][1] === m.to
+    : d.ranges.some(([f, t]) => f < m.to && t > m.from)));
 
 /** The Marks shown: those found, less those dismissed. In reading order. */
 const shownField = StateField.define<Mark[]>({
@@ -177,23 +222,41 @@ const looker = ViewPlugin.fromClass(class {
 
   schedule(ms: number) {
     clearTimeout(this.timer);
+    this.looks++; // an answer still to come from an earlier look is no longer wanted
     this.timer = window.setTimeout(() => this.look(), ms);
   }
 
+  /** How many looks have started: an answer that comes after a later look started is dropped. */
+  looks = 0;
+  destroyed = false;
+
   look() {
     const state = this.view.state;
-    const marks: Mark[] = [];
-    for (const source of state.facet(markSources)) {
+    const look = ++this.looks;
+    const fits = (m: Mark) => m.from < m.to && m.to <= state.doc.length;
+    const failed = (mod: string, e: unknown) => {
+      console.error(`The ${mod} Mod couldn't look at the text:`, e);
+      return [] as Mark[];
+    };
+    const answers = state.facet(markSources).map((source): Mark[] | Promise<Mark[]> => {
       try {
-        marks.push(...source.find(state).filter((m) => m.from < m.to && m.to <= state.doc.length));
+        const found = source.find(state);
+        return found instanceof Promise ? found.then((ms) => ms.filter(fits), (e) => failed(source.mod, e)) : found.filter(fits);
       } catch (e) {
-        console.error(`The ${source.mod} Mod couldn't look at the text:`, e);
+        return failed(source.mod, e);
       }
-    }
-    this.view.dispatch({ effects: setFound.of(marks) });
+    });
+    const show = (all: Mark[][]) => {
+      // The text changed meanwhile: these places are stale, and the Mods look again once the typing pauses.
+      if (this.destroyed || look !== this.looks || this.view.state.doc !== state.doc) return;
+      this.view.dispatch({ effects: setFound.of(all.flat()) });
+    };
+    if (answers.some((a) => a instanceof Promise)) void Promise.all(answers).then(show);
+    else show(answers as Mark[][]);
   }
 
   destroy() {
+    this.destroyed = true;
     clearTimeout(this.timer);
     this.view.state.facet(markHooks)?.counted?.({ mistake: 0, rule: 0, query: 0 });
   }
@@ -211,17 +274,41 @@ export function accept(view: EditorView, mark: Mark, n: number) {
 
 /** Dismisses a Mark: it goes now, and the Vault keeps it (ADR 0018). */
 export function dismiss(view: EditorView, mark: Mark) {
-  view.dispatch({ effects: [addDismissed.of({ key: keyOf(mark), ranges: [[mark.from, mark.to]] }), closeCard.of(null)] });
+  view.dispatch({ effects: [addDismissed.of({ key: dismissKey(mark), ranges: [[mark.from, mark.to]], whole: true }), closeCard.of(null)] });
   view.state.facet(markHooks)?.dismiss(mark);
   view.focus();
 }
 
-/** What a Mark offers, as menu items (right-click, the card). */
+/** Runs one of the Mod's own actions on a Mark, and closes its card. */
+function runAction(view: EditorView, action: MarkAction) {
+  action.run();
+  view.dispatch({ effects: closeCard.of(null) });
+}
+
+/**
+ * The Mark with its Suggestions: at once if it has them, else asked of its Mod, and kept with it
+ * (so the card's keys and the menu offer them). A Mod that can't answer offers none.
+ */
+export async function withSuggestions(view: EditorView, mark: Mark): Promise<Mark> {
+  if (!mark.suggest) return mark;
+  let suggestions: MarkSuggestion[] = [];
+  try {
+    suggestions = await mark.suggest(mark, view.state);
+  } catch (e) {
+    console.error(`The ${mark.mod} Mod couldn't suggest anything:`, e);
+  }
+  const done = { ...mark, suggestions, suggest: undefined };
+  // Still where it was (no typing meanwhile): kept with it.
+  if (marksOf(view.state).some((m) => sameMark(m, mark))) view.dispatch({ effects: setSuggestions.of({ mark, suggestions }) });
+  return done;
+}
+
+/** What a Mark offers, as menu items (right-click, the card): its Suggestions, the Mod's actions, Dismiss. */
 export function markActions(view: EditorView, mark: Mark): { label: string; run: () => void }[] {
   return [
     ...mark.suggestions.map((s, i) => ({ label: s.label, run: () => accept(view, mark, i) })),
-    ...(mark.action ? [{ label: mark.action.label, run: () => { mark.action!.run(); view.dispatch({ effects: closeCard.of(null) }); } }] : []),
-    { label: "Dismiss", run: () => dismiss(view, mark) },
+    ...(mark.actions ?? []).map((a) => ({ label: a.label, run: () => runAction(view, a) })),
+    { label: mark.dismissLabel ?? "Dismiss", run: () => dismiss(view, mark) },
   ];
 }
 
@@ -242,7 +329,7 @@ const cardField = StateField.define<Card | null>({
     if (!card) return null;
     if (tr.docChanged) return null;
     // Still shown? (A new look may have dropped it or moved it.)
-    const now = marksOf(tr.state).find((m) => keyOf(m) === keyOf(card.mark) && m.from === card.mark.from && m.to === card.mark.to);
+    const now = marksOf(tr.state).find((m) => sameMark(m, card.mark));
     if (!now) return null;
     const head = tr.state.selection.main.head;
     if (tr.selection && (head < now.from || head > now.to)) return null;
@@ -264,18 +351,29 @@ function cardDom(view: EditorView, mark: Mark, keys: boolean): HTMLElement {
   kind.textContent = `${LEVEL_NAMES[mark.level]}: `;
   head.append(kind, mark.why);
   dom.append(head);
-  mark.suggestions.forEach((s, i) => {
-    const b = button(s.label, () => accept(view, mark, i), "cm-mark-suggestion");
-    if (keys && i < 9) b.prepend(keyHint(String(i + 1)));
-    dom.append(b);
-  });
+  const suggestions = document.createElement("div");
+  suggestions.className = "cm-mark-suggestions";
+  const fill = (m: Mark) => {
+    suggestions.replaceChildren(...m.suggestions.map((s, i) => {
+      const b = button(s.label, () => accept(view, m, i), "cm-mark-suggestion");
+      if (keys && i < 9) b.prepend(keyHint(String(i + 1)));
+      return b;
+    }));
+  };
+  if (mark.suggest) {
+    // Asked for now; the card shows them when they come (a keyboard card is drawn again then).
+    suggestions.append(line("cm-mark-looking", "Looking for suggestions…"));
+    void withSuggestions(view, mark).then((m) => {
+      if (!dom.isConnected) return;
+      fill(m);
+      if (m.suggestions.length === 0) suggestions.append(line("cm-mark-looking", "No suggestions."));
+    });
+  } else fill(mark);
+  dom.append(suggestions);
   const row = document.createElement("div");
   row.className = "cm-mark-row";
-  if (mark.action) {
-    const action = mark.action;
-    row.append(button(action.label, () => { action.run(); view.dispatch({ effects: closeCard.of(null) }); }, "cm-mark-action"));
-  }
-  const d = button("Dismiss", () => dismiss(view, mark), "cm-mark-dismiss");
+  for (const action of mark.actions ?? []) row.append(button(action.label, () => runAction(view, action), "cm-mark-action"));
+  const d = button(mark.dismissLabel ?? "Dismiss", () => dismiss(view, mark), "cm-mark-dismiss");
   if (keys) d.prepend(keyHint("D"));
   row.append(d);
   dom.append(row);
@@ -302,6 +400,13 @@ function button(label: string, run: () => void, cls: string): HTMLButtonElement 
     run();
   });
   return b;
+}
+
+function line(cls: string, text: string): HTMLElement {
+  const p = document.createElement("p");
+  p.className = cls;
+  p.textContent = text;
+  return p;
 }
 
 function keyHint(key: string): HTMLElement {

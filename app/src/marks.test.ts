@@ -38,4 +38,36 @@ describe("Marks in an editor", () => {
     s = s.update({ effects: setFound.of([mark(7, 8), mark(24, 25)]) }).state;
     expect(marksOf(s).map((m) => m.from)).toEqual([24]);
   });
+
+  describe("dismissed exactly (the Spellchecker's)", () => {
+    const spelling = (from: number, to: number, rule = "unknown"): Mark =>
+      ({ mod: "spellcheck", rule, level: rule === "name" ? "query" : "mistake", from, to, why: "", suggestions: [], dismissAs: "word", dismissExact: true });
+    // "olde" is 4..8, "inn" 9..12.
+    const doc = "The olde inn.";
+    const dismissed = () => setDismissed.of([{ key: "spellcheck/word", ranges: [[4, 8]], whole: true }]);
+
+    it("stay dismissed on exactly those characters, whichever rule they show as, as text moves them along", () => {
+      let s = start(doc).update({ effects: [setFound.of([spelling(4, 8), spelling(9, 12)]), dismissed()] }).state;
+      expect(marksOf(s).map((m) => m.from)).toEqual([9]);
+      // Only some of the same characters: not this dismissal.
+      s = s.update({ effects: setFound.of([spelling(4, 7)]) }).state;
+      expect(marksOf(s).map((m) => m.from)).toEqual([4]);
+      s = s.update({ effects: setFound.of([spelling(4, 8, "name")]) }).state;
+      expect(marksOf(s)).toEqual([]);
+      s = s.update({ changes: { from: 0, insert: "So: " } }).state;
+      s = s.update({ effects: setFound.of([spelling(8, 12)]) }).state;
+      expect(marksOf(s)).toEqual([]);
+    });
+
+    it("come back once a letter is typed into the word or deleted from it", () => {
+      let s = start(doc).update({ effects: dismissed() }).state;
+      s = s.update({ changes: { from: 6, insert: "l" } }).state; // "ollde"
+      s = s.update({ effects: setFound.of([spelling(4, 9)]) }).state;
+      expect(marksOf(s).map((m) => [m.from, m.to])).toEqual([[4, 9]]);
+      let t = start(doc).update({ effects: dismissed() }).state;
+      t = t.update({ changes: { from: 6, to: 7 } }).state; // "ole"
+      t = t.update({ effects: setFound.of([spelling(4, 7)]) }).state;
+      expect(marksOf(t).map((m) => [m.from, m.to])).toEqual([[4, 7]]);
+    });
+  });
 });

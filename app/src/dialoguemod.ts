@@ -15,8 +15,8 @@ const VERB = `${DIALOGUE}.verb.`;
 export const RULE = `${DIALOGUE}.rule.`;
 const BUILT_IN = new Set(SPEECH_VERBS);
 
-/** Is the Work in English (or in Typst's default, which is)? */
-export const isEnglish = (language: string) => language.trim() === "" || language.trim().toLowerCase() === "en";
+/** Is the Work in English, of any region (or in Typst's default, which is)? */
+export const isEnglish = (language: string) => ["", "en"].includes(language.trim().split("-")[0].toLowerCase());
 
 /** The Speech verbs in use: the built-in ones, with the Author's added and without those taken off. */
 export function speechVerbs(settings: ModSettings): Set<string> {
@@ -51,10 +51,10 @@ function toMark(f: Finding, opts: Options, ctx: ModContext): Mark {
   const verb = f.verb;
   if (verb) {
     const is = opts.speechVerbs.has(verb);
-    mark.action = {
+    mark.actions = [{
       label: is ? `Don't treat “${verb}” as a Speech verb` : `Treat “${verb}” as a Speech verb`,
       run: () => ctx.setSetting("vault", ...verbSetting(verb, !is)),
-    };
+    }];
   }
   return mark;
 }

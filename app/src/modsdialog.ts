@@ -33,11 +33,11 @@ function unknownRows(ids: string[]): HTMLElement[] {
 }
 
 /**
- * Opens the dialog for the Work `id`. `changed` runs after every change, with the state as
+ * Opens the dialog for the Work `id`, in `language` (from its Preamble). `changed` runs after every change, with the state as
  * Rust saved it (the Work's editor follows at once); `settingsChanged` after a Mod's own
  * setting changed, or its Dismissed Marks were shown again. Resolves when it's closed.
  */
-export async function openMods(id: string, name: string, changed: (state: ModsState) => void, settingsChanged: () => void): Promise<void> {
+export async function openMods(id: string, name: string, language: string, changed: (state: ModsState) => void, settingsChanged: () => void): Promise<void> {
   const dialog = $<HTMLDialogElement>("mods");
   const list = $("mods-list");
   const error = $("mods-error");
@@ -102,7 +102,7 @@ export async function openMods(id: string, name: string, changed: (state: ModsSt
       li.append(main, line("muted", mod.about), hide);
       if (on && hidden) li.append(line("muted", "This Work has it, but this device hides it."));
       if (on && mod.settings) {
-        const part = mod.settings(settings, "work", save);
+        const part = mod.settings(settings, "work", save, language);
         if (part instanceof HTMLDetailsElement) {
           part.open = open.has(mod.id);
           part.addEventListener("toggle", () => (part.open ? open.add(mod.id) : open.delete(mod.id)));

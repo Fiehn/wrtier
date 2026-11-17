@@ -45,6 +45,9 @@ tauri-plugin-opener = "2"  # "What's new": a release's page in the browser
 semver = "1"            # which App version is newer
 minisign-verify = "0.3" # a download is signed with the update signing key
 base64 = "0.22"         # the key and signatures are base64, as `tauri signer` writes them
+# The Spellchecker (ADR 0019)
+spellbook = "0.4"       # reads Hunspell Dictionaries: which words they know, and suggestions
+sha2 = "0.10"           # a downloaded Dictionary is checked against the app's list
 
 [target.'cfg(windows)'.dependencies]
 self-replace = "1.5"    # the portable exe puts a new version in its own place

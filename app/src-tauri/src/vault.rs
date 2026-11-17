@@ -24,7 +24,7 @@ use wrtier::ids::ChangeId;
 /// The file that makes a folder a Vault.
 pub const VAULT_FILE: &str = "vault.db";
 /// Folders at the top of the Vault that hold something other than Works.
-const NOT_WORKS: &[&str] = &["styles", "themes", "fonts"];
+const NOT_WORKS: &[&str] = &["styles", "themes", "fonts", crate::spelling::FOLDER];
 
 pub struct Vault {
     pub root: PathBuf,
@@ -524,6 +524,9 @@ impl Vault {
         }
         for conflict in library::list(&self.root).conflicts {
             problems.push(SyncProblem { path: conflict.copy, reason: format!("another version of {}: pick one in the Style library", conflict.path), newer: false });
+        }
+        for (path, reason) in crate::spelling::conflicts(&self.root) {
+            problems.push(SyncProblem { path, reason, newer: false });
         }
         // Writing kept from before the app closed unexpectedly goes back first.
         for id in recovery::kept_for(&self.recovery_dir, &self.root) {

@@ -156,7 +156,7 @@ export class PreambleDialog {
         elements: this.elements.names,
         title: $<HTMLInputElement>("preamble-title").value,
         author: $<HTMLInputElement>("preamble-author").value,
-        language: $<HTMLInputElement>("preamble-language").value.trim().toLowerCase(),
+        language: $<HTMLInputElement>("preamble-language").value.trim(), // Rust keeps it as "en-GB"
         raw: $<HTMLTextAreaElement>("preamble-raw").value,
       };
       try {

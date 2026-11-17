@@ -87,6 +87,16 @@ for (const dir of [...new Set(dirs)]) {
   npmNotices.push(...notices(dir).map((text) => ({ license: "NOTICE", by, text })));
 }
 
+// ---- Dictionaries (the two the Spellchecker ships with; scripts/dictionaries.mjs) ----
+
+const catalogue = JSON.parse(fs.readFileSync(path.join(tauri, "dictionaries", "catalogue.json"), "utf8"));
+const dictionaries = group(
+  fs.readdirSync(path.join(tauri, "dictionaries"), { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => {
+    const entry = catalogue.dictionaries.find((c) => c.code === d.name);
+    return { license: entry?.license ?? "", by: `${entry?.name ?? d.name} (${d.name})`, text: fs.readFileSync(path.join(tauri, "dictionaries", d.name, "license"), "utf8") };
+  }),
+);
+
 // ---- Write ----
 
 const sections = [
@@ -97,6 +107,11 @@ const sections = [
   },
   { title: "Rust libraries", about: "Compiled into the app. Where a library offers a choice of licenses, the app uses it under the one shown.", items: rust },
   { title: "JavaScript libraries", about: "Part of the app's window: the editor and the bridge to the Rust side.", items: group(npmEntries) },
+  {
+    title: "Dictionaries",
+    about: "The Spellchecker's Dictionaries built into the app, from wooorm/dictionaries. Those downloaded into a Vault keep their licence next to them, in its dictionaries folder.",
+    items: dictionaries,
+  },
 ];
 fs.mkdirSync(path.dirname(out), { recursive: true });
 fs.writeFileSync(out, JSON.stringify({ sections }));

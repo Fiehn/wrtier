@@ -126,8 +126,13 @@ export type WorkState = {
   dismissed: DismissedMark[] | null;
 };
 
-/** A Dismissed Mark (ADR 0018, work.rs `DismissedMark`): its "<mod>/<rule>", and where what's left of its characters is. */
-export type DismissedMark = { key: string; ranges: [number, number][] };
+/** A Dismissed Mark (ADR 0018, work.rs `DismissedMark`): its "<mod>/<rule>", where what's left of its characters is, and whether all are. */
+export type DismissedMark = {
+  key: string;
+  ranges: [number, number][];
+  /** Every one of its characters is still there (for exact dismissals, marks.ts); taken as true when left out. */
+  whole?: boolean;
+};
 
 export type Whereabouts = { kind: "renamed"; to: string } | { kind: "trashed" } | { kind: "gone" } | { kind: "diverged" };
 

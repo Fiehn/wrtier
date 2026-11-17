@@ -7,8 +7,8 @@
 // list comes from a newer version of the app: it's shown greyed and never switched from here.
 
 import type { Extension } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
 import { dialogueChecker, dialogueSettings } from "./dialoguemod";
+import { spellcheckSettings, spellchecker } from "./spellmod";
 
 export type Mod = {
   /** How it's stored: never change one once it has shipped. */
@@ -20,8 +20,8 @@ export type Mod = {
   editor?: (ctx: ModContext) => Extension;
   /** It makes Marks (marks.ts): the editor asks the Vault where its Dismissed ones are. */
   marks?: boolean;
-  /** Its own part of the Mods dialog (`scope` "work") and of the Mods for new Works ("newWorks"). */
-  settings?: (settings: ModSettings, scope: "work" | "newWorks", save: (scope: "vault" | "work" | "newWorks", key: string, value: string) => void) => HTMLElement;
+  /** Its own part of the Mods dialog (`scope` "work", with the Work's `language`) and of the Mods for new Works ("newWorks"). */
+  settings?: (settings: ModSettings, scope: "work" | "newWorks", save: (scope: "vault" | "work" | "newWorks", key: string, value: string) => void, language?: string) => HTMLElement;
 };
 
 /** Mods' own settings (vault/marks.rs `ModSettings`): each "<mod>.<name>" with its value. */
@@ -57,10 +57,11 @@ export const MODS: Mod[] = [
   },
   {
     id: "spellcheck",
-    name: "Spellcheck",
-    about: "Underlines misspelt words, using this device's own spellchecker and its language. Right-click a word for suggestions.",
-    // The editor turns the platform's spellcheck off; this turns it back on.
-    editor: () => EditorView.contentAttributes.of({ spellcheck: "true" }),
+    name: "Spellchecker",
+    about: "Marks words the Work's Dictionary doesn't know: red for a likely typo, blue for what looks like a name. Hover or click a Mark for suggestions, or to allow the word in this Work or add it to your dictionary.",
+    editor: (ctx) => spellchecker(ctx),
+    marks: true,
+    settings: spellcheckSettings,
   },
   {
     id: "dialogue",

@@ -34,17 +34,17 @@ describe("Vault Mods", () => {
   });
 });
 
-describe("the spellcheck Mod", () => {
+describe("the Spellchecker Mod", () => {
   // The attributes the Mods give the editor's text (CodeMirror itself starts with spellcheck "false").
-  const spellcheck = (mods: string[]) => {
+  const platformSpellcheck = (mods: string[]) => {
     const editor = EditorState.create({ doc: "Teh rain", extensions: modExtensions(inUse(state(mods)), { language: "", settings: noSettings(), setSetting: () => {} }) });
     const attrs = editor.facet(EditorView.contentAttributes).map((a) => (typeof a === "function" ? null : a?.spellcheck));
     return attrs.find((v) => v) ?? null;
   };
 
-  it("turns the platform's spellcheck on, which the editor otherwise keeps off", () => {
-    expect(spellcheck(["spellcheck"])).toBe("true");
-    expect(spellcheck([])).toBeNull();
+  it("makes Marks, and never turns the platform's own spellchecking on", () => {
+    expect(modNamed("spellcheck")?.marks).toBe(true);
+    expect(platformSpellcheck(["spellcheck"])).toBeNull();
   });
 });
 

@@ -10,6 +10,7 @@ pub mod patch;
 pub mod preamble;
 pub mod positions;
 pub mod recovery;
+pub mod spelling;
 pub mod syncthing;
 pub mod themes;
 pub mod typeset;
@@ -42,6 +43,72 @@ struct AppState(Mutex<App>);
 /// a novel about half a second), and typing must never wait for it. Holding this lock for the
 /// whole compile also makes sure only one compile runs at a time (Phase 0b).
 struct TypesetState(Mutex<typeset::Typesetter>);
+
+/// The Dictionaries read so far (spelling.rs). Kept apart from `AppState`: reading one takes a
+/// moment, and typing must never wait for it.
+struct SpellState(Mutex<spelling::Spelling>);
+
+/// The Vault's folder, for the Spellchecker: the app's lock is held only to find it.
+fn vault_root(handle: &AppHandle) -> Result<PathBuf, String> {
+    with_app(&handle.state::<AppState>(), |app| Ok(open_vault_of(app)?.root.clone()))
+}
+
+fn with_spelling<T>(handle: &AppHandle, f: impl FnOnce(&mut spelling::Spelling, &std::path::Path) -> Result<T, String>) -> Result<T, String> {
+    let root = vault_root(handle)?;
+    let state = handle.state::<SpellState>();
+    let mut spelling = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match catch_unwind(AssertUnwindSafe(|| f(&mut spelling, &root))) {
+        Ok(result) => result,
+        Err(panic) => Err(format!("Something went wrong: {}", vault::panic_message(panic.as_ref()))),
+    }
+}
+
+/// Which of `words` the Dictionary for `language` doesn't know (ADR 0019); None if there's no
+/// Dictionary for it. Off the main thread: the first check reads the Dictionary.
+#[tauri::command]
+async fn spell_check(handle: AppHandle, language: String, words: Vec<String>) -> Result<Option<Vec<String>>, String> {
+    tauri::async_runtime::spawn_blocking(move || with_spelling(&handle, |s, root| s.check(root, &language, &words)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// What the Dictionary for `language` suggests for `word`, best first.
+#[tauri::command]
+async fn spell_suggest(handle: AppHandle, language: String, word: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || with_spelling(&handle, |s, root| s.suggest(root, &language, &word)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Which Dictionary a Work in `language` is checked with, and which could be downloaded for it.
+#[tauri::command]
+fn dictionary_for(handle: AppHandle, language: String) -> Result<spelling::DictionaryFor, String> {
+    Ok(spelling::dictionary_for(&vault_root(&handle)?, &language))
+}
+
+/// The Dictionaries in the Vault, those built in, and those the app offers to download.
+#[tauri::command]
+fn list_dictionaries(handle: AppHandle) -> Result<spelling::Dictionaries, String> {
+    Ok(spelling::list(&vault_root(&handle)?))
+}
+
+/// Downloads a Dictionary the app offers into the Vault (or its newer version).
+#[tauri::command]
+async fn download_dictionary(handle: AppHandle, code: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        spelling::download(&vault_root(&handle)?, &code)?;
+        with_spelling(&handle, |s, _| Ok(s.forget()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Removes a Dictionary from the Vault.
+#[tauri::command]
+fn remove_dictionary(handle: AppHandle, code: String) -> Result<(), String> {
+    spelling::remove(&vault_root(&handle)?, &code)?;
+    with_spelling(&handle, |s, _| Ok(s.forget()))
+}
 
 /// The update "Check for updates" last found (its App version and this platform's build), kept
 /// for "Download and install".
@@ -1210,6 +1277,7 @@ pub fn run() {
             app.manage(AppState(Mutex::new(App { device, vault: None, recovery_dir: local.join("recovery") })));
             app.manage(TypesetState(Mutex::new(typeset::Typesetter::default())));
             app.manage(UpdateState(Mutex::new(None)));
+            app.manage(SpellState(Mutex::new(spelling::Spelling::default())));
             start_timer(app.handle().clone());
             Ok(())
         })
@@ -1271,6 +1339,12 @@ pub fn run() {
             set_mod_setting,
             show_dismissed,
             set_mod_hidden,
+            spell_check,
+            spell_suggest,
+            dictionary_for,
+            list_dictionaries,
+            download_dictionary,
+            remove_dictionary,
             set_shortcuts,
             reset_shortcuts,
             set_shortcuts_here,

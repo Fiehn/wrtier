@@ -295,6 +295,9 @@ pub struct WorkState {
 pub struct DismissedMark {
     pub key: String,
     pub ranges: Vec<(usize, usize)>,
+    /// Every one of its characters is still shown: none deleted. A Mod whose dismissals hold
+    /// only on exactly the same characters (the Spellchecker's) needs to know.
+    pub whole: bool,
 }
 
 /// Where a Work's History went when it disappeared from under an open tab.
@@ -671,7 +674,9 @@ impl OpenWork {
         stored.iter().filter_map(|(key, ids)| {
             let ids: Vec<CharId> = ids.iter().filter_map(|id| id.parse().ok()).collect();
             let mut ranges: Vec<(usize, usize)> = Vec::new();
-            for at in self.doc.shown_indexes(&ids) {
+            let shown = self.doc.shown_indexes(&ids);
+            let whole = shown.len() == ids.len();
+            for at in shown {
                 match ranges.last_mut() {
                     Some(last) if last.1 == at => last.1 = at + 1,
                     _ => ranges.push((at, at + 1)),
@@ -681,7 +686,7 @@ impl OpenWork {
                 return None;
             }
             let ranges = ranges.into_iter().map(|(f, t)| (self.positions.to_utf16(f), self.positions.to_utf16(t))).collect();
-            Some(DismissedMark { key: key.clone(), ranges })
+            Some(DismissedMark { key: key.clone(), ranges, whole })
         }).collect()
     }
 

@@ -177,7 +177,7 @@ mod tests {
         let changes = vault.works["Rain"].doc.change_count();
         // The period, typed in the burst still open: it closes, so the period has an ID.
         let state = vault.edit("Rain", vec![Op::Dismiss { from: 3, to: 4, key: "dialogue/comma-before-tag".into() }, Op::Dismissed], 3000).unwrap();
-        assert_eq!(state.dismissed.unwrap(), vec![DismissedMark { key: "dialogue/comma-before-tag".into(), ranges: vec![(3, 4)] }]);
+        assert_eq!(state.dismissed.unwrap(), vec![DismissedMark { key: "dialogue/comma-before-tag".into(), ranges: vec![(3, 4)], whole: true }]);
         assert!(vault.works["Rain"].doc.change_count() <= changes + 1, "only the burst closing is recorded");
         assert_eq!(vault.mod_settings(Some("Rain")).unwrap().dismissed, BTreeMap::from([("dialogue".to_string(), 1)]));
         // Text typed before it: it moves along.
@@ -188,6 +188,20 @@ mod tests {
         assert!(dismissed(&mut vault, "Rain", 7000).is_empty());
         vault.edit("Rain", vec![Op::Type { from: 9, to: 9, text: ".".into(), origin: Default::default() }], 8000).unwrap();
         assert!(dismissed(&mut vault, "Rain", 9000).is_empty());
+    }
+
+    #[test]
+    fn a_dismissal_says_when_one_of_its_characters_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open(dir.path());
+        vault.create_work("Rain", 1000).unwrap();
+        vault.edit("Rain", vec![Op::Type { from: 0, to: 0, text: "Ye olde inn.".into(), origin: Default::default() }], 2000).unwrap();
+        vault.edit("Rain", vec![Op::Dismiss { from: 3, to: 7, key: "spellcheck/word".into() }], 3000).unwrap();
+        assert_eq!(dismissed(&mut vault, "Rain", 4000), vec![DismissedMark { key: "spellcheck/word".into(), ranges: vec![(3, 7)], whole: true }]);
+        // "olde" less its "d": what's left is still dismissed, but no longer whole (a Spellchecker
+        // Mark on "ole" is a new word).
+        vault.edit("Rain", vec![Op::Delete { from: 5, to: 6, origin: Default::default() }], 5000).unwrap();
+        assert_eq!(dismissed(&mut vault, "Rain", 6000), vec![DismissedMark { key: "spellcheck/word".into(), ranges: vec![(3, 6)], whole: false }]);
     }
 
     #[test]

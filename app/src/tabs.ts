@@ -20,7 +20,7 @@ import { bindings, COMMANDS, withKey, type CommandId } from "./keys";
 import { chaptersIn, type IncludedEntry, type MoveOp } from "./chapters";
 import { sessionTints, setTints } from "./sessiontints";
 import { makesMarks, modExtensions, type Mod, type ModContext } from "./mods";
-import { markActions, markAt, marks, openCardAtCursor, setDismissed, stepMark, type Mark, type MarkCounts } from "./marks";
+import { dismissKey, markActions, markAt, marks, openCardAtCursor, setDismissed, stepMark, withSuggestions, type Mark, type MarkCounts } from "./marks";
 import { INCLUSION, includedSelection, inclusions, inclusionsOf, placeInclusion, rawInclusions, readerText, setInclusions, workDrops, type InclusionView } from "./inclusions";
 import { wordsIn } from "./counts";
 import { findExtension } from "./find";
@@ -288,7 +288,7 @@ class Tab {
           inclusions(),
           findExtension(),
           marks({
-            dismiss: (mark) => this.sync.dismiss(mark.from, mark.to, `${mark.mod}/${mark.rule}`),
+            dismiss: (mark) => this.sync.dismiss(mark.from, mark.to, dismissKey(mark)),
             stopRule: (mark) => tabs.events.stopRule(this.sync.id, mark),
             counted: (counts) => tabs.events.markCounts(this.sync.id, counts),
           }),
@@ -344,8 +344,9 @@ class Tab {
     this.sync.requestHighlights();
     this.sync.setTinting(tabs.tinting);
 
-    // Right-click inside a selection: the app's menu (Add Comment, Cut, Copy, Paste). Anywhere
-    // else the system's own, which has the spelling suggestions.
+    // Right-click on a Mark: what it offers. Inside a selection: the app's menu (Add Comment,
+    // Cut, Copy, Paste). Anywhere else the system's own: spelling is the Spellchecker's Marks,
+    // never the system's (CONTEXT.md).
     this.view.contentDOM.addEventListener("contextmenu", (e) => {
       // Text selected in an Inclusion's text (ADR 0015): the app's menu too, to comment on it.
       const inIncluded = (e.target as Element).closest(".cm-inclusion") !== null;
@@ -357,11 +358,12 @@ class Tab {
       }
       const selection = this.view.state.selection.main;
       const pos = this.view.posAtCoords({ x: e.clientX, y: e.clientY });
-      // On a Mark: what it offers (its Suggestions, the Mod's action, Dismiss).
+      // On a Mark: what it offers (its Suggestions, once they're in; the Mod's actions; Dismiss).
       const mark = pos === null || !selection.empty ? null : markAt(this.view.state, pos);
       if (mark) {
         e.preventDefault();
-        tabs.events.markMenu(this.id, e.clientX, e.clientY, markActions(this.view, mark));
+        const { clientX: x, clientY: y } = e;
+        void withSuggestions(this.view, mark).then((m) => tabs.events.markMenu(this.id, x, y, markActions(this.view, m)));
         return;
       }
       if (selection.empty || pos === null || pos < selection.from || pos > selection.to) return;
@@ -707,6 +709,11 @@ export class Tabs {
     tab.mods = key;
     tab.view.dispatch({ effects: modsCompartment.reconfigure(modExtensions(mods, ctx)) });
     tab.sync.setMarking(makesMarks(mods));
+  }
+
+  /** Forgets what every Work's Mods were last told, so the next `setMods` sets them up again (a Dictionary changed). */
+  forgetMods() {
+    for (const tab of this.open) tab.mods = "";
   }
 
   /** Asks the Vault again where a Work's Dismissed Marks are (some were shown again). */

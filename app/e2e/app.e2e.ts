@@ -1152,6 +1152,40 @@ test("the Dialogue checker marks dialogue, and a Suggestion is accepted as typin
   await expect(app.locator(".cm-mark")).toHaveCount(0);
 });
 
+test("the Spellchecker marks unknown words, suggests when asked, and allows a name in the Work", async ({ app }) => {
+  const rain = app.locator("#works li.work-entry", { hasText: "Rain" });
+  await rain.locator(".entry-name").click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Mods…" }).click();
+  await app.locator("#mods-list label", { hasText: "Spellchecker" }).locator("input").check();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.mods.Rain)).toContain("spellcheck");
+  await expect(app.locator("#mods-list")).toContainText("English (United Kingdom)");
+  await app.locator("#mods button[value=done]").click();
+  // The platform's own spellchecking stays off.
+  await expect(app.locator(".cm-content").first()).toHaveAttribute("spellcheck", "false");
+
+  await endOf(app, "She walked home.");
+  await app.keyboard.type(" Teh rain fell on Kvothe.");
+  await expect(app.locator(".cm-mark-mistake")).toHaveCount(1, { timeout: 5000 });
+  await expect(app.locator(".cm-mark-query")).toHaveCount(1);
+
+  // Ctrl+. on "Teh": its Suggestions come when the card opens, capitalised as typed; 1 accepts.
+  await app.locator(".cm-mark-mistake").click();
+  await app.keyboard.press("Escape");
+  await app.keyboard.press("Control+.");
+  const card = app.locator(".cm-mark-card");
+  await expect(card).toContainText("Mistake");
+  await expect(card.locator(".cm-mark-suggestion").first()).toHaveText(/The/);
+  await expect(card).toContainText("Dismiss here only");
+  await app.keyboard.press("1");
+  await expect.poll(() => textOf(app)).toContain("She walked home. The rain fell on Kvothe.");
+
+  // "Kvothe" looks like a name: Allow in Work keeps it for this Work, and its Mark goes.
+  await app.locator(".cm-mark-query").click();
+  await card.locator("button", { hasText: "Allow in Work" }).click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.modSettings.work.Rain)).toEqual({ "spellcheck.allow.Kvothe": "on" });
+  await expect(app.locator(".cm-mark")).toHaveCount(0, { timeout: 5000 });
+});
+
 test("a Mark's Suggestion is accepted by clicking it on the card", async ({ app }) => {
   await app.evaluate(() => (window as any).__fake.mods.Rain.push("dialogue"));
   await app.locator("#works li.work-entry", { hasText: "Rain" }).locator(".entry-name").click({ button: "right" });

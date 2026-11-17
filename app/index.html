@@ -374,8 +374,8 @@
           <h3>Settings</h3>
           <label>Title <input id="preamble-title" maxlength="200" autocomplete="off" /></label>
           <label>Author name <input id="preamble-author" maxlength="200" autocomplete="off" /></label>
-          <label>Language <input id="preamble-language" maxlength="3" autocomplete="off" placeholder="en" /></label>
-          <p class="muted">A two-letter code such as en, da or de. It decides quotation marks and hyphenation.</p>
+          <label>Language <input id="preamble-language" maxlength="6" autocomplete="off" placeholder="en-GB" /></label>
+          <p class="muted">A two-letter code such as en, da or de, with a region if you like: en-GB, en-US, de-CH. It decides quotation marks, hyphenation and which spellings are right.</p>
         </section>
 
         <section>
@@ -593,6 +593,9 @@
             <ul id="vault-mods" class="mod-list"></ul>
             <h3>Mods for new Works</h3>
             <ul id="new-work-mods" class="mod-list"></ul>
+            <h3>Dictionaries</h3>
+            <p class="muted">What the Spellchecker checks a Work's spelling with, by its language and region. British and American English are built in; others are downloaded into the Vault, for every device.</p>
+            <div id="dictionaries"></div>
           </section>
 
           <section id="settings-shortcuts" role="tabpanel" aria-labelledby="settings-tab-shortcuts" hidden>

@@ -414,7 +414,7 @@ pub(super) fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]
 fn wrap(text: &str, language: &str, heading: Option<(&str, Option<&str>)>, styles: &[String], name: &str) -> (String, usize) {
     let mut out = String::from("#[\n\n");
     if !language.trim().is_empty() {
-        out.push_str(&format!("#set text(lang: {})\n", preamble::string(language.trim())));
+        out.push_str(&format!("#set text({})\n", preamble::text_language(language)));
     }
     if let Some((title, author)) = heading {
         out.push_str(&format!("#heading(level: 1, {})<inclusion-title>\n", preamble::string(title)));

@@ -30,6 +30,8 @@
     dismissed: {},
     /** The Vault Mods the Vault has (none unless a test adds one). */
     vaultMods: [],
+    /** The words the fake Dictionary doesn't know. */
+    misspelt: ["Teh", "teh", "Kvothe"],
     /** The Vault's folders, besides those its Works are in (none unless a test adds some). */
     vaultFolders: [],
     /** The colours of Works and folders (vault/colours.rs). */
@@ -223,6 +225,17 @@
       fake.dismissed[id] = (fake.dismissed[id] ?? []).filter((d) => !d.key.startsWith(`${name}/`));
       return modSettings(id);
     },
+    // The Spellchecker (spelling.rs): a British English Dictionary that knows every word but a few.
+    spell_check: ({ words }) => words.filter((w) => fake.misspelt.includes(w)),
+    spell_suggest: ({ word }) => (word.toLowerCase() === "teh" ? ["the", "tea"] : []),
+    dictionary_for: () => ({ code: "en-GB", name: "English (United Kingdom)", builtIn: true, insteadOf: null, offer: null }),
+    list_dictionaries: () => ({
+      inVault: [],
+      builtIn: [{ code: "en-GB", name: "English (United Kingdom)", license: "(MIT AND BSD)", update: false }],
+      offered: [{ code: "da", name: "Danish", license: "GPL-2.0 OR LGPL-2.1 OR MPL-1.1", size: 3800884 }],
+    }),
+    download_dictionary: () => null,
+    remove_dictionary: () => null,
     set_vault_mod: ({ name, on }) => {
       fake.vaultMods = on ? [...new Set([...fake.vaultMods, name])] : fake.vaultMods.filter((m) => m !== name);
       return { work: [], newWorks: [], vault: fake.vaultMods, hidden: [] };
