@@ -889,6 +889,26 @@ fn set_new_work_mod(state: State<AppState>, name: String, on: bool) -> Result<va
     with_app(&state, |app| open_vault_of(app)?.set_new_work_mod(&name, on, now_ms()))
 }
 
+/// The Mods' own settings: the Vault's, a Work's (if `id` is given) and new Works', and how
+/// many Marks each Mod has dismissed in the Work.
+#[tauri::command]
+fn get_mod_settings(state: State<AppState>, id: Option<String>) -> Result<vault::ModSettings, String> {
+    with_app(&state, |app| open_vault_of(app)?.mod_settings(id.as_deref()))
+}
+
+/// Sets a Mod's setting ("<mod>.<name>"; "" unsets it) for the Vault ("vault"), a Work ("work")
+/// or new Works ("newWorks").
+#[tauri::command]
+fn set_mod_setting(state: State<AppState>, scope: String, id: Option<String>, key: String, value: String) -> Result<vault::ModSettings, String> {
+    with_app(&state, |app| open_vault_of(app)?.set_mod_setting(&scope, id.as_deref(), &key, &value, now_ms()))
+}
+
+/// Shows a Mod's Dismissed Marks in a Work again.
+#[tauri::command]
+fn show_dismissed(state: State<AppState>, id: String, name: String) -> Result<vault::ModSettings, String> {
+    with_app(&state, |app| open_vault_of(app)?.show_dismissed(&id, &name, now_ms()))
+}
+
 /// Hides a Mod on this Device, or shows it again.
 #[tauri::command]
 fn set_mod_hidden(state: State<AppState>, name: String, hidden: bool) -> Result<vault::Mods, String> {
@@ -1247,6 +1267,9 @@ pub fn run() {
             get_mods,
             set_mod,
             set_new_work_mod,
+            get_mod_settings,
+            set_mod_setting,
+            show_dismissed,
             set_mod_hidden,
             set_shortcuts,
             reset_shortcuts,

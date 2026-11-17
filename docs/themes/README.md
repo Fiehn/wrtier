@@ -73,6 +73,14 @@ Each Reviewer gets one of eight colour slots. Each slot has a colour for names a
 |---|---|
 | `--session-tint-0` … `--session-tint-4` | "Colour text by Session": the newest Session's text (0) to the fifth newest (4). Faint and see-through. |
 
+**Marks** (wavy underlines where a Mod such as the Dialogue checker found something; the same kinds for every Mod)
+
+| Variable | |
+|---|---|
+| `--mark-mistake` | A Mistake: the text is wrong. Red. |
+| `--mark-rule` | A Rule break: it breaks a known rule, maybe on purpose. Yellow. |
+| `--mark-query` | A Query: worth a look, depending on what was meant. Blue. |
+
 **Find and replace**
 
 | Variable | |

@@ -124,7 +124,7 @@ pub struct ExportInput {
     /// Its open Comments (and Work comments), and those on the text it includes, each with
     /// where its text is in `text` (byte ranges; none for a Work comment), with names filled
     /// in: when asked for (see `Export`).
-    pub comments: Vec<(crate::work::Mark, Vec<std::ops::Range<usize>>)>,
+    pub comments: Vec<(crate::work::CommentHighlight, Vec<std::ops::Range<usize>>)>,
     /// Inclusions that couldn't be shown, and why: an Export says so.
     pub missing: Vec<String>,
     pub header: preamble::Header,
@@ -164,6 +164,7 @@ const DEFAULTS_RECORD: &str = "defaults";
 mod colours;
 mod find;
 mod hidden;
+mod marks;
 mod history;
 mod inclusions;
 mod reading;
@@ -172,6 +173,7 @@ mod moves;
 mod reviewers;
 mod settings;
 pub use colours::Colours;
+pub use marks::ModSettings;
 pub use find::TextForFinding;
 pub use reading::{Reading, ReadingSource};
 pub use inclusions::{ChapterChoice, InclusionView, Target, SCOPE_END, SCOPE_START};
@@ -877,7 +879,7 @@ impl Vault {
                 *name = sender.strip_prefix("reviewer/").and_then(|r| self.reviewer(r)).map(|r| r.name);
             }
         }
-        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Marks | Op::Tints)) {
+        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Highlights | Op::Tints | Op::Dismissed)) {
             let others: Vec<String> = self.works.iter().filter(|(other, w)| *other != id && w.has_cut()).map(|(o, _)| o.clone()).collect();
             for other in others {
                 let _ = self.with_work(&other, now_ms, |w, _| {
@@ -896,16 +898,17 @@ impl Vault {
                 *target = Some(found);
             }
         }
-        let edits = ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks | Op::Tints | Op::Locate { .. } | Op::Stretch { .. }));
+        let edits = ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Highlights | Op::Tints | Op::Dismissed | Op::Dismiss { .. } | Op::Locate { .. } | Op::Stretch { .. }));
         // What might add or remove an Inclusion (not plain typing).
         let reshapes = ops.iter().any(|op| match op {
-            Op::Cursor { .. } | Op::Marks | Op::Tints | Op::Locate { .. } | Op::Stretch { .. } => false,
+            Op::Cursor { .. } | Op::Highlights | Op::Tints | Op::Dismissed | Op::Dismiss { .. } | Op::Locate { .. } | Op::Stretch { .. } => false,
             Op::Type { from, to, .. } => from != to,
             _ => true,
         });
         if edits {
             self.record_inclusions(id, now_ms);
         }
+        let dismissed_asked = ops.contains(&Op::Dismissed);
         // Before the first edit since the Style library last changed, the Work records the
         // versions of everything it uses (read here only when that's due).
         let (root, generation) = (self.root.clone(), self.library_generation);
@@ -916,10 +919,19 @@ impl Vault {
         if reshapes {
             self.refresh_text_file_inclusions(id);
         }
-        if let (Some(marks), Some(work)) = (state.marks.as_mut(), self.works.get(&self.current_id(id))) {
-            for mark in marks {
-                (mark.name, mark.colour) = self.sender_label(&work.doc, &mark.sender);
-                for reply in &mut mark.replies {
+        // Dismissed Marks are kept here, not in the Work's History (ADR 0018).
+        let dismissing = std::mem::take(&mut state.dismissing);
+        if !dismissing.is_empty() {
+            self.keep_dismissed(id, &dismissing, now_ms)?;
+        }
+        if dismissed_asked {
+            let stored = self.dismissed_marks(id)?;
+            state.dismissed = self.works.get(&self.current_id(id)).map(|w| w.dismissed(&stored));
+        }
+        if let (Some(highlights), Some(work)) = (state.highlights.as_mut(), self.works.get(&self.current_id(id))) {
+            for highlight in highlights {
+                (highlight.name, highlight.colour) = self.sender_label(&work.doc, &highlight.sender);
+                for reply in &mut highlight.replies {
                     (reply.name, reply.colour) = self.sender_label(&work.doc, &reply.sender);
                 }
             }
@@ -1142,31 +1154,31 @@ impl Vault {
 
     /// A Work's Comments that go into a `.docx`: open ones on its text, and Work comments,
     /// with their senders' names; ranges in its committed text.
-    fn named_comments(&self, doc: &Doc) -> Vec<crate::work::Mark> {
+    fn named_comments(&self, doc: &Doc) -> Vec<crate::work::CommentHighlight> {
         let text = doc.committed_text();
-        let mut marks = inclusions::comments_in(doc, &text, &[(0, 0, text.chars().count())]);
+        let mut highlights = inclusions::comments_in(doc, &text, &[(0, 0, text.chars().count())]);
         // Work comments, which `comments_in` leaves to their own Work: this is it.
-        marks.extend(doc.comments().into_iter().filter(|c| c.on_work).map(|c| crate::work::mark(c, Vec::new())));
-        marks.retain(|m| !m.resolved && (m.on_work || !m.ranges.is_empty()));
-        for mark in &mut marks {
-            (mark.name, mark.colour) = self.sender_label(doc, &mark.sender);
-            for reply in &mut mark.replies {
+        highlights.extend(doc.comments().into_iter().filter(|c| c.on_work).map(|c| crate::work::highlight(c, Vec::new())));
+        highlights.retain(|m| !m.resolved && (m.on_work || !m.ranges.is_empty()));
+        for highlight in &mut highlights {
+            (highlight.name, highlight.colour) = self.sender_label(doc, &highlight.sender);
+            for reply in &mut highlight.replies {
                 (reply.name, reply.colour) = self.sender_label(doc, &reply.sender);
             }
         }
-        marks
+        highlights
     }
 
     /// The Work's own Comments (`own`, in `text`) and the open ones on the text it includes,
     /// placed in its Typst body (see `inclusions::comments_in_body`).
-    fn comments_for_export(&self, text: &str, mut shown: Vec<inclusions::Shown>, own: Vec<crate::work::Mark>) -> Vec<(crate::work::Mark, Vec<std::ops::Range<usize>>)> {
+    fn comments_for_export(&self, text: &str, mut shown: Vec<inclusions::Shown>, own: Vec<crate::work::CommentHighlight>) -> Vec<(crate::work::CommentHighlight, Vec<std::ops::Range<usize>>)> {
         for s in &mut shown {
             let author = s.author.clone();
             // A Work comment belongs to its own Work only.
             s.comments.retain(|m| !m.resolved && !m.on_work && !m.ranges.is_empty());
-            for mark in &mut s.comments {
-                (mark.name, mark.colour) = self.included_sender(&author, &mark.sender);
-                for reply in &mut mark.replies {
+            for highlight in &mut s.comments {
+                (highlight.name, highlight.colour) = self.included_sender(&author, &highlight.sender);
+                for reply in &mut highlight.replies {
                     (reply.name, reply.colour) = self.included_sender(&author, &reply.sender);
                 }
             }

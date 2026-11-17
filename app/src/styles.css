@@ -55,6 +55,10 @@
     --find-match: rgb(232 150 0 / 0.25);
     --find-current: rgb(232 130 0 / 0.55);
     --find-current-edge: #a85f00;
+    /* Marks (marks.ts): a Mistake (wrong), a Rule break (breaks a known rule, maybe on purpose), a Query (worth a look). */
+    --mark-mistake: #c42b2b;
+    --mark-rule: #c99a00;
+    --mark-query: #2f6fd0;
     /* Typst colouring in the Raw view and Style library tabs (colouring.ts). */
     --syntax-comment: #8a857b;
     --syntax-keyword: #8a3b6e;
@@ -111,6 +115,9 @@
       --find-match: rgb(250 190 70 / 0.2);
       --find-current: rgb(250 165 50 / 0.5);
       --find-current-edge: #f0b050;
+      --mark-mistake: #f07a7a;
+      --mark-rule: #e8c04a;
+      --mark-query: #7aa8f0;
       --syntax-comment: #8b867c;
       --syntax-keyword: #d59ac4;
       --syntax-function: #8fc0d8;
@@ -166,6 +173,9 @@
     --find-match: rgb(250 190 70 / 0.2);
     --find-current: rgb(250 165 50 / 0.5);
     --find-current-edge: #f0b050;
+    --mark-mistake: #f07a7a;
+    --mark-rule: #e8c04a;
+    --mark-query: #7aa8f0;
     --syntax-comment: #8b867c;
     --syntax-keyword: #d59ac4;
     --syntax-function: #8fc0d8;
@@ -2976,6 +2986,71 @@ dialog#licenses {
   margin-left: 0;
 }
 
+/* A Mod's own settings (the Dialogue checker's rules and Speech verbs), folded away. */
+.mod-settings {
+  margin: 6px 0 0 24px;
+  font-size: 13px;
+}
+.mod-settings > summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+.mod-settings p,
+.mod-row .mod-settings p {
+  margin: 6px 0 0;
+}
+.mod-rules {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+.mod-rules li {
+  margin: 4px 0;
+}
+.mod-rules label.check {
+  display: block;
+}
+.mod-rule-level {
+  display: inline-block;
+  width: 10px;
+  margin: 0 4px 0 2px;
+  border-bottom: 2px solid var(--mark-query);
+}
+.mod-rule-rule {
+  border-bottom-color: var(--mark-rule);
+}
+.mod-rule-example {
+  display: block;
+  margin-left: 24px;
+  color: var(--muted);
+  font-family: var(--editor-font-family);
+}
+.mod-verb {
+  margin: 2px 4px 2px 0;
+  padding: 0 6px;
+  font: inherit;
+  color: var(--text);
+  background: var(--chip);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.mod-verb:hover {
+  background: var(--chip-hover);
+}
+.mod-verb-add {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+.mod-verb-add input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.mod-dismissed button {
+  margin-left: 4px;
+}
+
 #settings h3 {
   font-size: 13px;
   color: var(--muted);
@@ -3076,6 +3151,106 @@ dialog#licenses {
 }
 
 /* ---- The word and character count Mod (under the editor) ---- */
+
+/* ---- Marks (marks.ts): wavy underlines where a Mod found something, their card, and the counts ---- */
+
+.cm-mark {
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: none;
+  /* A Mark on one character (a comma) is hard to hit: give it some room. */
+  padding: 0 1px;
+}
+.cm-mark-mistake { text-decoration-color: var(--mark-mistake); }
+.cm-mark-rule { text-decoration-color: var(--mark-rule); }
+.cm-mark-query { text-decoration-color: var(--mark-query); }
+
+.cm-mark-card {
+  max-width: 380px;
+  padding: 6px 8px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+  border-left: 3px solid var(--mark-query);
+}
+.cm-mark-card-mistake { border-left-color: var(--mark-mistake); }
+.cm-mark-card-rule { border-left-color: var(--mark-rule); }
+.cm-mark-why {
+  margin: 0 0 6px;
+}
+.cm-mark-card button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 2px 0;
+  padding: 3px 6px;
+  font: inherit;
+  color: var(--text);
+  background: var(--chip);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.cm-mark-card button:hover {
+  background: var(--chip-hover);
+}
+.cm-mark-card .cm-mark-suggestion {
+  font-family: var(--editor-font-family);
+}
+.cm-mark-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+.cm-mark-row button {
+  width: auto;
+  flex: 1 1 auto;
+  background: none;
+  border-color: var(--line);
+}
+.cm-mark-card .cm-mark-stop {
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 2px 6px;
+}
+.cm-mark-card kbd {
+  display: inline-block;
+  min-width: 1.2em;
+  margin-right: 6px;
+  padding: 0 3px;
+  font: 11px system-ui, sans-serif;
+  text-align: center;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+
+#mark-counts {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 4px 0;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+#mark-counts[hidden] {
+  display: none;
+}
+.mark-count {
+  padding: 0 8px;
+  font: inherit;
+  color: var(--text);
+  background: none;
+  border: 1px solid var(--line);
+  border-bottom: 2px solid var(--mark-query);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.mark-count-mistake { border-bottom-color: var(--mark-mistake); }
+.mark-count-rule { border-bottom-color: var(--mark-rule); }
 
 #counts {
   flex: none;

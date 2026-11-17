@@ -6,7 +6,7 @@
 import { Facet, StateEffect, StateField, type EditorState, type Extension, type Text } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemirror/view";
 import { countsOf } from "./counts";
-import type { Mark } from "./sync";
+import type { CommentHighlight } from "./sync";
 import { isCommand } from "./keys";
 
 /** The character that stands for an Inclusion (change.rs `INCLUSION`). */
@@ -30,7 +30,7 @@ export type InclusionView = {
   /** Where the included text starts in its own Work (UTF-16): "Go to" opens it there. */
   starts: number;
   /** The included Work's Comments on this text (they belong to it, and show in both); ranges in `text`. */
-  comments: Mark[];
+  comments: CommentHighlight[];
   /** A new Chapter right after the included one, not included (it was split, or one was put
    *  after it), until the Author includes it too or dismisses this. */
   split?: { title: string; at: number } | null;
@@ -314,7 +314,7 @@ function marked(text: string, start: number, highlights: Highlight[]): (Node | s
  * between blank lines. Each block says where its text starts in `text` (`data-from`), so a
  * selection in it can be traced back.
  */
-export function readable(text: string, comments: Mark[] = [], finds: IncludedFind | null = null): HTMLElement[] {
+export function readable(text: string, comments: CommentHighlight[] = [], finds: IncludedFind | null = null): HTMLElement[] {
   const highlights: Highlight[] = [
     ...comments.flatMap((m) => m.ranges.map(([from, to]) => ({ from, to, id: m.id, colour: m.colour, resolved: m.resolved }))),
     ...findHighlights(finds),

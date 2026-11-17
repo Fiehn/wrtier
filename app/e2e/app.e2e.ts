@@ -1111,3 +1111,43 @@ test("the Work being read is back after a restart, and a Work dragged onto the p
   await expect(readLine(page, "The hallway was not there before.")).toBeVisible();
   expect(errors, "errors in the page").toEqual([]);
 });
+
+test("the Dialogue checker marks dialogue, and a Suggestion is accepted as typing, or the Mark dismissed", async ({ app }) => {
+  // Switched on in the Work's Mods.
+  const rain = app.locator("#works li.work-entry", { hasText: "Rain" });
+  await rain.locator(".entry-name").click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Mods…" }).click();
+  await app.locator("#mods-list label", { hasText: "Dialogue checker" }).locator("input").check();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.mods.Rain)).toContain("dialogue");
+  await app.locator("#mods button[value=done]").click();
+
+  await endOf(app, "She walked home.");
+  await app.keyboard.type(' "Hi." she said. "Wait---" She shouted.');
+  const mark = app.locator(".cm-mark-rule");
+  await expect(mark).toHaveCount(2, { timeout: 5000 });
+  await expect(app.locator("#mark-counts .mark-count-rule")).toHaveText("2");
+
+  // Ctrl+. on the first: its card, and 1 accepts the Suggestion, as an edit typed by the Author.
+  await mark.first().click();
+  await app.keyboard.press("Escape");
+  await app.keyboard.press("Control+.");
+  const card = app.locator(".cm-mark-card");
+  await expect(card).toContainText("Rule break");
+  await expect(card.locator(".cm-mark-suggestion").first()).toContainText('"Hi," she said.');
+  await app.keyboard.press("1");
+  await expect.poll(() => textOf(app)).toContain('She walked home. "Hi," she said.');
+  expect((await ops(app)).some((op) => op.op === "type" && op.text === ",")).toBe(true);
+
+  // F8 goes to the other, and D dismisses it: kept by the Vault, not typed.
+  await app.keyboard.press("F8");
+  await expect(card).toContainText("lowercase");
+  await app.keyboard.press("d");
+  await expect(app.locator(".cm-mark")).toHaveCount(0);
+  expect((await ops(app)).some((op) => op.op === "dismiss" && (op as any).key === "dialogue/capital-tag")).toBe(true);
+  await expect(app.locator("#mark-counts")).toBeHidden();
+  // Still dismissed after the Mods look again.
+  await app.keyboard.press("End");
+  await app.keyboard.type(" Fine.");
+  await app.waitForTimeout(1200);
+  await expect(app.locator(".cm-mark")).toHaveCount(0);
+});

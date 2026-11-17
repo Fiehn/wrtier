@@ -6,7 +6,7 @@
 
 export type CommandId =
   | "toggleWorks" | "quickSwitcher" | "closeTab" | "toggleView" | "togglePanel" | "preamble" | "mods" | "find" | "replace" | "findInVault"
-  | "undo" | "redo" | "redoAlt" | "strong" | "emph" | "addComment" | "textHistory"
+  | "undo" | "redo" | "redoAlt" | "strong" | "emph" | "addComment" | "textHistory" | "markCard" | "nextMark" | "previousMark"
   | "zoomIn" | "zoomInAlt" | "zoomOut" | "zoomReset"
   // The Chapter list Mod's
   | "nextChapter" | "previousChapter" | "chapterUp" | "chapterDown";
@@ -42,6 +42,9 @@ export const COMMANDS: Command[] = [
   { id: "emph", label: "Emphasis (italic)", where: "editor", key: "Mod-i" },
   { id: "addComment", label: "Add a Comment", where: "editor", key: "Mod-Shift-m" },
   { id: "textHistory", label: "History of this text (the selection, or the paragraph)", where: "editor", key: "Mod-Shift-h" },
+  { id: "markCard", label: "What the Mark at the cursor offers", where: "editor", key: "Mod-." },
+  { id: "nextMark", label: "Go to the next Mark", where: "editor", key: "F8" },
+  { id: "previousMark", label: "Go to the previous Mark", where: "editor", key: "Shift-F8" },
   { id: "zoomIn", label: "Zoom in", where: "pages", key: "Mod-=" },
   // Keyboards where + is a key of its own (Danish, German …), and the number pad's.
   { id: "zoomInAlt", label: "Zoom in (a second key)", where: "pages", key: "Mod-+" },

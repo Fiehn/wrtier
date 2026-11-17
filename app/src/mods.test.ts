@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { inUse, modExtensions, modNamed, unknownMods, unknownVaultMods, vaultModInUse, VAULT_MODS } from "./mods";
+import { inUse, modExtensions, modNamed, noSettings, unknownMods, unknownVaultMods, vaultModInUse, VAULT_MODS } from "./mods";
 import { COMMANDS, normalize, problemWith } from "./keys";
 
 const state = (work: string[], hidden: string[] = [], vault: string[] = []) => ({ work, newWorks: [], vault, hidden });
@@ -14,8 +14,8 @@ describe("which Mods are at work in a Work", () => {
   });
 
   it("leaves out a Mod from a newer version of the app, and names it", () => {
-    expect(inUse(state(["dialogue", "spellcheck"])).map((m) => m.id)).toEqual(["spellcheck"]);
-    expect(unknownMods(["dialogue", "spellcheck"])).toEqual(["dialogue"]);
+    expect(inUse(state(["thesaurus", "spellcheck"])).map((m) => m.id)).toEqual(["spellcheck"]);
+    expect(unknownMods(["thesaurus", "spellcheck"])).toEqual(["thesaurus"]);
   });
 });
 
@@ -37,7 +37,7 @@ describe("Vault Mods", () => {
 describe("the spellcheck Mod", () => {
   // The attributes the Mods give the editor's text (CodeMirror itself starts with spellcheck "false").
   const spellcheck = (mods: string[]) => {
-    const editor = EditorState.create({ doc: "Teh rain", extensions: modExtensions(inUse(state(mods))) });
+    const editor = EditorState.create({ doc: "Teh rain", extensions: modExtensions(inUse(state(mods)), { language: "", settings: noSettings(), setSetting: () => {} }) });
     const attrs = editor.facet(EditorView.contentAttributes).map((a) => (typeof a === "function" ? null : a?.spellcheck));
     return attrs.find((v) => v) ?? null;
   };

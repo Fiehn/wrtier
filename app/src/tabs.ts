@@ -14,12 +14,13 @@ import { typstColouring } from "./colouring";
 import { toggleMarkup } from "./shortcuts";
 import { dragToMove } from "./dragging";
 import { completions } from "./completion";
-import { commentClasses, commentHighlights, pendingRange, rangesOf, setMarks, setPending, type CommentOptions } from "./comments";
-import type { CommentOp, HistoryOp, Mark } from "./sync";
+import { commentClasses, commentHighlights, pendingRange, rangesOf, setHighlights, setPending, type CommentOptions } from "./comments";
+import type { CommentOp, HistoryOp, CommentHighlight } from "./sync";
 import { bindings, COMMANDS, withKey, type CommandId } from "./keys";
 import { chaptersIn, type IncludedEntry, type MoveOp } from "./chapters";
 import { sessionTints, setTints } from "./sessiontints";
-import { modExtensions, type Mod } from "./mods";
+import { makesMarks, modExtensions, type Mod, type ModContext } from "./mods";
+import { markActions, markAt, marks, openCardAtCursor, setDismissed, stepMark, type Mark, type MarkCounts } from "./marks";
 import { INCLUSION, includedSelection, inclusions, inclusionsOf, placeInclusion, rawInclusions, readerText, setInclusions, workDrops, type InclusionView } from "./inclusions";
 import { wordsIn } from "./counts";
 import { findExtension } from "./find";
@@ -55,7 +56,7 @@ export type TabEvents = {
   /** Highlighted text was clicked: these Comments (by ID) are on it. */
   openComments(id: string, comments: string[]): void;
   /** A Work's Comments, as they are now (after anything changed them). */
-  marks(id: string, marks: Mark[]): void;
+  highlights(id: string, highlights: CommentHighlight[]): void;
   /** Its key (Ctrl+Shift+M at first), or "Add Comment" in the menu: a new Comment on the selection or the word at the cursor. */
   addComment(id: string): void;
   /** Right-click inside a selection: the app's own menu, at (x, y). */
@@ -72,6 +73,12 @@ export type TabEvents = {
   dropWork(id: string, work: string, pos: number): void;
   /** "Styles" on an Inclusion's bar: pick Styles for it only (it has `styles`), with a menu at (x, y). */
   inclusionStyles(id: string, at: number, styles: string[], x: number, y: number): void;
+  /** Right-click on a Mark: the app's menu with what it offers, at (x, y). */
+  markMenu(id: string, x: number, y: number, items: { label: string; run: () => void }[]): void;
+  /** "Stop checking this rule in this Work" on a Mark's card. */
+  stopRule(id: string, mark: Mark): void;
+  /** How many Marks of each kind the Work's editor shows now. */
+  markCounts(id: string, counts: MarkCounts): void;
   /** A Mod's command's key, while writing in a Work: it runs it, or offers to add the Mod. */
   modCommand(id: string, command: CommandId): boolean;
 };
@@ -114,9 +121,9 @@ class Tab {
   state: WorkState | null = null;
   notice: string | null;
   /** Its Comments, as Rust last gave them. */
-  marks: Mark[] = [];
-  /** The Mods in use in it on this Device (their IDs), as last set. */
-  mods: string[] = [];
+  highlights: CommentHighlight[] = [];
+  /** The Mods in use in it on this Device, and what they were told (their IDs, its language and the settings), as last set. */
+  mods = "";
   /** Does it (maybe) have Inclusions? Then they're asked for again now and then, to stay live. */
   hasInclusions = false;
   private fetchingInclusions = false;
@@ -156,7 +163,7 @@ class Tab {
         if (changed) events.edited(this.sync.id);
         // The Comments panel lists their Comments (redrawn only when they change: a redraw
         // would take the focus from a Reply being written).
-        if (commentsChanged) events.marks(this.sync.id, this.marks);
+        if (commentsChanged) events.highlights(this.sync.id, this.highlights);
       }
     } catch (e) {
       events.error(String(e));
@@ -280,6 +287,11 @@ class Tab {
           sessionTints(),
           inclusions(),
           findExtension(),
+          marks({
+            dismiss: (mark) => this.sync.dismiss(mark.from, mark.to, `${mark.mod}/${mark.rule}`),
+            stopRule: (mark) => tabs.events.stopRule(this.sync.id, mark),
+            counted: (counts) => tabs.events.markCounts(this.sync.id, counts),
+          }),
           modsCompartment.of([]),
           EditorView.updateListener.of((update) => {
             for (const tr of update.transactions) this.sync.track(tr);
@@ -305,12 +317,13 @@ class Tab {
         this.view.dispatch({ effects: historyCompartment.reconfigure(history()) });
         tabs.events.committed(this.sync.id);
       },
-      marks: (marks) => {
-        this.marks = marks;
-        this.view.dispatch({ effects: setMarks.of(marks) });
-        tabs.events.marks(this.id, marks);
+      highlights: (highlights) => {
+        this.highlights = highlights;
+        this.view.dispatch({ effects: setHighlights.of(highlights) });
+        tabs.events.highlights(this.id, highlights);
       },
       tints: (tints) => this.view.dispatch({ effects: setTints.of(tints) }),
+      dismissed: (dismissed) => this.view.dispatch({ effects: setDismissed.of(dismissed) }),
       grew: () => {
         tabs.events.historyGrew(this.id);
         void this.refreshInclusions(tabs.events);
@@ -328,7 +341,7 @@ class Tab {
       e.preventDefault();
       tabs.events.tabMenu(this.id, e.clientX, e.clientY);
     });
-    this.sync.requestMarks();
+    this.sync.requestHighlights();
     this.sync.setTinting(tabs.tinting);
 
     // Right-click inside a selection: the app's menu (Add Comment, Cut, Copy, Paste). Anywhere
@@ -344,6 +357,13 @@ class Tab {
       }
       const selection = this.view.state.selection.main;
       const pos = this.view.posAtCoords({ x: e.clientX, y: e.clientY });
+      // On a Mark: what it offers (its Suggestions, the Mod's action, Dismiss).
+      const mark = pos === null || !selection.empty ? null : markAt(this.view.state, pos);
+      if (mark) {
+        e.preventDefault();
+        tabs.events.markMenu(this.id, e.clientX, e.clientY, markActions(this.view, mark));
+        return;
+      }
       if (selection.empty || pos === null || pos < selection.from || pos > selection.to) return;
       e.preventDefault();
       tabs.events.selectionMenu(this.id, e.clientX, e.clientY);
@@ -402,6 +422,9 @@ class Tab {
         tabs.events.textHistory(this.id);
         return true;
       },
+      markCard: () => openCardAtCursor(this.view),
+      nextMark: () => stepMark(this.view, 1),
+      previousMark: () => stepMark(this.view, -1),
     };
     // A Mod's commands are on their keys in every Work: one without the Mod offers to add it.
     for (const command of COMMANDS) {
@@ -484,8 +507,8 @@ export class Tabs {
   // ---- Comments ----
 
   /** A Work's Comments, as Rust last gave them. */
-  marksOf(id: string): Mark[] {
-    return this.find(id)?.marks ?? [];
+  highlightsOf(id: string): CommentHighlight[] {
+    return this.find(id)?.highlights ?? [];
   }
 
   /**
@@ -625,12 +648,12 @@ export class Tabs {
   }
 
   /** The Comments shown on a Work's Inclusions, by the Work they belong to. */
-  includedMarksOf(id: string): { work: string; label: string; marks: Mark[] }[] {
+  includedHighlightsOf(id: string): { work: string; label: string; highlights: CommentHighlight[] }[] {
     const tab = this.find(id);
     if (!tab?.isWork) return [];
     return inclusionsOf(tab.view.state)
       .filter((v) => v.work && v.comments.length > 0)
-      .map((v) => ({ work: v.work!, label: v.label, marks: v.comments }));
+      .map((v) => ({ work: v.work!, label: v.label, highlights: v.comments }));
   }
 
   /** Asks the Work in front for its Inclusions again now (a Comment on one changed). */
@@ -674,19 +697,32 @@ export class Tabs {
     view.focus();
   }
 
-  /** The Mods in use in a Work on this Device changed: its editor follows. */
-  setMods(id: string, mods: Mod[]) {
+  /** The Mods in use in a Work on this Device changed, or what they're told (its language, the settings): its editor follows. */
+  setMods(id: string, mods: Mod[], ctx: ModContext) {
     const tab = this.find(id);
     if (!tab?.isWork) return;
-    const ids = mods.map((m) => m.id);
-    if (ids.join() === tab.mods.join()) return;
-    tab.mods = ids;
-    tab.view.dispatch({ effects: modsCompartment.reconfigure(modExtensions(mods)) });
+    const key = JSON.stringify([mods.map((m) => m.id), ctx.language, ctx.settings.vault, ctx.settings.work]);
+    if (key === tab.mods) return;
+    tab.mods = key;
+    tab.view.dispatch({ effects: modsCompartment.reconfigure(modExtensions(mods, ctx)) });
+    tab.sync.setMarking(makesMarks(mods));
+  }
+
+  /** Asks the Vault again where a Work's Dismissed Marks are (some were shown again). */
+  requestDismissed(id: string) {
+    const tab = this.find(id);
+    if (tab?.isWork) tab.sync.requestDismissed();
+  }
+
+  /** Goes to the next Mark of one kind in the Work in front (clicking a count). */
+  stepMark(id: string, level: Mark["level"]) {
+    const tab = this.find(id);
+    if (tab?.isWork) stepMark(tab.view, 1, level);
   }
 
   /** Every open Work asks for its highlights again (a Reviewer's name or colour changed). */
-  refreshMarks() {
-    for (const tab of this.open) if (tab.isWork) tab.sync.requestMarks();
+  refreshHighlights() {
+    for (const tab of this.open) if (tab.isWork) tab.sync.requestHighlights();
   }
 
   /** Switches every tab between the Formatted and the Raw view. */

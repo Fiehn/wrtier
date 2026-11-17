@@ -13,12 +13,12 @@ import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, keymap, type ViewUpdate } from "@codemirror/view";
 import { standardKeymap } from "@codemirror/commands";
 import { storyElements, type ElementInfo } from "./elements";
-import { commentClasses, commentHighlights, rangesOf, setMarks, type CommentOptions } from "./comments";
+import { commentClasses, commentHighlights, rangesOf, setHighlights, type CommentOptions } from "./comments";
 import { inclusions, inclusionsOf, readOnlyInclusions, setInclusions, workBeingDragged, type InclusionView } from "./inclusions";
 import { findExtension } from "./find";
 import { chaptersIn } from "./chapters";
 import { viewExtension } from "./tabs";
-import type { Mark } from "./sync";
+import type { CommentHighlight } from "./sync";
 
 /** What a Device remembers about the Reading panel (device.rs `ReadingPlace`). */
 export type ReadingPlace = { work: string; identity: string | null; top: number };
@@ -26,14 +26,14 @@ export type ReadingPlace = { work: string; identity: string | null; top: number 
 /** What Rust read (vault/reading.rs `Reading`). */
 type Reading =
   | { kind: "unchanged" }
-  | { kind: "text"; id: string; name: string; identity: string | null; stamp: string; text: string; inclusions: InclusionView[]; marks: Mark[]; elements: string[] }
+  | { kind: "text"; id: string; name: string; identity: string | null; stamp: string; text: string; inclusions: InclusionView[]; highlights: CommentHighlight[]; elements: string[] }
   | { kind: "unreadable"; id: string; name: string; identity: string | null; reason: string };
 
 export type ReadingHooks = {
   /** The editor of the Work's tab, if it's open here (null otherwise). */
   tabView(id: string): EditorView | null;
   /** That tab's Comments, as Rust last gave them. */
-  tabMarks(id: string): Mark[];
+  tabHighlights(id: string): CommentHighlight[];
   /** The Story elements a Work has, from their names (null: ask its Preamble). */
   elements(id: string, names: string[] | null): Promise<ElementInfo[]>;
   /** "Write in it": the Work comes to the front, with the cursor at `at`. */
@@ -87,7 +87,7 @@ export class ReadingPanel {
   /** Mirroring the Work's tab, or reading its History. */
   private mirrored = false;
   /** Its own Comments: what the highlights are of. */
-  private marks: Mark[] = [];
+  private highlights: CommentHighlight[] = [];
   /** Where to scroll to once the text is in (a restored place, or "Go to" on an Inclusion). */
   private scrollTo: number | null = null;
   private reading = false;
@@ -208,8 +208,8 @@ export class ReadingPanel {
     this.label.title = work;
     if (another) {
       // Nothing of the last one stays while this one is read.
-      this.marks = [];
-      this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: "" }, effects: [setInclusions.of([]), setMarks.of([])] });
+      this.highlights = [];
+      this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: "" }, effects: [setInclusions.of([]), setHighlights.of([])] });
     }
     await this.refresh();
     this.hooks.changed();
@@ -222,9 +222,9 @@ export class ReadingPanel {
     this.identity = null;
     this.stamp = "";
     this.mirrored = false;
-    this.marks = [];
+    this.highlights = [];
     this.hideCard();
-    this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: "" }, effects: [setInclusions.of([]), setMarks.of([])] });
+    this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: "" }, effects: [setInclusions.of([]), setHighlights.of([])] });
     this.show(false);
     if (remember) this.hooks.changed();
   }
@@ -275,8 +275,8 @@ export class ReadingPanel {
     }
     this.showWhy(null);
     this.stamp = reading.stamp;
-    this.marks = reading.marks;
-    this.setText(reading.text, reading.inclusions, reading.marks);
+    this.highlights = reading.highlights;
+    this.setText(reading.text, reading.inclusions, reading.highlights);
     await this.setElements(this.id, reading.elements);
   }
 
@@ -285,8 +285,8 @@ export class ReadingPanel {
     this.mirrored = true;
     this.stamp = "";
     this.showWhy(null);
-    this.marks = this.hooks.tabMarks(id).map((m) => ({ ...m, ranges: rangesOf(tab, m.id) }));
-    this.setText(tab.state.doc.toString(), inclusionsOf(tab.state), this.marks);
+    this.highlights = this.hooks.tabHighlights(id).map((m) => ({ ...m, ranges: rangesOf(tab, m.id) }));
+    this.setText(tab.state.doc.toString(), inclusionsOf(tab.state), this.highlights);
     await this.setElements(id, null);
   }
 
@@ -305,8 +305,8 @@ export class ReadingPanel {
     }
     // New Inclusions or Comments from Rust: taken as the tab has them.
     if (update.transactions.some((tr) => tr.effects.length > 0)) {
-      this.marks = this.hooks.tabMarks(id).map((m) => ({ ...m, ranges: rangesOf(update.view, m.id) }));
-      this.view.dispatch({ effects: [setInclusions.of(inclusionsOf(update.state)), setMarks.of(this.marks)] });
+      this.highlights = this.hooks.tabHighlights(id).map((m) => ({ ...m, ranges: rangesOf(update.view, m.id) }));
+      this.view.dispatch({ effects: [setInclusions.of(inclusionsOf(update.state)), setHighlights.of(this.highlights)] });
     }
     if (update.docChanged) this.chaptersSoon();
   }
@@ -355,9 +355,9 @@ export class ReadingPanel {
   }
 
   /** Puts the text in (changing only what changed), with its Inclusions and Comments. */
-  private setText(text: string, views: InclusionView[], marks: Mark[]) {
+  private setText(text: string, views: InclusionView[], highlights: CommentHighlight[]) {
     const change = changeBetween(this.view.state.doc.toString(), text);
-    this.view.dispatch({ ...(change ? { changes: change } : {}), effects: [setInclusions.of(views), setMarks.of(marks)] });
+    this.view.dispatch({ ...(change ? { changes: change } : {}), effects: [setInclusions.of(views), setHighlights.of(highlights)] });
     if (this.scrollTo !== null) {
       const at = Math.min(this.scrollTo, this.view.state.doc.length);
       this.scrollTo = null;
@@ -414,21 +414,21 @@ export class ReadingPanel {
 
   /** A highlight was clicked: its Comments, read-only, by the click. */
   private showCard(ids: string[]) {
-    const all = [...this.marks, ...inclusionsOf(this.view.state).flatMap((v) => v.comments)];
-    const shown = ids.map((id) => all.find((m) => m.id === id)).filter((m): m is Mark => !!m);
+    const all = [...this.highlights, ...inclusionsOf(this.view.state).flatMap((v) => v.comments)];
+    const shown = ids.map((id) => all.find((m) => m.id === id)).filter((m): m is CommentHighlight => !!m);
     if (shown.length === 0 || !this.id) return;
     const work = this.id;
     // A Comment on included text belongs to that Work, but shows in this one's panel too.
-    this.card.replaceChildren(...shown.map((mark) => {
+    this.card.replaceChildren(...shown.map((highlight) => {
       const item = document.createElement("div");
       item.className = "reading-card-comment";
       const who = document.createElement("strong");
-      who.className = `comment-sender comment-sender-${mark.colour}`;
-      who.textContent = mark.name;
+      who.className = `comment-sender comment-sender-${highlight.colour}`;
+      who.textContent = highlight.name;
       const body = document.createElement("p");
-      body.textContent = mark.body;
+      body.textContent = highlight.body;
       item.append(who, body);
-      for (const reply of mark.replies) {
+      for (const reply of highlight.replies) {
         const line = document.createElement("p");
         line.className = "reading-card-reply";
         const name = document.createElement("strong");

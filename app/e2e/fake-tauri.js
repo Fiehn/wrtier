@@ -24,6 +24,10 @@
     changes: 1,
     /** Mods each Work has (the Chapter list is on Rain). */
     mods: { Rain: ["chapters", "counts"] },
+    /** Mods' own settings (vault/marks.rs): the Vault's, each Work's, new Works'. */
+    modSettings: { vault: {}, work: {}, newWorks: {} },
+    /** Dismissed Marks, by Work. */
+    dismissed: {},
     /** The Vault Mods the Vault has (none unless a test adds one). */
     vaultMods: [],
     /** The Vault's folders, besides those its Works are in (none unless a test adds some). */
@@ -108,17 +112,26 @@
         return false;
       }
       default:
-        return false; // cursor, sync, marks, tints: nothing changes
+        return false; // cursor, sync, highlights, tints, dismissed: nothing changes
     }
     fake.texts[id] = t;
     return true;
+  }
+
+  function modSettings(id) {
+    const dismissed = {};
+    for (const d of (id && fake.dismissed[id]) || []) {
+      const mod = d.key.split("/")[0];
+      dismissed[mod] = (dismissed[mod] ?? 0) + 1;
+    }
+    return { vault: fake.modSettings.vault, work: (id && fake.modSettings.work[id]) || {}, newWorks: fake.modSettings.newWorks, dismissed };
   }
 
   function workState(id, extra = {}) {
     return {
       len: fake.texts[id].length, patches: [], burst: null, saveError: null, textFileProblem: null, recoveryProblem: null,
       outside: 0, tookIn: null, syncProblem: null, moved: null, styleNotice: null, changes: fake.changes, notices: 0,
-      marks: null, tints: null, ...extra,
+      highlights: null, tints: null, dismissed: null, ...extra,
     };
   }
 
@@ -185,14 +198,31 @@
     read_work: ({ work, known }) => {
       const name = work.split("/").pop();
       if (!(work in fake.texts)) return { kind: "unreadable", id: work, name, identity: null, reason: `${name} isn't in the Vault any more.` };
-      const marks = fake.readingMarks?.[work] ?? [];
-      const stamp = `${fake.changes}:${JSON.stringify(marks)}`;
+      const highlights = fake.readingMarks?.[work] ?? [];
+      const stamp = `${fake.changes}:${JSON.stringify(highlights)}`;
       if (known === stamp) return { kind: "unchanged" };
-      return { kind: "text", id: work, name, identity: `id-${name}`, stamp, text: fake.texts[work], inclusions: [], marks, elements: [] };
+      return { kind: "text", id: work, name, identity: `id-${name}`, stamp, text: fake.texts[work], inclusions: [], highlights, elements: [] };
     },
     leave_work: () => null,
     close_work: () => null,
     get_mods: ({ id }) => ({ work: fake.mods[id] ?? [], newWorks: [], vault: fake.vaultMods, hidden: [] }),
+    set_mod: ({ id, name, on }) => {
+      const list = fake.mods[id] ?? [];
+      fake.mods[id] = on ? [...new Set([...list, name])] : list.filter((m) => m !== name);
+      return { work: fake.mods[id], newWorks: [], vault: fake.vaultMods, hidden: [] };
+    },
+    // Mods' own settings (vault/marks.rs).
+    get_mod_settings: ({ id }) => modSettings(id),
+    set_mod_setting: ({ scope, id, key, value }) => {
+      const map = scope === "work" ? (fake.modSettings.work[id] ??= {}) : fake.modSettings[scope];
+      if (value) map[key] = value;
+      else delete map[key];
+      return modSettings(id);
+    },
+    show_dismissed: ({ id, name }) => {
+      fake.dismissed[id] = (fake.dismissed[id] ?? []).filter((d) => !d.key.startsWith(`${name}/`));
+      return modSettings(id);
+    },
     set_vault_mod: ({ name, on }) => {
       fake.vaultMods = on ? [...new Set([...fake.vaultMods, name])] : fake.vaultMods.filter((m) => m !== name);
       return { work: [], newWorks: [], vault: fake.vaultMods, hidden: [] };
@@ -203,6 +233,8 @@
       return null;
     },
     get_reviewers: () => [],
+    // Newer versions of the app's default Styles to offer (library.rs): none here.
+    default_offers: () => [],
     get_preamble: () => ({ preamble: { looks: ["Paperback"], styles: [], elements: [], title: "Rain", author: "", language: "en", raw: "" }, rawOther: null }),
     get_milestones: () => fake.milestones ?? [],
     make_milestone: ({ name }) => {
@@ -267,8 +299,14 @@
       let changed = false;
       for (const op of ops) changed = apply(id, op) || changed;
       if (changed) fake.changes += 1;
-      const wantsMarks = ops.some((op) => op.op === "marks" || op.op === "comment" || op.op === "workComment");
-      return workState(id, wantsMarks ? { marks: fake.comments } : {});
+      const wantsHighlights = ops.some((op) => op.op === "highlights" || op.op === "comment" || op.op === "workComment");
+      // Dismissed Marks (ADR 0018): kept as ranges in the text (the real one keeps character IDs).
+      for (const op of ops) if (op.op === "dismiss") (fake.dismissed[id] ??= []).push({ key: op.key, ranges: [[op.from, op.to]] });
+      const wantsDismissed = ops.some((op) => op.op === "dismissed");
+      return workState(id, {
+        ...(wantsHighlights ? { highlights: fake.comments } : {}),
+        ...(wantsDismissed ? { dismissed: fake.dismissed[id] ?? [] } : {}),
+      });
     },
     work_text: ({ id }) => ({ text: fake.texts[id], state: workState(id) }),
     // Inclusions (vault/inclusions.rs): a Work's Chapters, and what its Inclusions show.

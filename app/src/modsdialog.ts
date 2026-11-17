@@ -3,7 +3,7 @@
 // The Mods for new Works, and the Vault Mods, are in Settings (`fillNewWorkMods`, `fillVaultMods`).
 
 import { invoke } from "@tauri-apps/api/core";
-import { MODS, unknownMods, unknownVaultMods, VAULT_MODS, type ModsState } from "./mods";
+import { MODS, unknownMods, unknownVaultMods, VAULT_MODS, type ModSettings, type ModsState } from "./mods";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -34,14 +34,35 @@ function unknownRows(ids: string[]): HTMLElement[] {
 
 /**
  * Opens the dialog for the Work `id`. `changed` runs after every change, with the state as
- * Rust saved it (the Work's editor follows at once). Resolves when it's closed.
+ * Rust saved it (the Work's editor follows at once); `settingsChanged` after a Mod's own
+ * setting changed, or its Dismissed Marks were shown again. Resolves when it's closed.
  */
-export async function openMods(id: string, name: string, changed: (state: ModsState) => void): Promise<void> {
+export async function openMods(id: string, name: string, changed: (state: ModsState) => void, settingsChanged: () => void): Promise<void> {
   const dialog = $<HTMLDialogElement>("mods");
   const list = $("mods-list");
   const error = $("mods-error");
   $("mods-heading").textContent = `Mods of ${name}`;
   let state = await invoke<ModsState>("get_mods", { id });
+  let settings = await invoke<ModSettings>("get_mod_settings", { id });
+  /** Which Mods' own settings are open, kept across a redraw. */
+  const open = new Set<string>();
+
+  const runSettings = (job: () => Promise<ModSettings>) => {
+    error.hidden = true;
+    job()
+      .then((next) => {
+        settings = next;
+        settingsChanged();
+        render();
+      })
+      .catch((e) => {
+        error.textContent = String(e);
+        error.hidden = false;
+        render();
+      });
+  };
+  const save = (scope: "vault" | "work" | "newWorks", key: string, value: string) =>
+    runSettings(() => invoke<ModSettings>("set_mod_setting", { scope, id: scope === "work" ? id : null, key, value }));
 
   const run = (job: () => Promise<ModsState>) => {
     error.hidden = true;
@@ -80,6 +101,24 @@ export async function openMods(id: string, name: string, changed: (state: ModsSt
       );
       li.append(main, line("muted", mod.about), hide);
       if (on && hidden) li.append(line("muted", "This Work has it, but this device hides it."));
+      if (on && mod.settings) {
+        const part = mod.settings(settings, "work", save);
+        if (part instanceof HTMLDetailsElement) {
+          part.open = open.has(mod.id);
+          part.addEventListener("toggle", () => (part.open ? open.add(mod.id) : open.delete(mod.id)));
+        }
+        li.append(part);
+      }
+      const dismissed = settings.dismissed[mod.id] ?? 0;
+      if (mod.marks && dismissed > 0) {
+        const p = line("muted mod-dismissed", `${dismissed} dismissed in this Work. `);
+        const again = document.createElement("button");
+        again.type = "button";
+        again.textContent = "Show them again";
+        again.addEventListener("click", () => runSettings(() => invoke<ModSettings>("show_dismissed", { id, name: mod.id })));
+        p.append(again);
+        li.append(p);
+      }
       return li;
     });
     list.replaceChildren(...rows, ...unknownRows(unknownMods(state.work)));
@@ -99,6 +138,15 @@ export async function openMods(id: string, name: string, changed: (state: ModsSt
  */
 export async function fillNewWorkMods(list: HTMLElement): Promise<void> {
   let state = await invoke<ModsState>("get_mods", { id: null });
+  let settings = await invoke<ModSettings>("get_mod_settings", { id: null });
+  const save = (scope: "vault" | "work" | "newWorks", key: string, value: string) => {
+    invoke<ModSettings>("set_mod_setting", { scope, id: null, key, value })
+      .then((next) => {
+        settings = next;
+        render();
+      })
+      .catch((e) => list.append(line("dialog-error", String(e))));
+  };
   const render = () => {
     const rows = MODS.map((mod) => {
       const li = document.createElement("li");
@@ -120,6 +168,7 @@ export async function fillNewWorkMods(list: HTMLElement): Promise<void> {
         ` ${mod.name}`,
       );
       li.append(label);
+      if (mod.settings && state.newWorks.includes(mod.id)) li.append(mod.settings(settings, "newWorks", save));
       return li;
     });
     list.replaceChildren(...rows, ...unknownRows(unknownMods(state.newWorks)));

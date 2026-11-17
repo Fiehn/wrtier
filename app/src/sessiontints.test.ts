@@ -40,7 +40,7 @@ describe("asking Rust for the tints", () => {
 
   const state = (tints: Tint[] | null = null): WorkState => ({
     len: 6, patches: [], burst: null, saveError: null, textFileProblem: null, recoveryProblem: null, outside: 0,
-    tookIn: null, syncProblem: null, moved: null, styleNotice: null, changes: history, notices: 0, marks: null, tints,
+    tookIn: null, syncProblem: null, moved: null, styleNotice: null, changes: history, notices: 0, highlights: null, tints, dismissed: null,
   });
 
   beforeEach(() => {
@@ -56,11 +56,11 @@ describe("asking Rust for the tints", () => {
   it("never asks while the switch is off, and asks whenever the History grows while it's on", async () => {
     const view = { state: EditorState.create({ doc: "abcdef" }), dispatch: () => {} } as unknown as EditorView;
     const got: Tint[][] = [];
-    const sync = new WorkSync("Rain", view, { state: () => {}, burstClosed: () => {}, marks: () => {}, tints: (t) => got.push(t), grew: () => {}, error: (m) => { throw new Error(m); } });
+    const sync = new WorkSync("Rain", view, { state: () => {}, burstClosed: () => {}, highlights: () => {}, tints: (t) => got.push(t), grew: () => {}, error: (m) => { throw new Error(m); } });
 
     sync.status(state()); // the History grew: the highlights are asked for, the tints aren't
     await sync.idle();
-    expect(batches).toEqual([["marks"]]);
+    expect(batches).toEqual([["highlights"]]);
 
     sync.setTinting(true);
     await sync.idle();
@@ -70,7 +70,7 @@ describe("asking Rust for the tints", () => {
     history = 6;
     sync.status(state());
     await sync.idle();
-    expect(batches.slice(2).flat()).toEqual(["marks", "tints"]);
+    expect(batches.slice(2).flat()).toEqual(["highlights", "tints"]);
 
     sync.setTinting(false);
     expect(got[got.length - 1]).toEqual([]); // cleared
@@ -78,6 +78,20 @@ describe("asking Rust for the tints", () => {
     history = 7;
     sync.status(state());
     await sync.idle();
-    expect(batches.slice(before).flat()).toEqual(["marks"]);
+    expect(batches.slice(before).flat()).toEqual(["highlights"]);
+  });
+
+  it("are asked for only while the editor shows Marks, and a dismissal goes in order with the typing", async () => {
+    const view = { state: EditorState.create({ doc: "abcdef" }), dispatch: () => {} } as unknown as EditorView;
+    const got: unknown[] = [];
+    const sync = new WorkSync("Rain", view, { state: () => {}, burstClosed: () => {}, highlights: () => {}, tints: () => {}, dismissed: (d) => got.push(d), grew: () => {}, error: (m) => { throw new Error(m); } });
+    await sync.idle();
+    expect(batches.flat()).not.toContain("dismissed");
+    sync.setMarking(true);
+    await sync.idle();
+    expect(batches.flat()).toContain("dismissed");
+    sync.dismiss(1, 3, "dialogue/period-before-tag");
+    await sync.idle();
+    expect(batches[batches.length - 1]).toEqual(["dismiss", "dismissed"]);
   });
 });

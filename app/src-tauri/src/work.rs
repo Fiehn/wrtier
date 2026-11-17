@@ -52,11 +52,11 @@ pub enum Op {
     /// Take in what changed outside the app (`WorkState::outside` said so). It comes through
     /// the editor's queue, so it's in order with the typing and the editor gets patches.
     Sync,
-    /// Send the Comments' highlights with the answer (`WorkState::marks`). Asked through the
+    /// Send the Comments' highlights with the answer (`WorkState::highlights`). Asked through the
     /// queue, so their positions fit the editor's text the way patches do.
-    Marks,
+    Highlights,
     /// "Colour text by Session" is on: send the newest Sessions' text with the answer
-    /// (`WorkState::tints`), through the queue like `Marks`. Never sent while it's off.
+    /// (`WorkState::tints`), through the queue like `Highlights`. Never sent while it's off.
     Tints,
     // Comments. Each closes the open burst first (nothing else is recorded while one is open).
     // `sender` is `author` or `reviewer/<id>`; the Vault fills in `sender_name`, the Reviewer's
@@ -87,6 +87,13 @@ pub enum Op {
     /// "History of this text": the History tab narrows to `from..to` (or, empty, the paragraph
     /// the cursor is in). The open burst closes first. Answered in `WorkState::stretch`.
     Stretch { from: usize, to: usize },
+    /// The Author dismissed the Mark on `from..to`, never empty (ADR 0018). `key` is
+    /// "<mod>/<rule>". The open burst closes first, so the characters have IDs; the Vault keeps
+    /// them (`WorkState::dismissing`).
+    Dismiss { from: usize, to: usize, key: String },
+    /// Send where the Dismissed Marks are with the answer (`WorkState::dismissed`, filled in
+    /// by the Vault, which keeps them).
+    Dismissed,
     /// The Inclusion character the editor just pasted at `at` includes `work` (its ID in the
     /// Vault), or the Chapter starting at `chapter` in its text (UTF-16) (ADR 0015). The Vault
     /// fills in `target`, the record it gets, since only it can find the Work.
@@ -122,7 +129,7 @@ impl Op {
 /// A Reply, as the Comments panel shows it.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct ReplyMark {
+pub struct CommentReply {
     pub id: String,
     pub sender: String,
     pub name: String,
@@ -155,7 +162,7 @@ pub struct Tint {
 /// A Comment's highlight in the editor.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Mark {
+pub struct CommentHighlight {
     pub id: String,
     /// Where its text is: from..to in UTF-16, in reading order. Empty: it's detached, or a Work
     /// comment.
@@ -174,15 +181,15 @@ pub struct Mark {
     pub quote: String,
     /// When it was made (ms since 1970).
     pub time_ms: u64,
-    pub replies: Vec<ReplyMark>,
+    pub replies: Vec<CommentReply>,
     /// The other version of its body, if two Devices edited it without seeing each other.
     pub other_body: Option<String>,
 }
 
 /// A Comment's highlight, on `ranges`; names, colours and bodies that lost to another Device's
 /// edit are left to fill in.
-pub fn mark(c: wrtier::doc::CommentView, ranges: Vec<(usize, usize)>) -> Mark {
-    Mark {
+pub fn highlight(c: wrtier::doc::CommentView, ranges: Vec<(usize, usize)>) -> CommentHighlight {
+    CommentHighlight {
         id: c.id.to_string(),
         ranges,
         on_work: c.on_work,
@@ -193,7 +200,7 @@ pub fn mark(c: wrtier::doc::CommentView, ranges: Vec<(usize, usize)>) -> Mark {
         resolved: c.resolved,
         quote: c.quote,
         time_ms: c.hlc.0,
-        replies: c.replies.into_iter().map(|r| ReplyMark {
+        replies: c.replies.into_iter().map(|r| CommentReply {
             id: r.id.to_string(), sender: r.sender, name: String::new(), colour: String::new(), body: r.body, time_ms: r.hlc.0, other_body: None,
         }).collect(),
         other_body: None,
@@ -257,12 +264,12 @@ pub struct WorkState {
     /// A Style (or Look, or Story element) changed in the library since the Work recorded it.
     pub style_notice: Option<String>,
     /// How many Changes the History holds. When it goes up (a burst was recorded, something
-    /// was taken in, a Move or Revert), the editor asks for the highlights again (`Op::Marks`).
+    /// was taken in, a Move or Revert), the editor asks for the highlights again (`Op::Highlights`).
     pub changes: usize,
     /// How many Merge notices the History tab shows (not dismissed): "History (n)".
     pub notices: usize,
-    /// The Comments' highlights, in the answer to a batch with `Op::Marks`.
-    pub marks: Option<Vec<Mark>>,
+    /// The Comments' highlights, in the answer to a batch with `Op::Highlights`.
+    pub highlights: Option<Vec<CommentHighlight>>,
     /// The newest Sessions' text, in the answer to a batch with `Op::Tints`.
     pub tints: Option<Vec<Tint>>,
     /// Where an `Op::Locate`'s characters are (UTF-16, in the editor's text), in the answer to a
@@ -274,6 +281,20 @@ pub struct WorkState {
     /// batch with one; None in it if there was no text there (an empty line).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stretch: Option<Option<String>>,
+    /// Where the Dismissed Marks' characters are, in the answer to a batch with `Op::Dismissed`.
+    pub dismissed: Option<Vec<DismissedMark>>,
+    /// The Marks dismissed in this batch, with their characters' IDs: for the Vault to keep.
+    #[serde(skip)]
+    pub dismissing: Vec<(String, Vec<String>)>,
+}
+
+/// A Dismissed Mark (ADR 0018) as the editor sees it: its key ("<mod>/<rule>") and where what's
+/// left of its characters is (UTF-16, in order). The editor hides a Mark with that key there.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DismissedMark {
+    pub key: String,
+    pub ranges: Vec<(usize, usize)>,
 }
 
 /// Where a Work's History went when it disappeared from under an open tab.
@@ -356,6 +377,8 @@ pub struct OpenWork {
     pub stretch: Option<Stretch>,
     /// The answer to an `Op::Stretch` in the batch being applied.
     stretch_answer: Option<Option<String>>,
+    /// The Marks dismissed in the batch being applied (`Op::Dismiss`).
+    dismissing: Vec<(String, Vec<String>)>,
     /// How many Merge notices the History tab shows, as of how many Changes the History held:
     /// they only change when a Change is made or taken in.
     notice_count: Cell<Option<(usize, usize)>>,
@@ -403,6 +426,7 @@ impl OpenWork {
             inclusions: storage::Expansions::new(),
             stretch: None,
             stretch_answer: None,
+            dismissing: Vec::new(),
             notice_count: Cell::new(None),
             mine,
             db_stamp,
@@ -447,10 +471,12 @@ impl OpenWork {
             style_notice: self.style_notice.clone(),
             changes: self.doc.change_count(),
             notices: self.notice_count(),
-            marks: None,
+            highlights: None,
             tints: None,
             located: None,
             stretch: None,
+            dismissed: None,
+            dismissing: Vec::new(),
         }
     }
 
@@ -482,7 +508,7 @@ impl OpenWork {
 
     /// The Comments' highlights, in the text the editor shows (open burst included). Names and
     /// colours are left for the Vault to fill in.
-    pub fn marks(&self) -> Vec<Mark> {
+    pub fn highlights(&self) -> Vec<CommentHighlight> {
         let comments = self.doc.comments();
         if comments.is_empty() {
             return Vec::new();
@@ -498,12 +524,12 @@ impl OpenWork {
         }
         comments.into_iter().map(|c| {
             let ranges = c.ranges.iter().map(|&(from, to)| (self.positions.to_utf16(from), self.positions.to_utf16(to))).collect();
-            let mut mark = mark(c, ranges);
-            mark.other_body = other.get(&mark.id).cloned();
-            for reply in &mut mark.replies {
+            let mut highlight = highlight(c, ranges);
+            highlight.other_body = other.get(&highlight.id).cloned();
+            for reply in &mut highlight.replies {
                 reply.other_body = other.get(&reply.id).cloned();
             }
-            mark
+            highlight
         }).collect()
     }
 
@@ -637,6 +663,26 @@ impl OpenWork {
         };
         let (from, to) = self.doc.shown_range(first, last)?;
         Some((self.positions.to_utf16(from), self.positions.to_utf16(to)))
+    }
+
+    /// Where the Dismissed Marks' characters are now (those still shown), each as runs of
+    /// characters next to each other.
+    pub fn dismissed(&self, stored: &[(String, Vec<String>)]) -> Vec<DismissedMark> {
+        stored.iter().filter_map(|(key, ids)| {
+            let ids: Vec<CharId> = ids.iter().filter_map(|id| id.parse().ok()).collect();
+            let mut ranges: Vec<(usize, usize)> = Vec::new();
+            for at in self.doc.shown_indexes(&ids) {
+                match ranges.last_mut() {
+                    Some(last) if last.1 == at => last.1 = at + 1,
+                    _ => ranges.push((at, at + 1)),
+                }
+            }
+            if ranges.is_empty() {
+                return None;
+            }
+            let ranges = ranges.into_iter().map(|(f, t)| (self.positions.to_utf16(f), self.positions.to_utf16(t))).collect();
+            Some(DismissedMark { key: key.clone(), ranges })
+        }).collect()
     }
 
     /// Gives a Milestone a new name. The open burst closes first (nothing else may be recorded
@@ -811,13 +857,13 @@ impl OpenWork {
     /// `library`: the Style library and its generation, if it changed since this Work last
     /// recorded what it uses (see `styles_due`).
     pub fn edit(&mut self, ops: Vec<Op>, device_name: Option<&str>, library: Option<(&crate::preamble::Shelf, u64)>, now_ms: u64) -> Result<WorkState, String> {
-        let want_marks = ops.contains(&Op::Marks);
+        let want_highlights = ops.contains(&Op::Highlights);
         let want_tints = ops.contains(&Op::Tints);
         let locate = ops.iter().rev().find_map(|op| match op {
             Op::Locate { first, last } => Some((first.clone(), last.clone())),
             _ => None,
         });
-        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Marks | Op::Tints | Op::Locate { .. } | Op::Stretch { .. })) {
+        if ops.iter().any(|op| !matches!(op, Op::Cursor { .. } | Op::Sync | Op::Highlights | Op::Tints | Op::Dismissed | Op::Locate { .. } | Op::Stretch { .. })) {
             self.name_this_device(device_name, now_ms)?;
             self.record_styles(library, now_ms);
         }
@@ -847,11 +893,12 @@ impl OpenWork {
         #[cfg(debug_assertions)]
         assert_eq!(self.positions, Positions::new(&self.doc.text()), "the position map drifted from the text");
         let took_in = self.took_in.take();
-        let marks = want_marks.then(|| self.marks());
+        let highlights = want_highlights.then(|| self.highlights());
         let tints = want_tints.then(|| self.tints());
         let located = locate.map(|(first, last)| self.locate(&first, last.as_deref()));
         let stretch = self.stretch_answer.take();
-        result.map(|()| WorkState { took_in, marks, tints, located, stretch, ..self.state(patches) })
+        let dismissing = std::mem::take(&mut self.dismissing);
+        result.map(|()| WorkState { took_in, highlights, tints, located, stretch, dismissing, ..self.state(patches) })
     }
 
     /// Records this Device's name in the Work before its first edit in a sitting, while no burst
@@ -988,7 +1035,16 @@ impl OpenWork {
             Op::Undo => self.undo(now_ms),
             Op::Redo => self.redo(now_ms),
             Op::Sync => self.take_in(now_ms)?,
-            Op::Marks | Op::Tints | Op::Locate { .. } => {} // answered at the end of the batch
+            Op::Highlights | Op::Tints | Op::Dismissed | Op::Locate { .. } => {} // answered at the end of the batch
+            Op::Dismiss { from, to, key } => {
+                let (f, t) = self.chars(from, to)?;
+                if f == t {
+                    return Err("a Mark with no text to dismiss".into());
+                }
+                self.close_burst(now_ms);
+                let ids = self.doc.chars_at(f, t).iter().map(|id| id.to_string()).collect();
+                self.dismissing.push((key, ids));
+            }
             Op::Stretch { from, to } => {
                 let (f, t) = self.chars(from, to)?;
                 self.close_burst(now_ms);
@@ -1330,30 +1386,30 @@ mod tests {
         storage::save(&w.db, &changes, &phone).unwrap();
     }
 
-    fn marks(state: &WorkState) -> Vec<(usize, usize)> {
-        state.marks.as_ref().expect("asked for")[0].ranges.clone()
+    fn highlights(state: &WorkState) -> Vec<(usize, usize)> {
+        state.highlights.as_ref().expect("asked for")[0].ranges.clone()
     }
 
     #[test]
     fn highlights_come_in_utf16_and_follow_a_move() {
         let (_dir, mut w) = work("a😊bcdef");
         w.doc.comment_local(2, 3, wrtier::change::AUTHOR, "too abrupt?", 500); // "bcd"
-        let state = w.edit(vec![Op::Marks], None, None, 1000).unwrap();
-        assert_eq!(marks(&state), [(3, 6)], "the emoji counts twice");
-        assert_eq!(state.marks.as_ref().unwrap()[0].body, "too abrupt?");
+        let state = w.edit(vec![Op::Highlights], None, None, 1000).unwrap();
+        assert_eq!(highlights(&state), [(3, 6)], "the emoji counts twice");
+        assert_eq!(state.highlights.as_ref().unwrap()[0].body, "too abrupt?");
         // Only asked for: a batch without `Marks` doesn't carry them.
         let before = state.changes;
         let state = w.edit(vec![typing(5, "X")], None, None, 1100).unwrap(); // between "c" and "d", still a draft
-        assert!(state.marks.is_none());
+        assert!(state.highlights.is_none());
         assert_eq!(state.changes, before, "nothing recorded while the burst is open");
-        let state = w.edit(vec![Op::Marks], None, None, 1200).unwrap();
-        assert_eq!(marks(&state), [(3, 7)], "the draft typed inside is covered");
+        let state = w.edit(vec![Op::Highlights], None, None, 1200).unwrap();
+        assert_eq!(highlights(&state), [(3, 7)], "the draft typed inside is covered");
         // Dragging "cd" to the end records a Move: the count goes up, and the Comment is in both places.
         let state = w.edit(vec![Op::Move { from: 4, to: 7, at: 9 }], None, None, 1300).unwrap();
         assert_eq!(w.text(), "a😊befcXd");
         assert!(state.changes > before);
-        let state = w.edit(vec![Op::Marks], None, None, 1400).unwrap();
-        assert_eq!(marks(&state), [(3, 4), (6, 9)]);
+        let state = w.edit(vec![Op::Highlights], None, None, 1400).unwrap();
+        assert_eq!(highlights(&state), [(3, 4), (6, 9)]);
     }
 
     fn comment_op(from: usize, to: usize, sender: &str, body: &str) -> Op {
@@ -1365,11 +1421,11 @@ mod tests {
         let (_dir, mut w) = work("The rain had stopped.");
         w.edit(vec![typing(21, " Then")], None, None, 1000).unwrap(); // a burst is open
         let op = Op::WorkComment { sender: "reviewer/7f3a0001".into(), body: "the ending drags".into(), sender_name: Some("Anna".into()) };
-        let state = w.edit(vec![comment_op(4, 8, wrtier::change::AUTHOR, "too wet?"), op, Op::Marks], None, None, 1100).unwrap();
+        let state = w.edit(vec![comment_op(4, 8, wrtier::change::AUTHOR, "too wet?"), op, Op::Highlights], None, None, 1100).unwrap();
         assert!(state.burst.is_none(), "the burst was recorded first");
-        let marks = state.marks.unwrap();
-        assert_eq!(marks.iter().map(|m| (m.on_work, m.body.as_str())).collect::<Vec<_>>(), [(true, "the ending drags"), (false, "too wet?")]);
-        assert_eq!((marks[0].ranges.as_slice(), marks[0].quote.as_str()), ([].as_slice(), ""));
+        let highlights = state.highlights.unwrap();
+        assert_eq!(highlights.iter().map(|m| (m.on_work, m.body.as_str())).collect::<Vec<_>>(), [(true, "the ending drags"), (false, "too wet?")]);
+        assert_eq!((highlights[0].ranges.as_slice(), highlights[0].quote.as_str()), ([].as_slice(), ""));
         assert_eq!(w.doc.field("reviewer/7f3a0001", "name"), Some("Anna"), "the Reviewer's name was recorded with it");
         let (_, reopened) = storage::load(&w.db, DeviceId(1)).unwrap();
         assert!(reopened.comments()[0].on_work, "saved");
@@ -1379,22 +1435,22 @@ mod tests {
     fn adding_a_comment_closes_the_burst_and_everything_else_is_recorded_too() {
         let (_dir, mut w) = work("The rain had stopped.");
         w.edit(vec![typing(21, " Then")], None, None, 1000).unwrap(); // a burst is open
-        let state = w.edit(vec![comment_op(4, 8, wrtier::change::AUTHOR, "too wet?"), Op::Marks], None, None, 1100).unwrap();
+        let state = w.edit(vec![comment_op(4, 8, wrtier::change::AUTHOR, "too wet?"), Op::Highlights], None, None, 1100).unwrap();
         assert!(state.burst.is_none(), "the burst was recorded first");
-        let mark = state.marks.unwrap().remove(0);
-        assert_eq!((mark.ranges.as_slice(), mark.quote.as_str(), mark.body.as_str()), ([(4, 8)].as_slice(), "rain", "too wet?"));
-        let id = mark.id;
+        let highlight = state.highlights.unwrap().remove(0);
+        assert_eq!((highlight.ranges.as_slice(), highlight.quote.as_str(), highlight.body.as_str()), ([(4, 8)].as_slice(), "rain", "too wet?"));
+        let id = highlight.id;
         let reviewer = Op::Reply { comment: id.clone(), sender: "reviewer/7f3a0001".into(), body: "agreed".into(), sender_name: Some("Anna".into()) };
-        let state = w.edit(vec![reviewer, Op::EditComment { id: id.clone(), body: "far too wet?".into() }, Op::Resolve { id: id.clone(), resolved: true }, Op::Marks], None, None, 1200).unwrap();
-        let mark = state.marks.unwrap().remove(0);
-        assert_eq!((mark.body.as_str(), mark.resolved, mark.replies.len()), ("far too wet?", true, 1));
+        let state = w.edit(vec![reviewer, Op::EditComment { id: id.clone(), body: "far too wet?".into() }, Op::Resolve { id: id.clone(), resolved: true }, Op::Highlights], None, None, 1200).unwrap();
+        let highlight = state.highlights.unwrap().remove(0);
+        assert_eq!((highlight.body.as_str(), highlight.resolved, highlight.replies.len()), ("far too wet?", true, 1));
         assert_eq!(w.doc.field("reviewer/7f3a0001", "name"), Some("Anna"), "the Reviewer's name was recorded with the Reply");
         // Saved: reopening the Work has them.
         let (_, reopened) = storage::load(&w.db, DeviceId(1)).unwrap();
         assert_eq!(reopened.comments()[0].replies.len(), 1);
         // Deleting it takes the Reply along; acting on it afterwards is refused, and undo never touches Comments.
-        let state = w.edit(vec![Op::DeleteComment { id: id.clone() }, Op::Marks], None, None, 1300).unwrap();
-        assert!(state.marks.unwrap().is_empty());
+        let state = w.edit(vec![Op::DeleteComment { id: id.clone() }, Op::Highlights], None, None, 1300).unwrap();
+        assert!(state.highlights.unwrap().is_empty());
         assert!(w.edit(vec![Op::Resolve { id, resolved: false }], None, None, 1400).is_err());
         w.edit(vec![Op::Undo], None, None, 1500).unwrap();
         assert_eq!(w.text(), "The rain had stopped.", "undo took back the typing, not the deletion of the Comment");
@@ -1405,19 +1461,19 @@ mod tests {
     #[test]
     fn a_body_edited_on_two_devices_shows_the_other_version() {
         let (_dir, mut w) = work("abcdef");
-        let state = w.edit(vec![comment_op(1, 4, wrtier::change::AUTHOR, "first"), Op::Marks], None, None, 1000).unwrap();
-        let id = state.marks.unwrap().remove(0).id;
+        let state = w.edit(vec![comment_op(1, 4, wrtier::change::AUTHOR, "first"), Op::Highlights], None, None, 1000).unwrap();
+        let id = state.highlights.unwrap().remove(0).id;
         // The phone edits the body offline; so does this Device.
         let (_, mut phone) = storage::load(&w.db, DeviceId(2)).unwrap();
         w.edit(vec![Op::EditComment { id: id.clone(), body: "the laptop's".into() }], None, None, 3000).unwrap();
         let change = phone.edit_comment_local(id.parse().unwrap(), "the phone's", 2000);
         storage::save(&w.db, &[change], &phone).unwrap(); // Syncthing delivers the phone's copy
         notice_and_sync(&mut w, 4000);
-        let mark = w.edit(vec![Op::Marks], None, None, 5000).unwrap().marks.unwrap().remove(0);
-        assert_eq!((mark.body.as_str(), mark.other_body.as_deref()), ("the laptop's", Some("the phone's")));
+        let highlight = w.edit(vec![Op::Highlights], None, None, 5000).unwrap().highlights.unwrap().remove(0);
+        assert_eq!((highlight.body.as_str(), highlight.other_body.as_deref()), ("the laptop's", Some("the phone's")));
         // Editing it again settles it.
-        let mark = w.edit(vec![Op::EditComment { id, body: "the phone's".into() }, Op::Marks], None, None, 6000).unwrap().marks.unwrap().remove(0);
-        assert_eq!((mark.body.as_str(), mark.other_body), ("the phone's", None));
+        let highlight = w.edit(vec![Op::EditComment { id, body: "the phone's".into() }, Op::Highlights], None, None, 6000).unwrap().highlights.unwrap().remove(0);
+        assert_eq!((highlight.body.as_str(), highlight.other_body), ("the phone's", None));
     }
 
     /// The timer noticed something; the editor sends a `Sync`, as it does when `outside` goes up.

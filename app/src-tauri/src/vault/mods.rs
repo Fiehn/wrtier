@@ -125,6 +125,7 @@ impl Vault {
 
     /// A new Work gets the Mods for new Works, including any this app doesn't know.
     pub(super) fn give_new_work_mods(&mut self, identity: &str, now_ms: u64) -> Result<(), String> {
+        self.give_new_work_mod_settings(identity, now_ms)?;
         let record = work_record(identity);
         let changes: Vec<Change> = self.mods_in(SHARED, NEW_WORK).iter()
             .map(|name| self.vault_doc.set_field_local(&record, name, "on", now_ms))

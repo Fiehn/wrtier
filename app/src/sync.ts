@@ -22,8 +22,10 @@ type Op =
   | { op: "undo" }
   | { op: "redo" }
   | { op: "sync" }
-  | { op: "marks" }
+  | { op: "highlights" }
   | { op: "tints" }
+  | { op: "dismiss"; from: number; to: number; key: string }
+  | { op: "dismissed" }
   | { op: "locate"; first: string; last: string | null }
   | { op: "stretch"; from: number; to: number }
   | { op: "include"; at: number; work: string; chapter: number | null }
@@ -50,8 +52,8 @@ export type CommentOp =
 
 type Patch = { from: number; to: number; insert: string };
 
-/** A Reply, as the Comments panel shows it (work.rs `ReplyMark`). */
-export type ReplyMark = {
+/** A Reply, as the Comments panel shows it (work.rs `CommentReply`). */
+export type CommentReply = {
   id: string;
   sender: string;
   name: string;
@@ -62,8 +64,8 @@ export type ReplyMark = {
   otherBody: string | null;
 };
 
-/** A Comment: its highlight, and what the Comments panel shows (work.rs `Mark`). Positions are UTF-16, in the editor's text. */
-export type Mark = {
+/** A Comment: its highlight, and what the Comments panel shows (work.rs `CommentHighlight`). Positions are UTF-16, in the editor's text. */
+export type CommentHighlight = {
   id: string;
   /** Empty: the Comment is detached, or a Work comment. */
   ranges: [number, number][];
@@ -78,7 +80,7 @@ export type Mark = {
   /** The text it was attached to, as selected; empty for a Work comment. */
   quote: string;
   timeMs: number;
-  replies: ReplyMark[];
+  replies: CommentReply[];
   otherBody: string | null;
 };
 
@@ -113,23 +115,28 @@ export type WorkState = {
   /** How many Merge notices the History tab shows: "History (n)". */
   notices: number;
   /** The Comments' highlights (in the answer to a batch that asked for them). */
-  marks: Mark[] | null;
+  highlights: CommentHighlight[] | null;
   /** The newest Sessions' text (in the answer to a batch that asked for it). */
   tints: Tint[] | null;
   /** Where a `locate`'s characters are (only in the answer to a batch with one); null: not shown any more. */
   located?: [number, number] | null;
   /** The text a "History of this text" picked, quoted (only in the answer to that); null: nothing there. */
   stretch?: string | null;
+  /** Where the Dismissed Marks are (in the answer to a batch that asked for them). */
+  dismissed: DismissedMark[] | null;
 };
+
+/** A Dismissed Mark (ADR 0018, work.rs `DismissedMark`): its "<mod>/<rule>", and where what's left of its characters is. */
+export type DismissedMark = { key: string; ranges: [number, number][] };
 
 export type Whereabouts = { kind: "renamed"; to: string } | { kind: "trashed" } | { kind: "gone" } | { kind: "diverged" };
 
-/** Marks the editor's own changes from Rust, so they aren't sent back. */
+/** Labels the editor's own changes from Rust, so they aren't sent back. */
 export const fromHistory = Annotation.define<boolean>();
 
 /** What a Find and replace action was: its edits go to Rust as one `replace`, which undo takes back whole. */
 export type ReplaceInfo = { find: string; with: string; count: number };
-/** Marks the edits of a Find and replace action (find.ts). */
+/** Labels the edits of a Find and replace action (find.ts). */
 export const replacing = Annotation.define<ReplaceInfo>();
 
 /** Something waiting to be sent. Positions are in the text as it was just before it. */
@@ -139,8 +146,10 @@ type Item =
   | { kind: "undo" }
   | { kind: "redo" }
   | { kind: "sync" }
-  | { kind: "marks" }
+  | { kind: "highlights" }
   | { kind: "tints" }
+  | { kind: "dismiss"; from: number; to: number; key: string }
+  | { kind: "dismissed" }
   | { kind: "comment"; op: CommentOp }
   | { kind: "history"; op: HistoryOp }
   | { kind: "locate"; first: string; last: string | null; answer: (range: [number, number] | null) => void }
@@ -161,9 +170,12 @@ function toOps(item: Item): Op[] {
     case "undo":
     case "redo":
     case "sync":
-    case "marks":
+    case "highlights":
     case "tints":
+    case "dismissed":
       return [{ op: item.kind }];
+    case "dismiss":
+      return [{ op: "dismiss", from: item.from, to: item.to, key: item.key }];
     case "comment":
     case "history":
       return [item.op];
@@ -197,9 +209,11 @@ export type SyncEvents = {
   /** The open burst closed: the editor's undo steps no longer apply. */
   burstClosed(): void;
   /** The Comments' highlights, fitted to the editor's text as it is now. */
-  marks(marks: Mark[]): void;
+  highlights(highlights: CommentHighlight[]): void;
   /** The newest Sessions' text, fitted the same way (an empty list when the switch goes off). */
   tints(tints: Tint[]): void;
+  /** Where the Dismissed Marks are, fitted the same way (only while the editor shows Marks). */
+  dismissed?(dismissed: DismissedMark[]): void;
   /** The History grew (a burst recorded, something taken in, a Revert...): the History tab follows. */
   grew(): void;
   error(message: string): void;
@@ -209,8 +223,8 @@ export type SyncEvents = {
  * Highlights fitted around edits made since Rust worked them out. A highlight doesn't grow at
  * its edges (text typed there is outside it), only when text is typed strictly inside.
  */
-export function fitMarks(marks: Mark[], edits: ChangeSet[]): Mark[] {
-  return marks.map((mark) => ({ ...mark, ranges: fitRanges(mark.ranges, edits) }));
+export function fitHighlights(highlights: CommentHighlight[], edits: ChangeSet[]): CommentHighlight[] {
+  return highlights.map((highlight) => ({ ...highlight, ranges: fitRanges(highlight.ranges, edits) }));
 }
 
 /** The same for the newest Sessions' text. */
@@ -239,6 +253,8 @@ export class WorkSync {
   private changes = -1;
   /** "Colour text by Session" is on: the tints are asked for whenever the History grows. */
   private tinting = false;
+  /** The editor shows Marks: where the Dismissed ones are is asked for whenever the History grows. */
+  private marking = false;
 
   constructor(
     /** The Work's ID; it changes when the Work is renamed. */
@@ -362,9 +378,9 @@ export class WorkSync {
   }
 
   /** Asks for the Comments' highlights (when the tab opens, or a Reviewer's colour changed). */
-  requestMarks() {
-    if (!this.queue.some((item) => item.kind === "marks")) {
-      this.queue.push({ kind: "marks" });
+  requestHighlights() {
+    if (!this.queue.some((item) => item.kind === "highlights")) {
+      this.queue.push({ kind: "highlights" });
       void this.flush();
     }
   }
@@ -384,6 +400,29 @@ export class WorkSync {
     }
   }
 
+  /** The editor shows Marks (some Mod makes them) or stops. On: the Dismissed Marks are asked for now and as the History grows. */
+  setMarking(on: boolean) {
+    if (on === this.marking) return;
+    this.marking = on;
+    if (on) this.requestDismissed();
+    else this.queue = this.queue.filter((item) => item.kind !== "dismissed");
+  }
+
+  /** Asks where the Dismissed Marks are. */
+  requestDismissed() {
+    if (this.marking && !this.queue.some((item) => item.kind === "dismissed")) {
+      this.queue.push({ kind: "dismissed" });
+      void this.flush();
+    }
+  }
+
+  /** The Author dismissed the Mark on `from..to` (ADR 0018): the Vault keeps it, and says where the Dismissed Marks are now. */
+  dismiss(from: number, to: number, key: string) {
+    this.queue = this.queue.filter((item) => item.kind !== "dismissed");
+    this.queue.push({ kind: "dismiss", from, to, key }, { kind: "dismissed" });
+    void this.flush();
+  }
+
   private requestTints() {
     if (this.tinting && !this.queue.some((item) => item.kind === "tints")) {
       this.queue.push({ kind: "tints" });
@@ -398,8 +437,9 @@ export class WorkSync {
   private noteChanges(changes: number) {
     if (changes <= this.changes) return;
     this.changes = changes;
-    this.requestMarks();
+    this.requestHighlights();
     this.requestTints();
+    this.requestDismissed();
     this.events.grew();
   }
 
@@ -463,6 +503,9 @@ export class WorkSync {
           item.pos = patch.mapPos(item.pos);
         } else if (item.kind === "include") {
           item.at = patch.mapPos(item.at, 1);
+        } else if (item.kind === "dismiss") {
+          item.from = patch.mapPos(item.from, 1);
+          item.to = Math.max(item.from, patch.mapPos(item.to, -1));
         } else if (item.kind === "stretch") {
           item.from = patch.mapPos(item.from, 1);
           item.to = patch.mapPos(item.to, -1);
@@ -474,15 +517,19 @@ export class WorkSync {
       this.view.dispatch({ changes: patch, annotations: [fromHistory.of(true), Transaction.addToHistory.of(false)] });
     }
     if (state.len !== expected) throw new Error(`The editor and the History disagree about the text's length (${expected} and ${state.len}).`);
-    if (state.marks) {
+    if (state.highlights) {
       // For the text right after the batch (and its patches): fitted around what was typed since.
       const since = this.queue.flatMap((item) => (item.kind === "edit" ? [item.changes] : []));
-      this.events.marks(fitMarks(state.marks, since));
+      this.events.highlights(fitHighlights(state.highlights, since));
     }
     // An answer that arrives after the switch went off is dropped.
     if (state.tints && this.tinting) {
       const since = this.queue.flatMap((item) => (item.kind === "edit" ? [item.changes] : []));
       this.events.tints(fitTints(state.tints, since));
+    }
+    if (state.dismissed && this.marking) {
+      const since = this.queue.flatMap((item) => (item.kind === "edit" ? [item.changes] : []));
+      this.events.dismissed?.(state.dismissed.map((d) => ({ ...d, ranges: fitRanges(d.ranges, since) })));
     }
     if (items.some((item) => item.kind === "locate")) {
       // Like the highlights: for the text right after the batch, fitted around what was typed since.
@@ -514,8 +561,9 @@ export class WorkSync {
       this.burst = state.burst;
       this.events.burstClosed();
       this.events.state(state);
-      this.requestMarks();
+      this.requestHighlights();
       this.requestTints();
+      this.requestDismissed();
     } catch (e) {
       this.events.error(String(e));
     }

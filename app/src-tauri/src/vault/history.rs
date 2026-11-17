@@ -793,8 +793,8 @@ Gulls grey circled.");
     fn a_comment_body_edited_on_two_devices_stays_on_its_card() {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = rain(dir.path());
-        let state = vault.edit("Rain", vec![Op::Comment { from: 4, to: 8, sender: "author".into(), body: "first".into(), sender_name: None }, Op::Marks], 4000).unwrap();
-        let id = state.marks.unwrap().remove(0).id;
+        let state = vault.edit("Rain", vec![Op::Comment { from: 4, to: 8, sender: "author".into(), body: "first".into(), sender_name: None }, Op::Highlights], 4000).unwrap();
+        let id = state.highlights.unwrap().remove(0).id;
         let db = vault.with_work("Rain", 0, |w, _| Ok(w.db.clone())).unwrap();
         let (_, mut phone) = storage::load(&db, DeviceId(2)).unwrap();
         let phones = phone.edit_comment_local(id.parse().unwrap(), "the phone's", 5000);

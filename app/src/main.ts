@@ -20,7 +20,8 @@ import { browseForVault, ensureFilesAccess, onAndroid } from "./android";
 import { PhoneLayout } from "./phone";
 import { PanelSizes } from "./panelsizes";
 import { fillNewWorkMods, fillVaultMods, openMods } from "./modsdialog";
-import { inUse, modNamed, vaultModInUse, type ModsState } from "./mods";
+import { inUse, modNamed, noSettings, vaultModInUse, type ModContext, type ModSettings, type ModsState } from "./mods";
+import { LEVEL_NAMES, type MarkCounts, type MarkLevel } from "./marks";
 import { ChapterList } from "./chapterlist";
 import { CountLine } from "./countline";
 import { endWorkDrag, startWorkDrag, type ChapterChoice } from "./inclusions";
@@ -263,7 +264,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     openTab("comments");
     commentsPanel.focus(ids);
   },
-  marks: (id) => {
+  highlights: (id) => {
     if (id === tabs.active) commentsPanel.render();
   },
   addComment: (id) => startComment(id),
@@ -274,6 +275,15 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     $("panel-tab-history").textContent = count > 0 ? `History (${count})` : "History";
   },
   modCommand: (id, command) => modCommand(id, command),
+  markMenu: (_id, x, y, items) => showMenu(x, y, items),
+  stopRule: (id, mark) => act(async () => {
+    await invoke("set_mod_setting", { scope: "work", id, key: `${mark.mod}.rule.${mark.rule}`, value: "off" });
+    await refreshMods(id);
+  }),
+  markCounts: (id, counts) => {
+    markCountsOf.set(id, counts);
+    if (id === tabs.active) showMarkCounts();
+  },
   dropWork: (id, work, pos) => act(() => includeChecked(id, work, null, pos)),
   inclusionStyles: (id, at, styles, x, y) => {
     const all = library.items.filter((i) => i.kind === "style");
@@ -304,7 +314,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
 
 const readingPanel = new ReadingPanel({
   tabView: (id) => tabs.viewOf(id),
-  tabMarks: (id) => tabs.marksOf(id),
+  tabHighlights: (id) => tabs.highlightsOf(id),
   elements: async (id, names) => elementInfos(names ?? (await invoke<{ preamble: Preamble }>("get_preamble", { id })).preamble.elements),
   writeIn: (id, at) => act(async () => {
     await openWork(id, at);
@@ -458,8 +468,8 @@ showResolved.addEventListener("change", () => {
 
 const commentsPanel = new CommentsPanel($("comments-list"), $("comments-new"), {
   work: () => (tabs.activeIsWork ? tabs.active : null),
-  marks: (work) => tabs.marksOf(work),
-  includedMarks: (work) => tabs.includedMarksOf(work),
+  highlights: (work) => tabs.highlightsOf(work),
+  includedMarks: (work) => tabs.includedHighlightsOf(work),
   // A Comment may belong to a Work that isn't open (one shown on an Inclusion): then it's
   // changed without opening a tab, and the Inclusions in front follow.
   act: (work, op) => {
@@ -683,26 +693,76 @@ const modsOf = new Map<string, ModsState>();
 /** Is this Mod at work in this Work on this Device? */
 const modInUse = (id: string, mod: string) => inUse(modsOf.get(id) ?? { work: [], newWorks: [], vault: [], hidden: [] }).some((m) => m.id === mod);
 
+/** Each open Work's Mods' settings, and its language, as last asked: what its Mods are told. */
+const modSettingsOf = new Map<string, ModSettings>();
+const languageOf = new Map<string, string>();
+
 function setModsOf(id: string, state: ModsState) {
   modsOf.set(id, state);
-  tabs.setMods(id, inUse(state));
+  tabs.setMods(id, inUse(state), modContext(id));
   if (id === tabs.active) showModViews();
 }
 
-/** Tells each open Work's editor (or just `only`) which Mods are in use in it on this Device. */
+/** What a Work's Mods are told: its language, the settings, and how to change one. */
+function modContext(id: string): ModContext {
+  return {
+    language: languageOf.get(id) ?? "",
+    settings: modSettingsOf.get(id) ?? noSettings(),
+    setSetting: (scope, key, value) => act(async () => {
+      await invoke("set_mod_setting", { scope, id: scope === "work" ? id : null, key, value });
+      await refreshMods(scope === "work" ? id : undefined); // the Vault's settings are every Work's
+    }),
+  };
+}
+
+/** Tells each open Work's editor (or just `only`) which Mods are in use in it on this Device, and what they need to know. */
 async function refreshMods(only?: string) {
   for (const id of tabs.works) {
     if (only && id !== only) continue;
     try {
-      setModsOf(id, await invoke<ModsState>("get_mods", { id }));
+      const [mods, settings, { preamble }] = await Promise.all([
+        invoke<ModsState>("get_mods", { id }),
+        invoke<ModSettings>("get_mod_settings", { id }),
+        invoke<{ preamble: Preamble }>("get_preamble", { id }),
+      ]);
+      modSettingsOf.set(id, settings);
+      languageOf.set(id, preamble.language);
+      setModsOf(id, mods);
     } catch {
       // renamed or gone meanwhile: its tab says so, and the next refresh finds it
     }
   }
 }
 
+// ---- Marks (marks.ts): how many of each kind the Work in front has ----
+
+const markCountsOf = new Map<string, MarkCounts>();
+
+function showMarkCounts() {
+  const el = $("mark-counts");
+  const id = tabs.activeIsWork ? tabs.active : null;
+  const counts = id ? markCountsOf.get(id) : undefined;
+  const levels: MarkLevel[] = ["mistake", "rule", "query"];
+  const shown = levels.filter((l) => (counts?.[l] ?? 0) > 0);
+  el.hidden = !id || shown.length === 0;
+  el.replaceChildren(...shown.map((level) => {
+    const n = counts![level];
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `mark-count mark-count-${level}`;
+    b.textContent = String(n);
+    b.title = `${n} ${LEVEL_NAMES[level]}${n === 1 ? "" : "s"}: go to the next (${keyLabel("nextMark")} goes through every Mark)`;
+    b.addEventListener("click", () => id && tabs.stepMark(id, level));
+    return b;
+  }));
+}
+
 async function editMods(id: string) {
-  await openMods(id, id.split("/").pop() ?? id, (state) => setModsOf(id, state));
+  await openMods(id, id.split("/").pop() ?? id, (state) => setModsOf(id, state), () => {
+    // The Vault's settings (the Speech verbs) are every Work's; Dismissed Marks shown again come back.
+    void refreshMods();
+    tabs.requestDismissed(id);
+  });
   await refreshMods(); // hiding a Mod on this Device changes every Work that has it
 }
 
@@ -761,6 +821,7 @@ function showModViews() {
   const id = tabs.activeIsWork ? tabs.active : null;
   chapterList.show(id && modInUse(id, "chapters") ? id : null);
   countLine.show(id && modInUse(id, "counts") ? id : null);
+  showMarkCounts();
 }
 
 // ---- Inclusions (ADR 0015) ----
@@ -1013,6 +1074,7 @@ async function nameMilestone(id: string) {
 async function preambleChanged(id: string) {
   await refreshElements(id);
   await preview.preambleChanged(id);
+  await refreshMods(id); // its language may have changed (the Dialogue checker is English only)
 }
 
 /** The Story elements the library has, and whether a Work with these of the Author's own has each. */
@@ -2255,7 +2317,7 @@ const settingsDialog = $<HTMLDialogElement>("settings");
 let settingsTab: SettingsTab = "editor";
 
 // The highlights take any new names and colours.
-const reviewersSettings = reviewersTab(confirmAsk, () => tabs.refreshMarks());
+const reviewersSettings = reviewersTab(confirmAsk, () => tabs.refreshHighlights());
 const shortcutsSettings = shortcutsTab<Settings>(settingsDialog, { apply: applySettings, confirm: confirmAsk });
 
 /** The tabs Settings has now: with no Vault open, only App. */

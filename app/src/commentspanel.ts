@@ -6,15 +6,15 @@
 // and drawn again whenever the History changed. A form being filled in survives that.
 
 import { colourOf, type Reviewer } from "./reviewers";
-import type { CommentOp, Mark, ReplyMark } from "./sync";
+import type { CommentOp, CommentHighlight, CommentReply } from "./sync";
 import { keyLabel } from "./keys";
 
 export type CommentsHooks = {
   /** The Work in front, if it's a Work. */
   work(): string | null;
-  marks(work: string): Mark[];
+  highlights(work: string): CommentHighlight[];
   /** The Comments shown on the Work's Inclusions (ADR 0015), by the Work they belong to. */
-  includedMarks(work: string): IncludedMarks[];
+  includedMarks(work: string): IncludedHighlights[];
   /** `work` may be one that isn't open: a Comment shown on an Inclusion belongs to its own Work. */
   act(work: string, op: CommentOp): void;
   /** Adds a Comment on text selected in an Inclusion of `work`: kept in the Work it includes. */
@@ -35,7 +35,7 @@ export type CommentsHooks = {
 };
 
 /** An included Work's Comments shown on one of a Work's Inclusions. */
-export type IncludedMarks = { work: string; label: string; marks: Mark[] };
+export type IncludedHighlights = { work: string; label: string; highlights: CommentHighlight[] };
 
 /** Text selected in an Inclusion: its character, the selection in its text, what it includes (and its Work). */
 export type IncludedTarget = { at: number; from: number; to: number; quote: string; label: string; work: string | null };
@@ -316,9 +316,9 @@ export class CommentsPanel {
     this.focused = new Set(ids);
     const work = this.hooks.work();
     if (work) {
-      if (this.hooks.marks(work).some((m) => this.focused.has(m.id))) this.unfold("text");
+      if (this.hooks.highlights(work).some((m) => this.focused.has(m.id))) this.unfold("text");
       for (const group of this.hooks.includedMarks(work)) {
-        if (group.marks.some((m) => this.focused.has(m.id))) this.unfold(`included:${group.work}`);
+        if (group.highlights.some((m) => this.focused.has(m.id))) this.unfold(`included:${group.work}`);
       }
     }
     this.render();
@@ -357,20 +357,20 @@ export class CommentsPanel {
   render() {
     const work = this.hooks.work();
     if (this.adding && this.adding.work !== work) this.cancelAdding();
-    const marks = work ? this.hooks.marks(work) : [];
+    const highlights = work ? this.hooks.highlights(work) : [];
     const included = work ? this.hooks.includedMarks(work) : [];
-    const everyMark = [...marks, ...included.flatMap((g) => g.marks)];
-    if (this.form && !everyMark.some((m) => m.id === this.form!.comment)) this.form = null;
-    this.hooks.counted(everyMark.filter((m) => !m.resolved).length);
-    const shown = marks.filter((m) => this.hooks.showResolved() || !m.resolved);
+    const everyHighlight = [...highlights, ...included.flatMap((g) => g.highlights)];
+    if (this.form && !everyHighlight.some((m) => m.id === this.form!.comment)) this.form = null;
+    this.hooks.counted(everyHighlight.filter((m) => !m.resolved).length);
+    const shown = highlights.filter((m) => this.hooks.showResolved() || !m.resolved);
     const onWork = shown.filter((m) => m.onWork);
     const attached = shown.filter((m) => !m.onWork && m.ranges.length > 0);
     const detached = shown.filter((m) => !m.onWork && m.ranges.length === 0);
     const children: HTMLElement[] = [];
     // Comments on included text belong to the Work it comes from; acting on one acts there.
     const includedShown = included
-      .map((g) => ({ ...g, marks: g.marks.filter((m) => this.hooks.showResolved() || !m.resolved) }))
-      .filter((g) => g.marks.length > 0);
+      .map((g) => ({ ...g, highlights: g.highlights.filter((m) => this.hooks.showResolved() || !m.resolved) }))
+      .filter((g) => g.highlights.length > 0);
     if (work) {
       const add = button("Comment on this Work", () => void this.startAddingWork(work), "A Comment on the Work as a whole, not on any of its text");
       add.classList.add("comments-on-work-button");
@@ -379,7 +379,7 @@ export class CommentsPanel {
     if (!work) {
       children.push(el("p", "muted", "Open a Work to see its Comments."));
     } else if (shown.length === 0 && includedShown.length === 0) {
-      const resolved = marks.length - shown.length;
+      const resolved = highlights.length - shown.length;
       children.push(el("p", "muted", resolved > 0
         ? `No open Comments (${resolved} resolved).`
         : document.body.classList.contains("phone")
@@ -398,8 +398,8 @@ export class CommentsPanel {
       for (const group of includedShown) {
         children.push(...this.section(`included:${group.work}`, `In ${group.label}`, "comments-included-heading", [
           el("p", "muted comments-included-note", `Kept in ${group.work.split("/").pop()}, and shown there too.`),
-          ...group.marks.map((m) => this.card(group.work, m)),
-        ], group.marks.length));
+          ...group.highlights.map((m) => this.card(group.work, m)),
+        ], group.highlights.length));
       }
       if (detached.length > 0) {
         children.push(...this.section("detached", "Detached", "comments-detached-heading", [
@@ -411,60 +411,60 @@ export class CommentsPanel {
     this.list.replaceChildren(...children);
   }
 
-  private card(work: string, mark: Mark): HTMLElement {
+  private card(work: string, highlight: CommentHighlight): HTMLElement {
     const card = el("article", "comment-card");
-    card.dataset.id = mark.id;
-    card.classList.toggle("resolved", mark.resolved);
-    card.classList.toggle("focused", this.focused.has(mark.id));
-    card.style.setProperty("--sender", mark.colour === "author" ? "var(--comment-author)" : mark.colour === "unknown" ? "var(--comment-unknown)" : colourOf(mark.colour));
+    card.dataset.id = highlight.id;
+    card.classList.toggle("resolved", highlight.resolved);
+    card.classList.toggle("focused", this.focused.has(highlight.id));
+    card.style.setProperty("--sender", highlight.colour === "author" ? "var(--comment-author)" : highlight.colour === "unknown" ? "var(--comment-unknown)" : colourOf(highlight.colour));
 
     const header = el("header");
-    header.append(el("strong", "comment-name", mark.name), el("span", "comment-time", when(mark.timeMs)));
-    if (mark.resolved) header.append(el("span", "comment-state", "Resolved"));
+    header.append(el("strong", "comment-name", highlight.name), el("span", "comment-time", when(highlight.timeMs)));
+    if (highlight.resolved) header.append(el("span", "comment-state", "Resolved"));
     card.append(header);
     // A Work comment has no text to quote.
-    if (!mark.onWork) card.append(el("blockquote", "comment-quote", shorten(mark.quote, 120)));
+    if (!highlight.onWork) card.append(el("blockquote", "comment-quote", shorten(highlight.quote, 120)));
 
-    const editingThis = this.form?.comment === mark.id && this.form.element.dataset.for === mark.id;
+    const editingThis = this.form?.comment === highlight.id && this.form.element.dataset.for === highlight.id;
     if (editingThis) card.append(this.form!.element);
-    else card.append(el("div", "comment-body", mark.body));
-    if (mark.otherBody !== null && !editingThis) card.append(this.conflict(work, mark.id, mark.body, mark.otherBody));
+    else card.append(el("div", "comment-body", highlight.body));
+    if (highlight.otherBody !== null && !editingThis) card.append(this.conflict(work, highlight.id, highlight.body, highlight.otherBody));
 
-    if (mark.replies.length > 0) {
+    if (highlight.replies.length > 0) {
       const replies = el("div", "comment-replies");
-      for (const reply of mark.replies) replies.append(this.reply(work, mark.id, reply));
+      for (const reply of highlight.replies) replies.append(this.reply(work, highlight.id, reply));
       card.append(replies);
     }
 
     const actions = el("div", "comment-actions");
     actions.append(
-      button("Reply", () => void this.openReply(work, mark.id)),
-      button(mark.resolved ? "Reopen" : "Resolve", () => this.hooks.act(work, { op: "resolve", id: mark.id, resolved: !mark.resolved })),
-      button("Edit", () => void this.openEdit(work, mark.id, mark.id, mark.body, mark.sender)),
-      button("Delete", () => this.hooks.act(work, { op: "deleteComment", id: mark.id }), "Delete it and its Replies (the History keeps it, so it can be restored)"),
+      button("Reply", () => void this.openReply(work, highlight.id)),
+      button(highlight.resolved ? "Reopen" : "Resolve", () => this.hooks.act(work, { op: "resolve", id: highlight.id, resolved: !highlight.resolved })),
+      button("Edit", () => void this.openEdit(work, highlight.id, highlight.id, highlight.body, highlight.sender)),
+      button("Delete", () => this.hooks.act(work, { op: "deleteComment", id: highlight.id }), "Delete it and its Replies (the History keeps it, so it can be restored)"),
     );
-    if (mark.ranges.length > 1) {
-      actions.append(button(`Show me (${mark.ranges.length} places)`, () => {
-        const part = (this.parts.get(mark.id) ?? -1) + 1;
-        this.parts.set(mark.id, part);
-        this.hooks.show(work, mark.id, part);
+    if (highlight.ranges.length > 1) {
+      actions.append(button(`Show me (${highlight.ranges.length} places)`, () => {
+        const part = (this.parts.get(highlight.id) ?? -1) + 1;
+        this.parts.set(highlight.id, part);
+        this.hooks.show(work, highlight.id, part);
       }, "Its text was split by a Move: steps through the places it's in"));
     }
     card.append(actions);
     // A Reply being written goes at the bottom of its Comment.
-    if (this.form?.comment === mark.id && this.form.element.dataset.for === `reply:${mark.id}`) card.append(this.form.element);
+    if (this.form?.comment === highlight.id && this.form.element.dataset.for === `reply:${highlight.id}`) card.append(this.form.element);
     // A reply being edited sits in place of the reply (see `reply`).
 
     // Clicking the card selects its text (the first place, if it's in several). Not its buttons
     // or forms: on the phone, showing the text leaves the Comments screen.
     card.addEventListener("click", (e) => {
       if ((e.target as Element).closest("button, input, textarea, select, a, form")) return;
-      if (mark.ranges.length > 0) this.hooks.show(work, mark.id, 0);
+      if (highlight.ranges.length > 0) this.hooks.show(work, highlight.id, 0);
     });
     return card;
   }
 
-  private reply(work: string, comment: string, reply: ReplyMark): HTMLElement {
+  private reply(work: string, comment: string, reply: CommentReply): HTMLElement {
     const row = el("div", "comment-reply");
     row.style.setProperty("--sender", reply.colour === "author" ? "var(--comment-author)" : reply.colour === "unknown" ? "var(--comment-unknown)" : colourOf(reply.colour));
     const header = el("header");

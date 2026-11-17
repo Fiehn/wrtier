@@ -263,9 +263,9 @@ mod tests {
         let sender = reviewer_record(&anna.id);
         vault.open_work("Rain", 1000).unwrap();
         let op = crate::work::Op::Comment { from: 4, to: 8, sender: sender.clone(), body: "too wet?".into(), sender_name: None };
-        let state = vault.edit("Rain", vec![op, crate::work::Op::Marks], 2000).unwrap();
-        let mark = state.marks.unwrap().remove(0);
-        assert_eq!((mark.name.as_str(), mark.colour.as_str()), ("Anna", "teal"));
+        let state = vault.edit("Rain", vec![op, crate::work::Op::Highlights], 2000).unwrap();
+        let highlight = state.highlights.unwrap().remove(0);
+        assert_eq!((highlight.name.as_str(), highlight.colour.as_str()), ("Anna", "teal"));
         assert_eq!(vault.works["Rain"].doc.field(&sender, "name"), Some("Anna"));
     }
 

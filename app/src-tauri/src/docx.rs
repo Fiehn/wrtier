@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::preamble::{ElementForm, Header, HEADER_END};
 use crate::typeset::TextLine;
 use crate::vault::Made;
-use crate::work::Mark;
+use crate::work::CommentHighlight;
 
 /// What a Story element's `.docx:` line may say. With no line, its text is paragraphs in a
 /// style of its own, named after it.
@@ -100,7 +100,7 @@ pub fn seed(ident: &str) -> u64 {
 
 /// The Comments as Word comments, under their senders' names; `shift`: how far the body is
 /// into the compiled source (the header's length).
-pub fn comments(found: Vec<(Mark, Vec<Range<usize>>)>, shift: usize) -> Vec<Comment> {
+pub fn comments(found: Vec<(CommentHighlight, Vec<Range<usize>>)>, shift: usize) -> Vec<Comment> {
     found.into_iter().map(|(m, ranges)| Comment {
         author: m.name.clone(),
         initials: initials(&m.name),

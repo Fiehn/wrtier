@@ -9,40 +9,40 @@
 
 import { StateEffect, StateField, RangeSetBuilder, type Extension } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, hoverTooltip } from "@codemirror/view";
-import type { Mark } from "./sync";
+import type { CommentHighlight } from "./sync";
 
 /** New highlights from Rust, fitted to the editor's text. */
-export const setMarks = StateEffect.define<Mark[]>();
+export const setHighlights = StateEffect.define<CommentHighlight[]>();
 
 /** What's shown: the highlights at all (a Vault setting), and resolved Comments' (Device state). */
 export type CommentOptions = { highlights: boolean; resolved: boolean };
 
-type Marks = {
+type Highlights = {
   /** Every Comment's details, by ID (their ranges are in `deco`, which follows the typing). */
-  byId: Map<string, Mark>;
+  byId: Map<string, CommentHighlight>;
   deco: DecorationSet;
 };
 
-function build(marks: Mark[]): Marks {
+function build(highlights: CommentHighlight[]): Highlights {
   const all: { from: number; to: number; deco: Decoration }[] = [];
-  for (const mark of marks) {
+  for (const highlight of highlights) {
     const deco = Decoration.mark({
-      class: `cm-comment cm-comment-${mark.colour}${mark.resolved ? " cm-comment-resolved" : ""}`,
-      attributes: { "data-comment": mark.id },
-      comment: mark.id,
+      class: `cm-comment cm-comment-${highlight.colour}${highlight.resolved ? " cm-comment-resolved" : ""}`,
+      attributes: { "data-comment": highlight.id },
+      comment: highlight.id,
     });
-    for (const [from, to] of mark.ranges) all.push({ from, to, deco });
+    for (const [from, to] of highlight.ranges) all.push({ from, to, deco });
   }
   all.sort((a, b) => a.from - b.from || a.to - b.to);
   const builder = new RangeSetBuilder<Decoration>();
   for (const { from, to, deco } of all) builder.add(from, to, deco);
-  return { byId: new Map(marks.map((m) => [m.id, m])), deco: builder.finish() };
+  return { byId: new Map(highlights.map((m) => [m.id, m])), deco: builder.finish() };
 }
 
-const marksField = StateField.define<Marks>({
+const marksField = StateField.define<Highlights>({
   create: () => ({ byId: new Map(), deco: Decoration.none }),
   update(value, tr) {
-    for (const effect of tr.effects) if (effect.is(setMarks)) return build(effect.value);
+    for (const effect of tr.effects) if (effect.is(setHighlights)) return build(effect.value);
     return tr.docChanged ? { byId: value.byId, deco: value.deco.map(tr.changes) } : value;
   },
   provide: (field) => EditorView.decorations.from(field, (value) => value.deco),
@@ -86,14 +86,14 @@ export function pendingRange(view: EditorView): { from: number; to: number } | n
 }
 
 /** The Comments whose highlight is at `pos` and showing, in the order their text starts. */
-export function commentsAt(view: EditorView, pos: number, options: CommentOptions): Mark[] {
+export function commentsAt(view: EditorView, pos: number, options: CommentOptions): CommentHighlight[] {
   if (!options.highlights) return [];
   const { byId, deco } = view.state.field(marksField);
-  const found: Mark[] = [];
+  const found: CommentHighlight[] = [];
   deco.between(pos, pos, (from, to, value) => {
-    const mark = byId.get(value.spec.comment as string);
+    const highlight = byId.get(value.spec.comment as string);
     // Strictly inside, or at the start (the character after `pos` is in it).
-    if (mark && from <= pos && pos < to && (options.resolved || !mark.resolved) && !found.includes(mark)) found.push(mark);
+    if (highlight && from <= pos && pos < to && (options.resolved || !highlight.resolved) && !found.includes(highlight)) found.push(highlight);
   });
   return found;
 }
@@ -113,20 +113,20 @@ export function commentHighlights(options: () => CommentOptions, clicked: (ids: 
   const tips = hoverTooltip((view, pos, side) => {
     // The character the mouse is over: after `pos` on its right half, before it on its left.
     const at = side < 0 ? pos - 1 : pos;
-    const marks = commentsAt(view, at, options());
-    if (marks.length === 0) return null;
+    const highlights = commentsAt(view, at, options());
+    if (highlights.length === 0) return null;
     return {
       pos: at,
       above: true,
       create: () => {
         const dom = document.createElement("div");
         dom.className = "cm-comment-tooltip";
-        for (const mark of marks) {
+        for (const highlight of highlights) {
           const row = document.createElement("div");
           const who = document.createElement("strong");
-          who.textContent = mark.name;
-          who.className = `comment-sender comment-sender-${mark.colour}`;
-          row.append(who, document.createTextNode(` ${preview(mark.body)}`));
+          who.textContent = highlight.name;
+          who.className = `comment-sender comment-sender-${highlight.colour}`;
+          row.append(who, document.createTextNode(` ${preview(highlight.body)}`));
           dom.append(row);
         }
         return { dom };

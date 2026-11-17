@@ -283,6 +283,29 @@ impl Doc {
         list
     }
 
+    /// Where each of these characters is in the text the Author sees (open burst included), for
+    /// those still shown, in reading order. (A Dismissed Mark's characters, ADR 0018.)
+    pub fn shown_indexes(&self, ids: &[CharId]) -> Vec<usize> {
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let shown = self.shown_positions();
+        let mut found: Vec<usize> = ids.iter()
+            .filter_map(|&id| self.tree.index_of(id).map(|n| shown[n as usize]).filter(|&p| p != super::NOT_SHOWN))
+            .map(|p| p as usize)
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
+    /// The characters at `from..to` in the History's text, which must have no open burst (its
+    /// draft has no characters yet).
+    pub fn chars_at(&self, from: usize, to: usize) -> Vec<CharId> {
+        debug_assert!(self.burst.is_none(), "close the burst first");
+        let to = to.min(self.visible.len());
+        self.visible[from.min(to)..to].iter().map(|&node| self.tree.id_of(node)).collect()
+    }
+
     /// Where these characters are in the text the Author sees (open burst included): from the
     /// first to just after the last, or (no last) the empty range just before the first. None
     /// if the first isn't shown any more.

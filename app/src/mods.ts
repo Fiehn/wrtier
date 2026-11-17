@@ -8,6 +8,7 @@
 
 import type { Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { dialogueChecker, dialogueSettings } from "./dialoguemod";
 
 export type Mod = {
   /** How it's stored: never change one once it has shipped. */
@@ -16,8 +17,32 @@ export type Mod = {
   /** One line saying what it does. */
   about: string;
   /** What it adds to a Work's editor while the Work has it. */
-  editor?: () => Extension;
+  editor?: (ctx: ModContext) => Extension;
+  /** It makes Marks (marks.ts): the editor asks the Vault where its Dismissed ones are. */
+  marks?: boolean;
+  /** Its own part of the Mods dialog (`scope` "work") and of the Mods for new Works ("newWorks"). */
+  settings?: (settings: ModSettings, scope: "work" | "newWorks", save: (scope: "vault" | "work" | "newWorks", key: string, value: string) => void) => HTMLElement;
 };
+
+/** Mods' own settings (vault/marks.rs `ModSettings`): each "<mod>.<name>" with its value. */
+export type ModSettings = {
+  vault: Record<string, string>;
+  work: Record<string, string>;
+  newWorks: Record<string, string>;
+  /** How many Marks each Mod has dismissed in the Work. */
+  dismissed: Record<string, number>;
+};
+
+/** What a Mod's editor part knows about the Work: its language, the Mods' settings, and how to change one. */
+export type ModContext = {
+  /** The Work's language from its Preamble ("" is Typst's default, English). */
+  language: string;
+  settings: ModSettings;
+  /** Sets a Mod's setting ("" unsets it) for the Vault, this Work, or new Works; the editor follows. */
+  setSetting(scope: "vault" | "work" | "newWorks", key: string, value: string): void;
+};
+
+export const noSettings = (): ModSettings => ({ vault: {}, work: {}, newWorks: {}, dismissed: {} });
 
 export const MODS: Mod[] = [
   {
@@ -36,6 +61,14 @@ export const MODS: Mod[] = [
     about: "Underlines misspelt words, using this device's own spellchecker and its language. Right-click a word for suggestions.",
     // The editor turns the platform's spellcheck off; this turns it back on.
     editor: () => EditorView.contentAttributes.of({ spellcheck: "true" }),
+  },
+  {
+    id: "dialogue",
+    name: "Dialogue checker",
+    about: "Marks dialogue that breaks the rules of English dialogue punctuation and paragraphing, and offers to put it right: yellow for a rule broken, blue for one to check. Hover or click a Mark, or press F8 to go from one to the next. English Works only.",
+    editor: (ctx) => dialogueChecker(ctx),
+    marks: true,
+    settings: dialogueSettings,
   },
 ];
 
@@ -79,6 +112,9 @@ export function vaultModInUse(state: ModsState, id: string): boolean {
 }
 
 /** What a Work's Mods add to its editor. */
-export function modExtensions(mods: Mod[]): Extension {
-  return mods.flatMap((m) => (m.editor ? [m.editor()] : []));
+export function modExtensions(mods: Mod[], ctx: ModContext): Extension {
+  return mods.flatMap((m) => (m.editor ? [m.editor(ctx)] : []));
 }
+
+/** Do any of these Mods make Marks? */
+export const makesMarks = (mods: Mod[]) => mods.some((m) => m.marks);

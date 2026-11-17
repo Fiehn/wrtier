@@ -21,7 +21,7 @@ use wrtier::storage;
 use wrtier::text_file::{inclusion_block, parse_version, version_text};
 use crate::library::Kind;
 use crate::preamble::{self, Preamble, Shelf, Version};
-use crate::work::{Mark, Op, OpenWork};
+use crate::work::{CommentHighlight, Op, OpenWork};
 use super::{err, file_stamp, walk_works, Vault};
 
 /// A Work's version: the highest Change counter it holds from each Device.
@@ -120,7 +120,7 @@ pub struct Shown {
     /// (start in `plain`, start in the included Work's `committed_text`, length), in characters.
     pub runs: Vec<(usize, usize, usize)>,
     /// The included Work's Comments on that text, ranges in `plain` (UTF-16); names left to fill in.
-    pub comments: Vec<Mark>,
+    pub comments: Vec<CommentHighlight>,
     /// Where the included Work's own text is in `typst`: runs of (start in `plain`, start in
     /// `typst`, length), in UTF-16, so a `.docx` can put its Comments where the text came out.
     pub in_typst: Vec<(usize, usize, usize)>,
@@ -360,7 +360,7 @@ fn committed_at(doc: &Doc, at: usize) -> usize {
 
 /// The included Work's Comments on its own text in `plain` (`runs` says where that is), with
 /// their ranges in `plain` (UTF-16). A Comment none of whose text is shown there is left out.
-pub(super) fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]) -> Vec<Mark> {
+pub(super) fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]) -> Vec<CommentHighlight> {
     let comments = doc.comments();
     if comments.is_empty() || runs.is_empty() {
         return Vec::new();
@@ -390,10 +390,10 @@ pub(super) fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]
             return None;
         }
         let id = c.id.to_string();
-        Some(crate::work::Mark {
+        Some(crate::work::CommentHighlight {
             id, ranges, on_work: false, sender: c.sender, name: String::new(), colour: String::new(), body: c.body,
             resolved: c.resolved, quote: c.quote, time_ms: c.hlc.0, other_body: None,
-            replies: c.replies.into_iter().map(|r| crate::work::ReplyMark {
+            replies: c.replies.into_iter().map(|r| crate::work::CommentReply {
                 id: r.id.to_string(), sender: r.sender, name: String::new(), colour: String::new(),
                 body: r.body, time_ms: r.hlc.0, other_body: None,
             }).collect(),
@@ -520,7 +520,7 @@ pub fn expansions(shown: &[Shown]) -> storage::Expansions {
 /// included text (`Shown::comments`), wherever that text came out. A Work comment has no
 /// ranges; a Comment on text that isn't in the body (a missing Inclusion's) has none either,
 /// and is left out.
-pub fn comments_in_body(text: &str, shown: &[Shown], own: Vec<Mark>) -> Vec<(Mark, Vec<std::ops::Range<usize>>)> {
+pub fn comments_in_body(text: &str, shown: &[Shown], own: Vec<CommentHighlight>) -> Vec<(CommentHighlight, Vec<std::ops::Range<usize>>)> {
     let (body, blocks) = typst_body(text, shown);
     // UTF-16 position in the body → byte, for every position (an Export's worth of memory).
     let mut byte_at: Vec<usize> = Vec::with_capacity(body.len() + 1);
@@ -532,9 +532,9 @@ pub fn comments_in_body(text: &str, shown: &[Shown], own: Vec<Mark>) -> Vec<(Mar
     // A place in `text` (UTF-16) → in the body: each block before it is longer than its one character.
     let in_body = |at: usize| at + blocks.iter().filter(|(b, _)| *b < at).map(|(_, len)| len - 1).sum::<usize>();
     let mut out = Vec::new();
-    for mark in own {
-        let ranges = mark.ranges.iter().map(|&(from, to)| byte(in_body(from))..byte(in_body(to))).collect();
-        out.push((mark, ranges));
+    for highlight in own {
+        let ranges = highlight.ranges.iter().map(|&(from, to)| byte(in_body(from))..byte(in_body(to))).collect();
+        out.push((highlight, ranges));
     }
     for (s, (at, _)) in shown.iter().zip(&blocks) {
         if s.missing.is_some() {
@@ -547,12 +547,12 @@ pub fn comments_in_body(text: &str, shown: &[Shown], own: Vec<Mark>) -> Vec<(Mar
         let place = |p: usize, end: bool| s.in_typst.iter()
             .find(|(from, _, len)| if end { p > *from && p <= from + len } else { p >= *from && p < from + len })
             .map(|(from, t, _)| t + (p - from));
-        for mark in &s.comments {
-            let ranges: Vec<_> = mark.ranges.iter()
+        for highlight in &s.comments {
+            let ranges: Vec<_> = highlight.ranges.iter()
                 .filter_map(|&(from, to)| Some(byte(typst_start + place(from, false)?)..byte(typst_start + place(to, true)?)))
                 .collect();
             if !ranges.is_empty() {
-                out.push((mark.clone(), ranges));
+                out.push((highlight.clone(), ranges));
             }
         }
     }
@@ -579,7 +579,7 @@ pub struct InclusionView {
     pub starts: usize,
     /// The included Work's Comments on its text here, ranges in `text` (UTF-16): they belong to that
     /// Work, and show in both.
-    pub comments: Vec<Mark>,
+    pub comments: Vec<CommentHighlight>,
     /// A new Chapter found right after the included one (see `Target::next`), if one.
     pub split: Option<SplitNote>,
     /// Styles given to this Inclusion only.
@@ -794,9 +794,9 @@ impl Vault {
         let mut shown = self.shown_in(id, false)?;
         for s in &mut shown {
             let author = &s.author;
-            for mark in &mut s.comments {
-                (mark.name, mark.colour) = self.included_sender(author, &mark.sender);
-                for reply in &mut mark.replies {
+            for highlight in &mut s.comments {
+                (highlight.name, highlight.colour) = self.included_sender(author, &highlight.sender);
+                for reply in &mut highlight.replies {
                     (reply.name, reply.colour) = self.included_sender(author, &reply.sender);
                 }
             }
@@ -1265,10 +1265,10 @@ mod tests {
         assert!(storage::load(&dir.path().join("Collected.db"), crate::vault::tests_support::ME).unwrap().1.comments().is_empty());
         // Shown on the Inclusion, where it is in the included text.
         let views = v.inclusions("Collected").unwrap();
-        let mark = &views[0].comments[0];
-        assert_eq!((mark.ranges.clone(), mark.name.as_str(), mark.colour.as_str()), (vec![(from, from + 8)], "Author", "author"));
+        let highlight = &views[0].comments[0];
+        assert_eq!((highlight.ranges.clone(), highlight.name.as_str(), highlight.colour.as_str()), (vec![(from, from + 8)], "Author", "author"));
         // Replied to from "Collected": also kept in "Rain".
-        let reply = Op::Reply { comment: mark.id.clone(), sender: "author".into(), body: "Leave it.".into(), sender_name: None };
+        let reply = Op::Reply { comment: highlight.id.clone(), sender: "author".into(), body: "Leave it.".into(), sender_name: None };
         v.comment_in("Rain", vec![reply], 13_000).unwrap();
         assert_eq!(v.inclusions("Collected").unwrap()[0].comments[0].replies[0].body, "Leave it.");
         // A Comment made in "Rain" itself shows on the Inclusion too, and one outside it doesn't.
@@ -1343,8 +1343,8 @@ mod tests {
         let comment = |from: usize, to: usize, body: &str| Op::Comment { from, to, sender: "author".into(), body: body.into(), sender_name: None };
         v.edit("Collected", vec![comment(3, 15, "Shorter?"), comment(0, 2, "Done.")], 12_100).unwrap();
         v.edit("Collected", vec![Op::WorkComment { sender: "author".into(), body: "Whole thing.".into(), sender_name: None }], 12_200).unwrap();
-        let marks = v.works["Collected"].marks();
-        let id = |body: &str| marks.iter().find(|m| m.body == body).unwrap().id.clone();
+        let highlights = v.works["Collected"].highlights();
+        let id = |body: &str| highlights.iter().find(|m| m.body == body).unwrap().id.clone();
         v.edit("Collected", vec![Op::Reply { comment: id("Shorter?"), sender: "author".into(), body: "No.".into(), sender_name: None }], 12_300).unwrap();
         v.edit("Collected", vec![Op::Resolve { id: id("Done."), resolved: true }], 12_400).unwrap();
         // In "Rain", which it includes, after a Chapter heading of its own.

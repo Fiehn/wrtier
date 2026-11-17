@@ -12,7 +12,7 @@
 
 use super::inclusions::{comments_in, expand, views, Ctx, Located};
 use super::*;
-use crate::work::Mark;
+use crate::work::CommentHighlight;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ pub enum Reading {
         text: String,
         inclusions: Vec<InclusionView>,
         /// Its Comments on its own text (not Detached ones, nor Work comments), ranges in `text`.
-        marks: Vec<Mark>,
+        highlights: Vec<CommentHighlight>,
         /// The Author's own Story elements it has (its Preamble's).
         elements: Vec<String>,
     },
@@ -120,7 +120,7 @@ impl Vault {
             (Found::Unreadable(reason), _) | (_, Loaded::Unreadable(reason)) => return unreadable(reason),
             (Found::TextFile(_), Loaded::Text(text)) => Reading::Text {
                 id: id.clone(), name: name.clone(), identity: None, stamp: String::new(), text,
-                inclusions: Vec::new(), marks: Vec::new(), elements: Vec::new(),
+                inclusions: Vec::new(), highlights: Vec::new(), elements: Vec::new(),
             },
             (Found::History { located, .. }, loaded) => {
                 if let Loaded::Doc(stamp, doc) = loaded {
@@ -133,16 +133,16 @@ impl Vault {
             }
             (Found::TextFile(_), _) => return unreadable(format!("{name} can't be read right now.")),
         };
-        let Reading::Text { id, name, identity, text, inclusions, marks, elements, .. } = reading else { return reading };
+        let Reading::Text { id, name, identity, text, inclusions, highlights, elements, .. } = reading else { return reading };
         // The stamp is what's shown, so anything that changes it (the included Works, a
         // Reviewer's name) is sent again, and nothing else is.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        serde_json::to_string(&(&id, &text, &inclusions, &marks, &elements)).unwrap_or_default().hash(&mut hasher);
+        serde_json::to_string(&(&id, &text, &inclusions, &highlights, &elements)).unwrap_or_default().hash(&mut hasher);
         let stamp = format!("{:016x}", hasher.finish());
         if known == Some(stamp.as_str()) {
             return Reading::Unchanged;
         }
-        Reading::Text { id, name, identity, stamp, text, inclusions, marks, elements }
+        Reading::Text { id, name, identity, stamp, text, inclusions, highlights, elements }
     }
 
     /// A History's text, Inclusions, Comments and Story elements (it's in the cache, or open).
@@ -177,18 +177,18 @@ impl Vault {
         // As the Work in front shows them: its own text without the open burst of a tab.
         let text = doc.committed_text();
         let length = text.chars().count();
-        let mut marks = comments_in(doc, &text, &[(0, 0, length)]);
-        for mark in &mut marks {
-            (mark.name, mark.colour) = self.sender_label(doc, &mark.sender);
-            for reply in &mut mark.replies {
+        let mut highlights = comments_in(doc, &text, &[(0, 0, length)]);
+        for highlight in &mut highlights {
+            (highlight.name, highlight.colour) = self.sender_label(doc, &highlight.sender);
+            for reply in &mut highlight.replies {
                 (reply.name, reply.colour) = self.sender_label(doc, &reply.sender);
             }
         }
         for s in &mut shown {
             let author = s.author.clone();
-            for mark in &mut s.comments {
-                (mark.name, mark.colour) = self.included_sender(&author, &mark.sender);
-                for reply in &mut mark.replies {
+            for highlight in &mut s.comments {
+                (highlight.name, highlight.colour) = self.included_sender(&author, &highlight.sender);
+                for reply in &mut highlight.replies {
                     (reply.name, reply.colour) = self.included_sender(&author, &reply.sender);
                 }
             }
@@ -197,7 +197,7 @@ impl Vault {
         Ok(Reading::Text {
             id: located.id.clone(), name, identity, stamp: String::new(),
             inclusions: views(&text, &shown),
-            marks,
+            highlights,
             elements: Preamble::of(doc).elements,
             text,
         })
@@ -355,12 +355,12 @@ mod tests {
         vault.edit("House", vec![Op::Comment { from: 0, to: 6, sender: "author".into(), body: "Who is he?".into(), sender_name: None }], 2002).unwrap();
         vault.close_work("House", 2003);
 
-        let Reading::Text { text, inclusions, marks, .. } = read(&mut vault, "House", None, None) else { panic!("not read") };
+        let Reading::Text { text, inclusions, highlights, .. } = read(&mut vault, "House", None, None) else { panic!("not read") };
         assert_eq!(text, format!("Truant writes.\n{INCLUSION}"));
         assert_eq!(inclusions.len(), 1);
         assert_eq!((inclusions[0].at, inclusions[0].text.as_str()), (15, "The Navidson Record."));
-        assert_eq!(marks.len(), 1);
-        assert_eq!((marks[0].ranges.clone(), marks[0].body.as_str(), marks[0].name.as_str()), (vec![(0, 6)], "Who is he?", "Author"));
+        assert_eq!(highlights.len(), 1);
+        assert_eq!((highlights[0].ranges.clone(), highlights[0].body.as_str(), highlights[0].name.as_str()), (vec![(0, 6)], "Who is he?", "Author"));
     }
 
     #[test]
