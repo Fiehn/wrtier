@@ -1706,9 +1706,15 @@ dialog#settings[open] {
 .settings-tabs {
   display: flex;
   flex: none;
-  overflow-x: auto; /* sideways on a narrow screen, never on two lines */
+  /* Sideways on a narrow screen, never on two lines; never up and down. The row's line is drawn
+     inside it, under the selected tab's, so nothing reaches past its edge to scroll. */
+  overflow-x: auto;
+  overflow-y: hidden;
   white-space: nowrap;
-  border-bottom: 1px solid var(--line);
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+.settings-tabs [role="tab"] {
+  margin-bottom: 0;
 }
 
 .settings-tabs[hidden] {
