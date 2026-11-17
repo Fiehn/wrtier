@@ -38,7 +38,7 @@ export type Finding = {
 
 /** The rules, by the names they're stored under. Never change one once it has shipped. */
 export const RULES = [
-  { id: "period-before-tag", level: "rule", about: "Dialogue before a tag ends with a comma, not a period.", example: "\"Hi,\" she said." },
+  { id: "comma-before-tag", level: "rule", about: "Dialogue before a tag ends with a comma: not a period, and not nothing.", example: "\"Hi,\" she said." },
   { id: "capital-tag", level: "rule", about: "A tag after dialogue starts in lowercase.", example: "\"Hi,\" she said." },
   { id: "capital-tag-after-mark", level: "rule", about: "A tag stays lowercase after a question or exclamation mark.", example: "\"Stop!\" he shouted." },
   { id: "tag-before-dialogue", level: "rule", about: "A tag before dialogue ends with a comma, and the dialogue starts with a capital.", example: "She said, \"Hi.\"" },
@@ -555,9 +555,19 @@ function checkParagraph(p: Para, next: Para | null, c: Checker, out: Finding[]) 
         const edits: ReadEdit[] = [{ at: lastAt!, to: lastAt! + 1, insert: "," }];
         if (capital === true) edits.push(recase(fw));
         const sure = !isUpper(fw.text[0]);
-        find("period-before-tag", sure ? "rule" : "query", lastAt!, lastAt! + 1,
+        find("comma-before-tag", sure ? "rule" : "query", lastAt!, lastAt! + 1,
           sure ? "Dialogue before a tag ends with a comma, not a period: the tag is part of the same sentence."
             : "If this is a tag, the dialogue before it ends with a comma, and the tag starts in lowercase.", [edits], after.verb);
+      } else if (lastAt !== null && !DIALOGUE_END.test(last) && !/[;:]/.test(last)) {
+        // ---- "hey dudes" He said. No punctuation at all: a comma goes in, and the tag goes lowercase. ----
+        const comma: ReadEdit = { at: lastAt + 1, to: lastAt + 1, insert: "," };
+        const suggestions = [capital === true ? [comma, recase(fw)] : [comma]];
+        if (capital === null) suggestions.push([comma, recase(fw)]);
+        find("comma-before-tag", "rule", close, close + 1,
+          capital === false || capital === null
+            ? "Dialogue before a tag ends with a comma: the tag is part of the same sentence."
+            : "Dialogue before a tag ends with a comma, and the tag starts in lowercase: it's part of the same sentence.",
+          suggestions, after.verb);
       } else if (capital !== false && /[,?!…—–-]/.test(last)) {
         // ---- "Hi," She said. / "Stop!" He shouted. ----
         const mark = last === "?" || last === "!";
@@ -594,6 +604,12 @@ function checkParagraph(p: Para, next: Para | null, c: Checker, out: Finding[]) 
         if (isLower(fw.text[0])) edits.push(recase(fw));
         find("action-as-tag", "query", lastAt!, lastAt! + 1,
           `“${after.verb.text}” isn't a Speech verb, so this reads as an Action beat: a sentence of its own.`, [edits], after.verb);
+      } else if (lastAt !== null && !DIALOGUE_END.test(last) && !/[;:]/.test(last)) {
+        // ---- "Hi" she nodded. No punctuation: a period, and the beat starts a sentence. ----
+        const edits: ReadEdit[] = [{ at: lastAt + 1, to: lastAt + 1, insert: "." }];
+        if (isLower(fw.text[0])) edits.push(recase(fw));
+        find("action-as-tag", "query", close, close + 1,
+          `“${after.verb.text}” isn't a Speech verb, so this reads as an Action beat: the dialogue ends with a period, and the beat is a sentence of its own.`, [edits], after.verb);
       } else if ((last === "?" || last === "!") && isLower(fw.text[0])) {
         find("action-as-tag", "query", fw.at, fw.end,
           `“${after.verb.text}” isn't a Speech verb, so this reads as an Action beat: a sentence of its own, with a capital.`, [[recase(fw)]], after.verb);

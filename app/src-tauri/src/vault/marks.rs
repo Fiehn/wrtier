@@ -176,8 +176,8 @@ mod tests {
         vault.edit("Rain", vec![Op::Type { from: 0, to: 0, text: "\"Hi.\" she said.".into(), origin: Default::default() }], 2000).unwrap();
         let changes = vault.works["Rain"].doc.change_count();
         // The period, typed in the burst still open: it closes, so the period has an ID.
-        let state = vault.edit("Rain", vec![Op::Dismiss { from: 3, to: 4, key: "dialogue/period-before-tag".into() }, Op::Dismissed], 3000).unwrap();
-        assert_eq!(state.dismissed.unwrap(), vec![DismissedMark { key: "dialogue/period-before-tag".into(), ranges: vec![(3, 4)] }]);
+        let state = vault.edit("Rain", vec![Op::Dismiss { from: 3, to: 4, key: "dialogue/comma-before-tag".into() }, Op::Dismissed], 3000).unwrap();
+        assert_eq!(state.dismissed.unwrap(), vec![DismissedMark { key: "dialogue/comma-before-tag".into(), ranges: vec![(3, 4)] }]);
         assert!(vault.works["Rain"].doc.change_count() <= changes + 1, "only the burst closing is recorded");
         assert_eq!(vault.mod_settings(Some("Rain")).unwrap().dismissed, BTreeMap::from([("dialogue".to_string(), 1)]));
         // Text typed before it: it moves along.

@@ -30,7 +30,7 @@ describe("a period before a tag", () => {
   it("becomes a comma", () => {
     const text = '"Hi." she said.';
     const f = one(text);
-    expect([f.rule, f.level, marked(text, f), f.verb]).toEqual(["period-before-tag", "rule", ".", "said"]);
+    expect([f.rule, f.level, marked(text, f), f.verb]).toEqual(["comma-before-tag", "rule", ".", "said"]);
     expect(accept(text, f)).toBe('"Hi," she said.');
     expect(f.suggestions[0].label).toBe('"Hi," she said.');
   });
@@ -40,6 +40,20 @@ describe("a period before a tag", () => {
     expect(f.level).toBe("query");
     expect(accept(text, f)).toBe('"Hi," she said.');
     expect(one('"Hello." The man said nothing.').level).toBe("query");
+  });
+  it("and dialogue with no punctuation before its tag gets the comma", () => {
+    const text = 'Obligatory text here, "hey dudes" He said.';
+    const f = one(text);
+    expect([f.rule, f.level, marked(text, f), f.verb]).toEqual(["comma-before-tag", "rule", '"', "said"]);
+    expect(accept(text, f)).toBe('Obligatory text here, "hey dudes," he said.');
+    expect(accept('"Hi" she said.', one('"Hi" she said.'))).toBe('"Hi," she said.');
+    expect(accept('I saw Anna.\n\n"Hi" Anna said.', one('I saw Anna.\n\n"Hi" Anna said.'))).toBe('I saw Anna.\n\n"Hi," Anna said.');
+  });
+  it("and an Action beat after dialogue with no punctuation is a sentence of its own", () => {
+    const text = '"Hi" she nodded.';
+    const f = one(text);
+    expect([f.rule, f.level]).toEqual(["action-as-tag", "query"]);
+    expect(accept(text, f)).toBe('"Hi." She nodded.');
   });
   it("but not before an Action beat", () => {
     expect(rules('"Hi." She nodded.')).toEqual([]);
@@ -185,7 +199,7 @@ describe("reading through markup", () => {
     expect(rules('`"Hi." she said.`')).toEqual([]);
   });
   it("reads curly quotes too", () => {
-    expect(rules("“Hi.” she said.")).toEqual(["period-before-tag"]);
+    expect(rules("“Hi.” she said.")).toEqual(["comma-before-tag"]);
   });
   it("leaves apostrophes alone", () => {
     expect(rules("\"Don't,\" she said. \"It's 'fine,' she says.\"")).toEqual([]);
@@ -195,7 +209,7 @@ describe("reading through markup", () => {
 describe("rules switched off", () => {
   it("give nothing", () => {
     const opts = defaultOptions();
-    (opts.rules as Set<string>).delete("period-before-tag");
+    (opts.rules as Set<string>).delete("comma-before-tag");
     expect(rules('"Hi." she said.', opts)).toEqual([]);
   });
 });

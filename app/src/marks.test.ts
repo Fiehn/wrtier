@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { countsOf, markAt, marks, marksOf, setDismissed, setFound, type Mark } from "./marks";
 
-const mark = (from: number, to: number, level: Mark["level"] = "rule", rule = "period-before-tag"): Mark =>
+const mark = (from: number, to: number, level: Mark["level"] = "rule", rule = "comma-before-tag"): Mark =>
   ({ mod: "dialogue", rule, level, from, to, why: "", suggestions: [{ label: "", edits: [{ from, to, insert: "," }] }] });
 
 const start = (doc = '"Hi." she said. "Yes." he said.') =>
@@ -28,8 +28,8 @@ describe("Marks in an editor", () => {
 
   it("leave out those dismissed, on the same characters for the same rule", () => {
     let s = start().update({ effects: setFound.of([mark(3, 4), mark(20, 21), mark(3, 4, "query", "speaker-change")]) }).state;
-    s = s.update({ effects: setDismissed.of([{ key: "dialogue/period-before-tag", ranges: [[3, 4]] }]) }).state;
-    expect(marksOf(s).map((m) => `${m.rule}@${m.from}`)).toEqual(["speaker-change@3", "period-before-tag@20"]);
+    s = s.update({ effects: setDismissed.of([{ key: "dialogue/comma-before-tag", ranges: [[3, 4]] }]) }).state;
+    expect(marksOf(s).map((m) => `${m.rule}@${m.from}`)).toEqual(["speaker-change@3", "comma-before-tag@20"]);
     // The Mods look again: still dismissed.
     s = s.update({ effects: setFound.of([mark(3, 4), mark(20, 21)]) }).state;
     expect(marksOf(s).map((m) => m.from)).toEqual([20]);

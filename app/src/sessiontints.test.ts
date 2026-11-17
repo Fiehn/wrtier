@@ -90,7 +90,7 @@ describe("asking Rust for the tints", () => {
     sync.setMarking(true);
     await sync.idle();
     expect(batches.flat()).toContain("dismissed");
-    sync.dismiss(1, 3, "dialogue/period-before-tag");
+    sync.dismiss(1, 3, "dialogue/comma-before-tag");
     await sync.idle();
     expect(batches[batches.length - 1]).toEqual(["dismiss", "dismissed"]);
   });
