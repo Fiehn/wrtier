@@ -1,6 +1,6 @@
 import rulesDoc from "../../docs/dialogue-rules.md?raw";
 import { describe, expect, it } from "vitest";
-import { checkDialogue, defaultOptions, type Edit, type Finding, type Options } from "./dialogue";
+import { checkDialogue, defaultOptions, DialogueChecker, type Edit, type Finding, type Options } from "./dialogue";
 
 const rules = (text: string, opts?: Options) => checkDialogue(text, opts).map((f) => f.rule);
 const one = (text: string, opts?: Options): Finding => {
@@ -211,5 +211,64 @@ describe("rules switched off", () => {
     const opts = defaultOptions();
     (opts.rules as Set<string>).delete("comma-before-tag");
     expect(rules('"Hi." she said.', opts)).toEqual([]);
+  });
+});
+
+describe("checking again as the Work is written", () => {
+  const work = ['Rain fell.', '"Hi." she said.', 'I saw Anna there.', '"Hi," Anna said.', '"First part.', 'She left.'];
+  const join = (paras: string[]) => paras.join("\n\n");
+
+  it("checks only the paragraph that changed", () => {
+    const checker = new DialogueChecker();
+    checker.check(join(work));
+    expect([checker.readCount, checker.checkCount]).toEqual([6, 6]);
+    const edited = [...work];
+    edited[1] = '"Hello." she said.';
+    expect(checker.check(join(edited))).toEqual(checkDialogue(join(edited)));
+    expect([checker.readCount, checker.checkCount]).toEqual([1, 1]);
+  });
+  it("and keeps the others' findings where they've moved to", () => {
+    const checker = new DialogueChecker();
+    checker.check(join(work));
+    const edited = ["A longer first paragraph than before.", ...work.slice(1)];
+    const found = checker.check(join(edited));
+    expect(found).toEqual(checkDialogue(join(edited)));
+    expect(found.map((f) => f.rule)).toEqual(["comma-before-tag", "unclosed-quote"]);
+    expect(accept(join(edited), found[0])).toBe(join(["A longer first paragraph than before.", '"Hi," she said.', ...work.slice(2)]));
+    expect(checker.checkCount).toBe(1);
+  });
+  it("checks a paragraph again when a name it asked about comes or goes elsewhere", () => {
+    const checker = new DialogueChecker();
+    checker.check(join(work));
+    const edited = [...work];
+    edited[2] = "I saw her there.";
+    const found = checker.check(join(edited));
+    expect(found).toEqual(checkDialogue(join(edited)));
+    expect(found.map((f) => [f.rule, f.level])).toContainEqual(["capital-tag", "query"]);
+    expect(checker.checkCount).toBe(2);
+  });
+  it("checks a quote that doesn't close again when the next paragraph changes", () => {
+    const checker = new DialogueChecker();
+    checker.check(join(work));
+    const edited = [...work];
+    edited[5] = '"Second part."';
+    const found = checker.check(join(edited));
+    expect(found).toEqual(checkDialogue(join(edited)));
+    expect(found.map((f) => f.rule)).toEqual(["comma-before-tag"]);
+    expect(checker.checkCount).toBe(2);
+  });
+  it("gives what a check from scratch gives, edit after edit", () => {
+    const checker = new DialogueChecker();
+    let text = join(work);
+    const edits: [string, string][] = [
+      ["Rain fell.", "Rain fell.\n\n\"Stop!\" He shouted."],
+      ["She left.", "She left. \"Bye\" she nodded."],
+      ["\n\nI saw Anna there.", ""],
+      ["\"First part.", "\"First part.\""],
+    ];
+    for (const [from, to] of edits) {
+      text = text.replace(from, to);
+      expect(checker.check(text)).toEqual(checkDialogue(text));
+    }
   });
 });

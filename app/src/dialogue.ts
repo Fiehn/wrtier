@@ -204,8 +204,11 @@ const CLAUSE_STOP = /[.,;:!?…—–"“”\u0000\n]/;
 /** Looks like a verb in the past: "nodded", "took". */
 const pastLike = (w: string) => /[a-z]ed$/i.test(w) || IRREGULAR_PAST.has(w.toLowerCase());
 
+/** The Work's names, as far as a check asks about them. */
+type Names = { has(word: string): boolean };
+
 class Checker {
-  constructor(readonly opts: Options, readonly names: ReadonlySet<string>) {}
+  constructor(readonly opts: Options, readonly names: Names) {}
 
   speech(w: string): boolean {
     return this.opts.speechVerbs.has(w.toLowerCase());
@@ -317,34 +320,123 @@ const swapCase = (c: string) => (isUpper(c) ? c.toLowerCase() : c.toUpperCase())
 
 /** Every finding in a Work's text. */
 export function checkDialogue(source: string, opts: Options = defaultOptions()): Finding[] {
-  const ranges = paragraphsOf(source);
-  const paras = ranges.map((r) => readPara(source, r.start, r.end));
-  const names = namesIn(paras);
-  const checker = new Checker(opts, names);
-  const out: Finding[] = [];
-  paras.forEach((p, i) => checkParagraph(p, paras[i + 1] ?? null, checker, out));
-  return out
-    .filter((f) => opts.rules.has(f.rule))
-    .sort((a, b) => a.from - b.from || a.to - b.to);
+  return new DialogueChecker(opts).check(source);
 }
 
-/** The words the Work has with a capital where no sentence starts: its names. */
-function namesIn(paras: Para[]): Set<string> {
+/** A paragraph as it reads, as if it started the text (how it reads doesn't hang on where it is), and its names. */
+type Read = { para: Para; names: Set<string> };
+
+/** What checking a paragraph found, as if it started the text, and what that turned on besides its own text. */
+type Checked = {
+  findings: Finding[];
+  /** The words asked about as names, and whether the Work had them as names then. */
+  asked: Map<string, boolean>;
+  /** The next paragraph (how far on it starts, and its text), if the check looked at it; null if it didn't. */
+  next: string | null;
+};
+
+/**
+ * Checks a Work again and again as it's written (one per editor): it keeps how each paragraph
+ * reads and what was found in it, by its text, so a look after typing reads and checks only the
+ * paragraphs that changed. A paragraph is checked again too if what its findings turned on
+ * changed: whether a word it asked about is one of the Work's names, or the next paragraph, which
+ * a quote that doesn't close looks at.
+ */
+export class DialogueChecker {
+  private reads = new Map<string, Read>();
+  private checks = new Map<string, Checked>();
+  /** How many paragraphs the last look read, and checked, afresh (for the tests). */
+  readCount = 0;
+  checkCount = 0;
+
+  constructor(readonly opts: Options = defaultOptions()) {}
+
+  /** Every finding in the Work's text as it is now. */
+  check(source: string): Finding[] {
+    const ranges = paragraphsOf(source);
+    const texts = ranges.map((r) => source.slice(r.start, r.end));
+    this.readCount = 0;
+    this.checkCount = 0;
+
+    // Only the paragraphs there now are kept, so what's kept never outgrows the Work.
+    const reads = new Map<string, Read>();
+    const read = (text: string): Read => {
+      let r = reads.get(text) ?? this.reads.get(text);
+      if (!r) {
+        this.readCount++;
+        const para = readPara(text, 0, text.length);
+        r = { para, names: namesIn(para) };
+      }
+      reads.set(text, r);
+      return r;
+    };
+    const names = new Set<string>();
+    for (const t of texts) for (const n of read(t).names) names.add(n);
+    this.reads = reads;
+
+    const checks = new Map<string, Checked>();
+    const out: Finding[] = [];
+    ranges.forEach((r, i) => {
+      const text = texts[i];
+      const nextAt = i + 1 < ranges.length ? ranges[i + 1].start - r.start : -1;
+      const nextKey = nextAt === -1 ? "" : `${nextAt}\u0001${texts[i + 1]}`;
+      let done = checks.get(text) ?? this.checks.get(text);
+      const fresh = done && (done.next === null || done.next === nextKey)
+        && [...done.asked].every(([w, was]) => names.has(w) === was);
+      if (!done || !fresh) {
+        const asked = new Map<string, boolean>();
+        const lookup: Names = { has: (w) => { const is = names.has(w); asked.set(w, is); return is; } };
+        let next: string | null = null;
+        const nextPara = () => {
+          next = nextKey;
+          return nextAt === -1 ? null : shiftPara(read(texts[i + 1]).para, nextAt);
+        };
+        this.checkCount++;
+        const findings: Finding[] = [];
+        checkParagraph(read(text).para, nextPara, new Checker(this.opts, lookup), findings);
+        done = { findings, asked, next };
+      }
+      checks.set(text, done);
+      for (const f of done.findings) out.push(shiftFinding(f, r.start));
+    });
+    this.checks = checks;
+
+    return out
+      .filter((f) => this.opts.rules.has(f.rule))
+      .sort((a, b) => a.from - b.from || a.to - b.to);
+  }
+}
+
+function shiftPara(p: Para, by: number): Para {
+  return { ...p, from: p.from.map((x) => x + by), to: p.to.map((x) => x + by), start: p.start + by, end: p.end + by };
+}
+
+function shiftFinding(f: Finding, by: number): Finding {
+  if (by === 0) return f;
+  return {
+    ...f,
+    from: f.from + by,
+    to: f.to + by,
+    suggestions: f.suggestions.map((s) => ({ ...s, edits: s.edits.map((e) => ({ ...e, from: e.from + by, to: e.to + by })) })),
+  };
+}
+
+/** The words a paragraph has with a capital where no sentence starts: the Work's names are all its paragraphs' together. */
+function namesIn(p: Para): Set<string> {
   const names = new Set<string>();
-  for (const p of paras) {
-    for (const w of wordsIn(p.text, 0, p.text.length)) {
-      if (!isUpper(w.text[0]) || w.text === "I") continue;
-      let j = w.at - 1;
-      while (j >= 0 && /\s/.test(p.text[j])) j--;
-      if (j < 0) continue;
-      if (/[.!?…:;"“”\u0000—–(]/.test(p.text[j])) continue;
-      names.add(w.text.replace(/['’]s$/, ""));
-    }
+  for (const w of wordsIn(p.text, 0, p.text.length)) {
+    if (!isUpper(w.text[0]) || w.text === "I") continue;
+    let j = w.at - 1;
+    while (j >= 0 && /\s/.test(p.text[j])) j--;
+    if (j < 0) continue;
+    if (/[.!?…:;"“”\u0000—–(]/.test(p.text[j])) continue;
+    names.add(w.text.replace(/['’]s$/, ""));
   }
   return names;
 }
 
-function checkParagraph(p: Para, next: Para | null, c: Checker, out: Finding[]) {
+/** `nextPara`: the next paragraph, read only when a quote that doesn't close needs it (null: there's none). */
+function checkParagraph(p: Para, nextPara: () => Para | null, c: Checker, out: Finding[]) {
   const text = p.text;
   if (!/["“”]/.test(text)) return;
   const quotes = quotesIn(text);
@@ -384,6 +476,7 @@ function checkParagraph(p: Para, next: Para | null, c: Checker, out: Finding[]) 
     if (q.close === null) {
       // ---- A quote that doesn't close: the next paragraph must open with one ----
       if (k !== quotes.length - 1) return;
+      const next = nextPara();
       const nextOpens = next !== null && /^\s*["“]/.test(next.text);
       if (nextOpens) return;
       let last = text.length - 1;

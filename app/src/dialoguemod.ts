@@ -6,7 +6,7 @@
 // - "dialogue.rule.<rule>" for one Work (and for new Works): "off" (not checked) or unset.
 
 import type { Extension } from "@codemirror/state";
-import { checkDialogue, RULES, SPEECH_VERBS, type Finding, type Options, type RuleId } from "./dialogue";
+import { DialogueChecker, RULES, SPEECH_VERBS, type Finding, type Options, type RuleId } from "./dialogue";
 import { markSources, type Mark } from "./marks";
 import type { ModContext, ModSettings } from "./mods";
 
@@ -63,9 +63,11 @@ function toMark(f: Finding, opts: Options, ctx: ModContext): Mark {
 export function dialogueChecker(ctx: ModContext): Extension {
   if (!isEnglish(ctx.language)) return [];
   const opts = optionsOf(ctx.settings);
+  // Kept for the editor's life (its settings changing makes a new one), so a look checks only the paragraphs that changed.
+  const checker = new DialogueChecker(opts);
   return markSources.of({
     mod: DIALOGUE,
-    find: (state) => checkDialogue(state.doc.toString(), opts).map((f) => toMark(f, opts, ctx)),
+    find: (state) => checker.check(state.doc.toString()).map((f) => toMark(f, opts, ctx)),
   });
 }
 
