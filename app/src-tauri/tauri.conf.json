@@ -11,6 +11,7 @@
   },
   "app": {
     "withGlobalTauri": true,
+    "enableGTKAppId": true,
     "windows": [
       {
         "title": "wrtier",
@@ -33,6 +34,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "linux": {
+      "deb": {
+        "depends": ["pkexec | policykit-1"],
+        "desktopTemplate": "linux/wrtier.desktop"
+      }
+    },
     "android": {
       "minSdkVersion": 30
     }
