@@ -7,6 +7,9 @@
 //! - the real Device, with the app's later edits too, imports the file: it must end with exactly
 //!   the same characters as merging the app's edits with the file's edits as two offline
 //!   Devices would, and if the app made no edits, exactly the file.
+//!
+//! The text isn't only ASCII: accented letters, a curly quote, a dash and an emoji (two UTF-16
+//! units, four bytes) go through the diff and its word units too.
 
 use proptest::prelude::*;
 use wrtier::change::Change;
@@ -22,7 +25,7 @@ enum AppEdit {
 
 fn app_edit() -> impl Strategy<Value = AppEdit> {
     prop_oneof![
-        4 => (any::<u16>(), "[a-z ]{1,6}(\n)?").prop_map(|(at, text)| AppEdit::Insert { at, text }),
+        4 => (any::<u16>(), "[a-zé’— 😀]{1,6}(\n)?").prop_map(|(at, text)| AppEdit::Insert { at, text }),
         2 => (any::<u16>(), 1..6u8).prop_map(|(at, len)| AppEdit::Delete { at, len }),
         1 => (any::<u16>(), 1..40u8, any::<u16>()).prop_map(|(from, len, to)| AppEdit::Move { from, len, to }),
     ]
@@ -39,10 +42,10 @@ enum FileEdit {
 
 fn file_edit() -> impl Strategy<Value = FileEdit> {
     prop_oneof![
-        (any::<u16>(), "[a-z ]{0,30}").prop_map(|(at, text)| FileEdit::InsertLine { at, text }),
+        (any::<u16>(), "[a-zé’— 😀]{0,30}").prop_map(|(at, text)| FileEdit::InsertLine { at, text }),
         any::<u16>().prop_map(|at| FileEdit::DeleteLine { at }),
         (any::<u16>(), any::<u16>()).prop_map(|(from, to)| FileEdit::MoveLine { from, to }),
-        (any::<u16>(), any::<u8>(), 0..5u8, "[a-z]{0,6}").prop_map(|(line, at, delete, text)| FileEdit::EditInLine { line, at, delete, text }),
+        (any::<u16>(), any::<u8>(), 0..5u8, "[a-zé’😀]{0,6}").prop_map(|(line, at, delete, text)| FileEdit::EditInLine { line, at, delete, text }),
     ]
 }
 

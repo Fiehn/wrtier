@@ -58,6 +58,23 @@ describe("a heading with a Footnote", () => {
     expect(chaptersIn("= The End#footnote[Or is it?]\nText.")[0].title).toBe("The End");
     expect(withoutFootnotes("Plain")).toBe("Plain");
   });
+
+  // The same cases as `without_footnotes` in the History engine (src/footnotes.rs), which names
+  // Inclusions after their Chapters: the two must agree.
+  it("takes Footnotes out as the History engine does", () => {
+    const cases: [string, string][] = [
+      ["The End#footnote[Or is it?]", "The End"],
+      ["A#footnote[b #footnote[c] d]B", "AB"],
+      ["A\\#footnote[b]", "A\\#footnote[b]"], // escaped: text
+      ["A\\\\#footnote[b]C", "A\\\\C"], // an escaped backslash, then a real Footnote
+      ["A\\\\\\#footnote[b]", "A\\\\\\#footnote[b]"], // an escaped backslash, then an escaped #
+      ["A#footnote[b]\\#footnote[c]", "A\\#footnote[c]"],
+      ["A#footnote[open", "A#footnote[open"],
+      ["A#footnote[x \\] y]B", "AB"],
+      ["No notes", "No notes"],
+    ];
+    for (const [text, without] of cases) expect(withoutFootnotes(text), text).toBe(without);
+  });
 });
 
 describe("Insert footnote", () => {

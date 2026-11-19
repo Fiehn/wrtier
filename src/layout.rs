@@ -6,10 +6,10 @@
 //!
 //! `crate::reference::layout` is the first, simple version; this one must behave identically.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use crate::change::Span;
-use crate::fugue::{Tree, NONE};
+use crate::fugue::{FixedOrder, Tree, NONE};
 use crate::ids::{ChangeId, CharId, DeviceId};
 
 /// One piece of a Move: the Move's ID and the piece's index.
@@ -44,7 +44,10 @@ pub struct Layout {
     owner: Vec<u32>,               // per node: the slot it's drawn in, or NONE = where it is
     slots: Vec<Slot>,              // the pieces of every Move that happened
     slot_of: FxHashMap<Piece, u32>,
-    order: Vec<u32>,               // the tree's fixed order, walked once in `compute`
+    // The tree's fixed order when `compute` ran. Typing on this Device (`insert_typed`) adds
+    // nodes without it, so after that it's stale until the next `compute`: `reading_nodes` and
+    // `reading_order` need a fresh layout (checked in debug builds).
+    order: Arc<FixedOrder>,
     // For Merge notices. Both keep the characters involved (not anchors), in fixed Change order.
     skipped: Vec<(ChangeId, Vec<CharId>)>, // Moves skipped because they made a loop, with the text they'd have moved
     contested: Vec<(ChangeId, ChangeId, Vec<CharId>)>, // (later, earlier, text): both took it without knowing about each other
@@ -52,14 +55,10 @@ pub struct Layout {
 
 impl Layout {
     /// `moves`: the Moves in effect, in the fixed Change order.
+    /// `order`: the tree's fixed order (`Tree::fixed_order`), kept for drawing.
     /// `typed_into`: for a piece's anchor, the nodes that were typed or dropped into that piece.
-    pub fn compute(tree: &Tree, moves: &[MoveInfo], typed_into: &HashMap<CharId, Vec<CharId>>) -> Layout {
-        // Walk the tree once, and note every node's position in one array.
-        let order = tree.order();
-        let mut pos = vec![NONE; tree.len()];
-        for (i, &node) in order.iter().enumerate() {
-            pos[node as usize] = i as u32;
-        }
+    pub fn compute(tree: &Tree, order: Arc<FixedOrder>, moves: &[MoveInfo], typed_into: &FxHashMap<CharId, Vec<CharId>>) -> Layout {
+        debug_assert_eq!(order.order.len(), tree.len(), "the fixed order given is stale");
         let mut layout = Layout { owner: vec![NONE; tree.len()], ..Layout::default() };
 
         for m in moves {
@@ -67,10 +66,8 @@ impl Layout {
             let base = layout.slots.len() as u32;
             for (k, span) in m.pieces.iter().enumerate() {
                 let anchor = tree.index_of(CharId { change: m.id, offset: k as u32 }).unwrap_or(NONE);
-                let range = match (tree.index_of(span.first), tree.index_of(span.last)) {
-                    (Some(f), Some(l)) => Some((pos[f as usize] as usize, pos[l as usize] as usize)),
-                    _ => None, // the tree doesn't have it (yet): nothing to take
-                };
+                // None: the tree doesn't have it (yet), so there's nothing to take.
+                let range = order.range(tree, span);
                 layout.slots.push(Slot { piece: (m.id, k), span: span.clone(), anchor, range });
             }
 
@@ -79,7 +76,7 @@ impl Layout {
             for (k, span) in m.pieces.iter().enumerate() {
                 let slot = base + k as u32;
                 if let Some((lo, hi)) = layout.slots[slot as usize].range {
-                    for &node in &order[lo..=hi] {
+                    for &node in &order.order[lo..=hi] {
                         let before = layout.owner[node as usize];
                         let before_piece = (before != NONE).then(|| layout.slots[before as usize].piece);
                         if !Self::may_take(m, span, before_piece) {
@@ -176,7 +173,8 @@ impl Layout {
 
     /// Every character node (deleted ones too, no anchors) in reading order.
     pub fn reading_nodes(&self, tree: &Tree) -> Vec<u32> {
-        let mut out = Vec::with_capacity(self.order.len());
+        debug_assert_eq!(self.order.order.len(), tree.len(), "a layout updated by typing has a stale fixed order: compute it again first");
+        let mut out = Vec::with_capacity(self.order.order.len());
         self.draw(tree, NONE, &mut out);
         out
     }
@@ -189,10 +187,10 @@ impl Layout {
     /// Draws one level: the main text (NONE), or one piece's slot.
     fn draw(&self, tree: &Tree, level: u32, out: &mut Vec<u32>) {
         let nodes = if level == NONE {
-            &self.order[..]
+            &self.order.order[..]
         } else {
             match self.slots[level as usize].range {
-                Some((lo, hi)) => &self.order[lo..=hi],
+                Some((lo, hi)) => &self.order.order[lo..=hi],
                 None => return,
             }
         };
@@ -250,6 +248,7 @@ impl Layout {
         &self.skipped
     }
     /// (later Move, earlier Move) pairs that took the same text without knowing about each other.
+    #[cfg(test)]
     pub fn contested(&self) -> Vec<(ChangeId, ChangeId)> {
         self.contested.iter().map(|&(later, earlier, _)| (later, earlier)).collect()
     }
@@ -266,7 +265,7 @@ mod test {
 
     /// These hand-built cases never type into a piece, so `typed_into` is empty.
     fn compute(t: &Tree, moves: &[MoveInfo]) -> Layout {
-        Layout::compute(t, moves, &HashMap::new())
+        Layout::compute(t, Arc::new(t.fixed_order()), moves, &FxHashMap::default())
     }
     use crate::ids::Side;
 
@@ -276,13 +275,13 @@ mod test {
 
     fn abcdef() -> Tree {
         let mut t = Tree::new();
-        t.insert_run(ch(1, 1), "abcdef", None, Side::Right, None);
+        t.insert_run(ch(1, 1), "abcdef", None, Side::Right);
         t
     }
     /// Adds a one-piece Move's anchor right after `left` (None = the very start).
     fn anchor(t: &mut Tree, mv: ChangeId, left: Option<CharId>) {
-        let (p, s, ro) = t.place_after(left);
-        t.insert_anchors(mv, 1, p, s, ro);
+        let (p, s, _) = t.place_after(left);
+        t.insert_anchors(mv, 1, p, s);
     }
     /// A one-piece Move of first..=last, taken from the main text.
     fn one_piece(id: ChangeId, first: CharId, last: CharId, seen: &[(u32, u32)]) -> MoveInfo {
@@ -310,8 +309,8 @@ mod test {
     #[test]
     fn text_typed_inside_on_another_device_follows() {
         let mut t = abcdef();
-        let (p, s, ro) = t.place(3);                 // the phone types "X" between c and d...
-        t.insert_run(ch(2, 1), "X", p, s, ro);
+        let (p, s, _) = t.place(3);                 // the phone types "X" between c and d...
+        t.insert_run(ch(2, 1), "X", p, s);
         anchor(&mut t, ch(1, 2), Some(at(5)));       // ...while the laptop moves "cd" to the end
         let l = compute(&t, &[one_piece(ch(1, 2), at(2), at(3), &[(1, 1)])]);
         assert_eq!(shown(&t, &l), "abefcXd");
@@ -320,8 +319,8 @@ mod test {
     #[test]
     fn text_typed_at_the_edge_stays() {
         let mut t = abcdef();
-        let (p, s, ro) = t.place(4);                 // "X" right after d
-        t.insert_run(ch(2, 1), "X", p, s, ro);
+        let (p, s, _) = t.place(4);                 // "X" right after d
+        t.insert_run(ch(2, 1), "X", p, s);
         anchor(&mut t, ch(1, 2), Some(at(5)));
         let l = compute(&t, &[one_piece(ch(1, 2), at(2), at(3), &[(1, 1)])]);
         assert_eq!(shown(&t, &l), "abXefcd");

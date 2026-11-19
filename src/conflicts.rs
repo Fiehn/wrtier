@@ -74,8 +74,13 @@ pub struct Absorbed {
     /// Text file copies written from Changes this History doesn't have yet: left in place, to
     /// be read once the History catches up. (Not a problem: it's only waiting.)
     pub waiting: Vec<PathBuf>,
-    /// The Changes that came in: from merged History copies, and from External edits.
+    /// The Changes that came in and are saved: from merged History copies, and from External edits.
     pub changes: Vec<Change>,
+    /// A Text file copy whose External edit is in the `doc` but couldn't be saved, with its
+    /// Changes and why. The copy is left in place (and in `kept`), and no copy after it is read.
+    /// The caller either keeps the Changes to save again (before anything made after them) and
+    /// deletes the copy, or throws the `doc` away, so the copy is read again later.
+    pub unsaved: Option<(PathBuf, Vec<Change>)>,
 }
 
 /// Absorbs every Conflict copy of a Work's History file (`db`) and Text file into the main
@@ -93,19 +98,29 @@ pub fn absorb_conflict_copies(db: &Path, text_file: &Path, doc: &mut Doc, now_ms
             Err(e) => absorbed.kept.push((copy, e.to_string())),
         }
     }
-    // Bring the open Doc up to date with whatever the merges brought in.
-    match storage::read_all(db) {
-        Ok(all) => {
-            let new: Vec<Change> = all.into_iter().filter(|c| !doc.has(c.id)).collect();
-            doc.apply_all(&new);
-            absorbed.changes.extend(new);
+    // Bring the open Doc up to date with whatever the merges brought in (nothing to read if
+    // nothing was merged: `doc` already holds everything in `db`).
+    let merged_any = !absorbed.merged.is_empty() || absorbed.kept.iter().any(|(_, why)| why.starts_with("merged"));
+    if merged_any {
+        match storage::read_all(db) {
+            Ok(all) => {
+                let new: Vec<Change> = all.into_iter().filter(|c| !doc.has(c.id)).collect();
+                doc.apply_all(&new);
+                absorbed.changes.extend(new);
+            }
+            Err(e) => absorbed.kept.push((db.to_path_buf(), format!("couldn't read the merged History: {e}"))),
         }
-        Err(e) => absorbed.kept.push((db.to_path_buf(), format!("couldn't read the merged History: {e}"))),
     }
 
     for copy in conflict_copies(text_file) {
         match storage::read_text_file(db, &copy, doc, now_ms) {
             Ok(storage::TextFileRead::NotYet) => absorbed.waiting.push(copy),
+            Ok(storage::TextFileRead::NotSaved { changes, error }) => {
+                absorbed.kept.push((copy.clone(), format!("read, but its edit couldn't be saved: {error}")));
+                absorbed.unsaved = Some((copy, changes));
+                // A later copy's Changes could build on these, and must not be saved before them.
+                break;
+            }
             Ok(read) => {
                 if let storage::TextFileRead::Imported(changes) = read {
                     absorbed.changes.extend(changes);
@@ -209,6 +224,32 @@ mod tests {
         assert!(!written.exists() && !edited.exists());
         assert_eq!(laptop.text(), "abcdef and more");
         assert!(!absorbed.changes.is_empty());
+    }
+
+    #[test]
+    fn a_text_copy_whose_edit_cant_be_saved_is_kept_and_stops_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, typ, mut laptop, _) = work(dir.path());
+        let first = dir.path().join("work.sync-conflict-20261105-082041-JGMDN7C.typ");
+        std::fs::write(&first, "abcdef and more").unwrap();
+        let second = dir.path().join("work.sync-conflict-20261105-082310-US2Y42W.typ");
+        std::fs::write(&second, "abc").unwrap();
+        let writable = std::fs::metadata(&db).unwrap().permissions();
+        let mut protected = writable.clone();
+        protected.set_readonly(true); // locked by the sync tool, say
+        std::fs::set_permissions(&db, protected).unwrap();
+
+        let absorbed = absorb_conflict_copies(&db, &typ, &mut laptop, 3000);
+        std::fs::set_permissions(&db, writable).unwrap();
+        let (copy, unsaved) = absorbed.unsaved.expect("the first copy's edit isn't saved");
+        assert_eq!(copy, first);
+        assert!(!unsaved.is_empty() && absorbed.changes.is_empty());
+        assert_eq!(laptop.text(), "abcdef and more", "the edit is in the Doc, for the caller to save");
+        assert!(first.exists() && second.exists(), "both copies are left: the second isn't read yet");
+        assert!(absorbed.kept.iter().any(|(p, why)| *p == first && why.contains("couldn't be saved")));
+        // Saved as the open Work would, before anything made after it.
+        storage::save(&db, &unsaved, &laptop).unwrap();
+        assert_eq!(storage::load(&db, DeviceId(1)).unwrap().1.text(), "abcdef and more");
     }
 
     #[test]

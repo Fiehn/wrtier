@@ -4,10 +4,14 @@
 //! from nothing but the recorded Changes must give exactly what the Author saw.
 //! Two Devices: bursts open on both while Changes sync back and forth (merges don't close a
 //! burst); in the end both agree, and reopening from the Changes gives the same text.
+//!
+//! The text isn't only ASCII: accented letters, a curly quote, a dash and an emoji (two UTF-16
+//! units, four bytes) go through the drafts' byte arithmetic too. A cut and its paste become a
+//! Move, also when the other Device's text lands in the middle of the cut before the paste.
 
 use proptest::prelude::*;
 use wrtier::change::Change;
-use wrtier::doc::Doc;
+use wrtier::doc::{CutPasted, Doc};
 use wrtier::ids::DeviceId;
 
 #[derive(Debug, Clone)]
@@ -18,21 +22,25 @@ enum Action {
     Cursor { at: u16 },
     Wait { ms: u16 },
     Close,
+    /// Cut `len` characters at `at`, then paste them at `to` (in the text without them).
+    CutPaste { at: u16, len: u8, to: u16 },
 }
 
 fn action() -> impl Strategy<Value = Action> {
     prop_oneof![
-        6 => (any::<u16>(), "[a-c ]{1,3}").prop_map(|(at, text)| Action::Type { at, text }),
+        6 => (any::<u16>(), "[a-cé’—😀 ]{1,3}").prop_map(|(at, text)| Action::Type { at, text }),
         3 => (any::<u16>(), 1..4u8).prop_map(|(at, len)| Action::Delete { at, len }),
-        1 => (any::<u16>(), 1..4u8, "[x-z]{0,2}").prop_map(|(at, len, text)| Action::Replace { at, len, text }),
+        1 => (any::<u16>(), 1..4u8, "[x-zé😀]{0,2}").prop_map(|(at, len, text)| Action::Replace { at, len, text }),
         1 => any::<u16>().prop_map(|at| Action::Cursor { at }),
         1 => (0..8000u16).prop_map(|ms| Action::Wait { ms }),
         1 => Just(Action::Close),
+        1 => (any::<u16>(), 1..6u8, any::<u16>()).prop_map(|(at, len, to)| Action::CutPaste { at, len, to }),
     ]
 }
 
 /// Runs one editor action on `doc` and the same edit on `model`; returns what was recorded.
-fn act(doc: &mut Doc, model: &mut Vec<char>, action: &Action, now: u64) -> Vec<Change> {
+/// `between` runs between a cut and its paste (the other Device's Changes arriving).
+fn act(doc: &mut Doc, model: &mut Vec<char>, action: &Action, now: u64, between: &mut dyn FnMut(&mut Doc)) -> Vec<Change> {
     let n = model.len();
     match action {
         Action::Type { at, text } => {
@@ -61,6 +69,31 @@ fn act(doc: &mut Doc, model: &mut Vec<char>, action: &Action, now: u64) -> Vec<C
         Action::Cursor { at } => doc.cursor_moved(*at as usize % (n + 1), now).into_iter().collect(),
         Action::Wait { .. } => doc.tick(now).into_iter().collect(),
         Action::Close => doc.close_burst(now).into_iter().collect(),
+        Action::CutPaste { at, len, to } => {
+            if n == 0 {
+                return doc.tick(now).into_iter().collect();
+            }
+            // A cut is another kind of action: whatever burst was open closes first.
+            let mut recorded: Vec<Change> = doc.close_burst(now).into_iter().collect();
+            let at = *at as usize % n;
+            let len = (*len as usize).min(n - at);
+            let cut: Vec<char> = model.drain(at..at + len).collect();
+            recorded.extend(doc.delete_text(at, len, now));
+            between(doc);
+            let to = *to as usize % (doc.len() + 1);
+            match doc.cut_to_move(to, now) {
+                CutPasted::Moved(change) => recorded.push(change),
+                CutPasted::Unchanged => {}
+                // Something landed inside the cut: it's deleted, and the paste is new text.
+                CutPasted::Deleted(change) => {
+                    recorded.extend(change);
+                    recorded.push(doc.insert_local(to, &cut.iter().collect::<String>(), now));
+                }
+            }
+            let to = to.min(model.len());
+            model.splice(to..to, cut);
+            recorded
+        }
     }
 }
 
@@ -71,7 +104,7 @@ fn run_one(actions: &[Action]) {
     let mut now = 1_000_000u64;
     for action in actions {
         now += match action { Action::Wait { ms } => *ms as u64, _ => 150 };
-        recorded.extend(act(&mut doc, &mut model, action, now));
+        recorded.extend(act(&mut doc, &mut model, action, now, &mut |_| {}));
         assert_eq!(doc.text(), model.iter().collect::<String>(), "after {action:?}");
         assert_eq!(doc.len(), model.len());
     }
@@ -96,10 +129,26 @@ fn run_two(actions: &[(bool, Action)], syncs: &[bool]) {
         now += match action { Action::Wait { ms } => *ms as u64, _ => 150 };
         // The model can't predict merges, so start each local action from what the Device shows.
         models[d] = docs[d].text().chars().collect();
-        let changes = act(&mut docs[d], &mut models[d], action, now);
+        let sync = syncs.get(step).copied().unwrap_or(false);
+        // A cut waits for its paste; the other Device's Changes may arrive meanwhile.
+        let mut merged_mid_cut = false;
+        let pending: Vec<Change> = recorded[1 - d][delivered[d]..].to_vec();
+        let mut between = |doc: &mut Doc| {
+            if sync {
+                for c in &pending {
+                    doc.apply(c);
+                }
+                merged_mid_cut = true;
+            }
+        };
+        let changes = act(&mut docs[d], &mut models[d], action, now, &mut between);
+        if merged_mid_cut {
+            delivered[d] += pending.len();
+            models[d] = docs[d].text().chars().collect(); // the model can't predict the merge
+        }
         recorded[d].extend(changes);
         assert_eq!(docs[d].text(), models[d].iter().collect::<String>(), "after {action:?}");
-        if syncs.get(step).copied().unwrap_or(false) {
+        if sync {
             // Deliver everything the other Device has recorded so far, bursts open or not.
             let other = 1 - d;
             for c in &recorded[other][delivered[d]..] {

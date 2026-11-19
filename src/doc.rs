@@ -8,11 +8,13 @@
 
 use crate::change::{comment_record, device_record, is_free_text, is_meta_record, milestone_record, session_record, Change, ChangeKind, InsertRun, CharRange, NoticeKey, Span};
 use crate::text_file;
-use crate::fugue::Tree;
+use crate::fugue::{FixedOrder, Tree};
 use crate::ids::{ChangeId, DeviceId, Hlc, CharId};
 use crate::layout::{Layout, MoveInfo, Piece};
-use rustc_hash::FxHashSet;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::BTreeMap;
+use std::ops::Bound;
+use std::sync::{Arc, OnceLock};
 
 mod colours;
 mod compare;
@@ -30,25 +32,28 @@ pub struct Doc {
     device: DeviceId,
     next_counter: u32,
     clock: Hlc,
-    applied: HashSet<ChangeId>,                    // to avoid applying the same Change twice
-    reverted_by: HashMap<ChangeId, Vec<ChangeId>>, // a Change → the Reverts that target it
-    seen: HashMap<DeviceId, u32>,                  // the highest counter applied from each Device
-    moves: Vec<(Hlc, MoveInfo)>,                   // every Move applied, with its clock for sorting
-    typed_into: HashMap<CharId, Vec<CharId>>,      // a piece's anchor → nodes typed or dropped into it
-    dismissals: Vec<(ChangeId, NoticeKey)>,        // every Dismiss Change, and the notice it hides
-    fields: HashMap<(String, String), Vec<FieldValue>>, // (record, field) → every value set
-    content: Vec<(ChangeId, Hlc)>,                 // every Change to the Work's content, as applied
-    content_set: HashSet<ChangeId>,                // the same, for lookups
+    applied: FxHashSet<ChangeId>,                    // to avoid applying the same Change twice
+    reverted_by: FxHashMap<ChangeId, Vec<ChangeId>>, // a Change → the Reverts that target it
+    seen: FxHashMap<DeviceId, u32>,                  // the highest counter applied from each Device
+    moves: Vec<(Hlc, MoveInfo)>,                     // every Move applied, with its clock for sorting
+    typed_into: FxHashMap<CharId, Vec<CharId>>,      // a piece's anchor → nodes typed or dropped into it
+    dismissals: Vec<(ChangeId, NoticeKey)>,          // every Dismiss Change, and the notice it hides
+    fields: BTreeMap<String, BTreeMap<String, Vec<FieldValue>>>, // record → field → every value set
+    content: Vec<(ChangeId, Hlc)>,                   // every Change to the Work's content, as applied
+    content_set: FxHashSet<ChangeId>,                // the same, for lookups
     milestones: Vec<(ChangeId, Hlc, String, Vec<(DeviceId, u32)>)>, // every Milestone: id, time, name, what it holds
-    comments: Vec<CommentMade>,                    // every Comment, as made
-    replies: Vec<ReplyMade>,                       // every Reply, as made
-    session: Option<(ChangeId, u64)>,              // this Device's current Session: (its first Change, time of the last)
-    sessions: HashMap<ChangeId, Vec<ChangeId>>,    // every Session → its Changes
-    made: HashMap<ChangeId, history::Made>,        // every Change → when, and what it did (for the History view)
+    comments: Vec<CommentMade>,                      // every Comment, as made
+    replies: Vec<ReplyMade>,                         // every Reply, as made
+    session: Option<(ChangeId, u64)>,                // this Device's current Session: (its first Change, time of the last)
+    sessions: FxHashMap<ChangeId, Vec<ChangeId>>,    // every Session → its Changes
+    made: FxHashMap<ChangeId, history::Made>,        // every Change → when, and what it did (for the History view)
     layout: Layout,
     // Worked out by `refresh` (or a fast path) after every Change, so reading the text doesn't redo it.
     visible: Vec<u32>, // the visible characters' tree nodes, in reading order
     burst: Option<Burst>, // the open typing burst, if any
+    // Worked out when first asked for, and forgotten when what they come from changes.
+    order: OnceLock<Arc<FixedOrder>>, // the tree's fixed order: forgotten when a node is inserted
+    visible_at: OnceLock<Vec<u32>>,   // per tree node: its place in `visible` (or NOT_SHOWN); forgotten when `visible` changes
 }
 
 /// One value a field was set to.
@@ -226,25 +231,50 @@ impl Doc {
             device,
             next_counter: 1,
             clock: Hlc(0),
-            applied: HashSet::new(),
-            reverted_by: HashMap::new(),
-            seen: HashMap::new(),
+            applied: FxHashSet::default(),
+            reverted_by: FxHashMap::default(),
+            seen: FxHashMap::default(),
             moves: Vec::new(),
-            typed_into: HashMap::new(),
+            typed_into: FxHashMap::default(),
             dismissals: Vec::new(),
-            fields: HashMap::new(),
+            fields: BTreeMap::new(),
             content: Vec::new(),
-            content_set: HashSet::new(),
+            content_set: FxHashSet::default(),
             milestones: Vec::new(),
             comments: Vec::new(),
             replies: Vec::new(),
             session: None, // a Work just opened: the first Change starts a new Session
-            sessions: HashMap::new(),
-            made: HashMap::new(),
+            sessions: FxHashMap::default(),
+            made: FxHashMap::default(),
             layout: Layout::default(),
             visible: Vec::new(),
             burst: None,
+            order: OnceLock::new(),
+            visible_at: OnceLock::new(),
         }
+    }
+
+    // ---- Worked out once, until what they come from changes ----
+
+    /// The tree's fixed order, with every node's place in it.
+    fn fixed_order(&self) -> &Arc<FixedOrder> {
+        self.order.get_or_init(|| Arc::new(self.tree.fixed_order()))
+    }
+
+    /// Per tree node: its place in `visible` (the History's visible text), or NOT_SHOWN.
+    fn visible_at(&self) -> &[u32] {
+        self.visible_at.get_or_init(|| {
+            let mut at = vec![NOT_SHOWN; self.tree.len()];
+            for (i, &node) in self.visible.iter().enumerate() {
+                at[node as usize] = i as u32;
+            }
+            at
+        })
+    }
+
+    /// Where a tree node is in `visible`, if it's there.
+    fn visible_index(&self, node: u32) -> Option<usize> {
+        self.visible_at().get(node as usize).copied().filter(|&i| i != NOT_SHOWN).map(|i| i as usize)
     }
 
     // ---- Reading ----
@@ -296,10 +326,29 @@ impl Doc {
     }
 
     pub fn is_in_effect(&self, id: ChangeId) -> bool {
+        self.in_effect_where(id, &|_| true, &FxHashSet::default())
+    }
+
+    /// Is a Change in effect, counting only the Reverts `counts` accepts, and taking those in
+    /// `reverted` as reverted (by a Revert not made yet)? The one rule behind `is_in_effect`
+    /// (every Revert counts, nothing else reverted), a version's view (only the Reverts in the
+    /// version count) and a Revert preview (what's in effect if these were reverted now).
+    fn in_effect_where(&self, id: ChangeId, counts: &dyn Fn(ChangeId) -> bool, reverted: &FxHashSet<ChangeId>) -> bool {
+        if reverted.contains(&id) {
+            return false;
+        }
         match self.reverted_by.get(&id) {
-            Some(reverters) => reverters.iter().all(|&r| !self.is_in_effect(r)),
+            Some(reverters) => reverters.iter().filter(|&&r| counts(r)).all(|&r| !self.in_effect_where(r, counts, reverted)),
             None => true,
         }
+    }
+
+    /// Is a character visible, if `in_effect` says which Changes are in effect? Written by one
+    /// in effect, and deleted by none in effect (a Move's anchor never is).
+    fn visible_where(&self, node: u32, in_effect: &dyn Fn(ChangeId) -> bool) -> bool {
+        !self.tree.is_anchor_at(node)
+            && in_effect(self.tree.change_at(node))
+            && !self.tree.deleters_at(node).iter().any(|&d| in_effect(d))
     }
 
     /// The Merge notices the Author hasn't dismissed, worked out from the History.
@@ -315,8 +364,8 @@ impl Doc {
         }
         // External edits compared against the current text because no written version was found:
         // they point at the text that edit wrote.
-        let mut unknown: Vec<ChangeId> = self.fields.keys()
-            .filter(|(record, field)| field == "base" && self.field(record, "base") == Some("unknown"))
+        let mut unknown: Vec<ChangeId> = self.records_starting("session/")
+            .filter(|(record, _)| self.field(record, "base") == Some("unknown"))
             .filter_map(|(record, _)| record.strip_prefix("session/")?.parse().ok())
             .collect();
         unknown.sort();
@@ -335,31 +384,24 @@ impl Doc {
             .map(|(key, involved)| {
                 // Walk the visible text so the characters come out in reading order; a gap in
                 // where they sit starts a new place.
-                let found: Vec<(usize, u32)> = self.visible.iter().copied().enumerate().filter(|(_, n)| involved.contains(n)).collect();
-                let mut places: Vec<(CharId, CharId)> = Vec::new();
-                for (i, &(at, node)) in found.iter().enumerate() {
-                    let id = self.tree.id_of(node);
-                    match places.last_mut() {
-                        Some(place) if found[i - 1].0 + 1 == at => place.1 = id,
-                        _ => places.push((id, id)),
-                    }
-                }
+                let found: Vec<usize> = (0..self.visible.len()).filter(|&i| involved.contains(&self.visible[i])).collect();
+                let id_at = |i: usize| self.tree.id_of(self.visible[i]);
                 MergeNotice {
                     key,
-                    chars: found.iter().map(|&(_, n)| self.tree.id_of(n)).collect(),
-                    text: found.iter().filter_map(|&(_, n)| self.tree.char_at(n)).collect(),
-                    places,
+                    chars: found.iter().map(|&i| id_at(i)).collect(),
+                    text: found.iter().filter_map(|&i| self.tree.char_at(self.visible[i])).collect(),
+                    places: runs(found.iter().copied()).into_iter().map(|(start, end)| (id_at(start), id_at(end - 1))).collect(),
                 }
             })
             .collect()
     }
 
-    /// This Device's ID.
     /// Has this Doc applied the Change?
     pub fn has(&self, id: ChangeId) -> bool {
         self.applied.contains(&id)
     }
 
+    /// This Device's ID.
     pub fn device(&self) -> DeviceId {
         self.device
     }
@@ -392,8 +434,7 @@ impl Doc {
 
     /// Where a character is in `committed_text` (in characters), if it's visible.
     pub fn index_of_char(&self, id: CharId) -> Option<usize> {
-        let node = self.tree.index_of(id)?;
-        self.visible.iter().position(|&n| n == node)
+        self.visible_index(self.tree.index_of(id)?)
     }
 
     /// The current value of a record's field: the latest in the fixed Change order among the
@@ -404,38 +445,45 @@ impl Doc {
 
     /// The value in effect, with the Change that set it.
     fn field_value(&self, record: &str, field: &str) -> Option<&FieldValue> {
-        self.fields.get(&(record.to_string(), field.to_string()))?
-            .iter()
-            .filter(|v| self.is_in_effect(v.id))
-            .max_by_key(|v| (v.hlc, v.id.device))
+        Self::in_effect_of(self.values_of(record, field)?, &|id| self.is_in_effect(id))
+    }
+
+    /// Every value a field was ever set to.
+    fn values_of(&self, record: &str, field: &str) -> Option<&[FieldValue]> {
+        self.fields.get(record)?.get(field).map(Vec::as_slice)
+    }
+
+    /// The value in effect among `values`: the latest in the fixed Change order among those
+    /// `in_effect` accepts.
+    fn in_effect_of<'a>(values: &'a [FieldValue], in_effect: &dyn Fn(ChangeId) -> bool) -> Option<&'a FieldValue> {
+        values.iter().filter(|v| in_effect(v.id)).max_by_key(|v| (v.hlc, v.id.device))
     }
 
     /// Every field of a record that has a value in effect, with that value, sorted by field.
     pub fn fields_of(&self, record: &str) -> Vec<(String, String)> {
-        let mut found: Vec<(String, String)> = self.fields.keys()
-            .filter(|(r, _)| r == record)
-            .filter_map(|(r, field)| Some((field.clone(), self.field(r, field)?.to_string())))
-            .collect();
-        found.sort();
-        found
+        self.fields.get(record).into_iter().flatten()
+            .filter_map(|(field, values)| Some((field.clone(), Self::in_effect_of(values, &|id| self.is_in_effect(id))?.value.clone())))
+            .collect()
+    }
+
+    /// The records whose name starts with `prefix`, with their fields, in order.
+    fn records_starting<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = (&'a String, &'a BTreeMap<String, Vec<FieldValue>>)> + 'a {
+        self.fields.range::<str, _>((Bound::Included(prefix), Bound::Unbounded))
+            .take_while(move |(record, _)| record.starts_with(prefix))
     }
 
     /// The records whose name starts with `prefix` (such as "reviewer/") that have a field in
     /// effect, sorted.
     pub fn records(&self, prefix: &str) -> Vec<String> {
-        let mut found: Vec<String> = self.fields.keys()
-            .filter(|(record, field)| record.starts_with(prefix) && self.field_value(record, field).is_some())
+        self.records_starting(prefix)
+            .filter(|(_, fields)| fields.values().any(|values| Self::in_effect_of(values, &|id| self.is_in_effect(id)).is_some()))
             .map(|(record, _)| record.clone())
-            .collect();
-        found.sort();
-        found.dedup();
-        found
+            .collect()
     }
 
     /// The value a field had in an earlier Change, such as the version a Merge notice says lost.
     pub fn field_set_by(&self, record: &str, field: &str, change: ChangeId) -> Option<&str> {
-        self.fields.get(&(record.to_string(), field.to_string()))?
-            .iter().find(|v| v.id == change).map(|v| v.value.as_str())
+        self.values_of(record, field)?.iter().find(|v| v.id == change).map(|v| v.value.as_str())
     }
 
     /// Free-text fields whose value in effect was set without seeing another Device's edit of
@@ -443,7 +491,7 @@ impl Doc {
     /// goes once the Author edits the field again (that edit replaces the shown value).
     fn concurrent_fields(&self) -> Vec<(String, String, ChangeId, ChangeId)> {
         let mut found = Vec::new();
-        for ((record, field), values) in &self.fields {
+        for (record, field, values) in self.fields.iter().flat_map(|(r, fields)| fields.iter().map(move |(f, v)| (r, f, v))) {
             if !is_free_text(record, field) {
                 continue;
             }
@@ -483,16 +531,10 @@ impl Doc {
         let (Some(first), Some(last)) = (self.tree.index_of(span.first), self.tree.index_of(span.last)) else {
             return String::new();
         };
-        let start = self.visible.iter().position(|&n| n == first);
-        let end = self.visible.iter().position(|&n| n == last);
-        match (start, end) {
+        match (self.visible_index(first), self.visible_index(last)) {
             (Some(s), Some(e)) if s <= e => self.visible[s..=e].iter().filter_map(|&n| self.tree.char_at(n)).collect(),
             _ => String::new(),
         }
-    }
-
-    pub fn depends_on(&self, target: ChangeId) -> Vec<ChangeId> {
-        self.tree.inside(target)
     }
 
     // ---- Applying Changes ----
@@ -513,16 +555,30 @@ impl Doc {
             // Dismissing a notice, setting a field or commenting changes no text: nothing to recompute.
             ChangeKind::Dismiss { .. } | ChangeKind::SetField { .. } | ChangeKind::Milestone { .. }
             | ChangeKind::Comment { .. } | ChangeKind::Reply { .. } => self.debug_check(),
+            // Nor does a Revert that only takes back (or brings back) such Changes: undoing a
+            // Comment's deletion, a Milestone's renaming, a Dismiss.
+            ChangeKind::Revert { targets } if new && !self.reverts_text(targets) => self.debug_check(),
             _ if new => self.refresh(),
             _ => {} // already had it
         }
     }
 
+    /// Does reverting `targets` change what's undone in the tree? True if any of them, followed
+    /// through Reverts, wrote or deleted text or Moved it (or isn't known yet).
+    fn reverts_text(&self, targets: &[ChangeId]) -> bool {
+        targets.iter().any(|t| match self.made.get(t).map(|m| m.did()) {
+            Some(history::Did::Text { .. } | history::Did::Move) | None => true,
+            Some(history::Did::Revert(inner)) => self.reverts_text(inner),
+            Some(_) => false,
+        })
+    }
+
     /// Recomputes everything derived from the Changes: what's undone, the layout, the visible text.
     fn refresh(&mut self) {
         self.refresh_undone();
-        self.layout = Layout::compute(&self.tree, &self.in_effect_moves(), &self.typed_into);
+        self.layout = Layout::compute(&self.tree, self.fixed_order().clone(), &self.in_effect_moves(), &self.typed_into);
         self.visible = self.computed_visible(&self.layout);
+        self.visible_at.take();
         self.place_burst(); // merges don't close a burst; it stays after its character
     }
 
@@ -553,7 +609,15 @@ impl Doc {
     /// cached state, and check every shortcut gave the same visible text and pieces.
     fn debug_check(&self) {
         if cfg!(debug_assertions) {
-            let layout = Layout::compute(&self.tree, &self.in_effect_moves(), &self.typed_into);
+            let order = Arc::new(self.tree.fixed_order());
+            if let Some(cached) = self.order.get() {
+                assert_eq!(cached.order, order.order, "the cached fixed order is stale");
+            }
+            if let Some(cached) = self.visible_at.get() {
+                assert!(self.visible.iter().enumerate().all(|(i, &n)| cached.get(n as usize) == Some(&(i as u32))),
+                        "the cached places in the visible text are stale");
+            }
+            let layout = Layout::compute(&self.tree, order, &self.in_effect_moves(), &self.typed_into);
             let fresh: Vec<(u32, Option<Piece>)> = self.computed_visible(&layout).into_iter()
                 .map(|n| (n, layout.level_at(n)))
                 .collect();
@@ -591,7 +655,8 @@ impl Doc {
         }
         match &change.kind {
             ChangeKind::Insert(run) => {
-                self.tree.insert_run(change.id, &run.text, run.parent, run.side, run.right_origin);
+                self.order.take(); // new nodes: the fixed order changes
+                self.tree.insert_run(change.id, &run.text, run.parent, run.side);
                 self.note_into(run.into, change.id, run.text.chars().count());
             }
             ChangeKind::Delete(ranges) => {
@@ -603,7 +668,8 @@ impl Doc {
                 for range in deleted {
                     self.tree.delete_range(range.first, range.len, change.id);
                 }
-                self.tree.insert_run(change.id, &inserted.text, inserted.parent, inserted.side, inserted.right_origin);
+                self.order.take();
+                self.tree.insert_run(change.id, &inserted.text, inserted.parent, inserted.side);
                 self.note_into(inserted.into, change.id, inserted.text.chars().count());
             }
             ChangeKind::Revert { targets } => {
@@ -611,8 +677,9 @@ impl Doc {
                     self.reverted_by.entry(*target).or_default().push(change.id);
                 }
             }
-            ChangeKind::Move { pieces, parent, side, right_origin, seen, into } => {
-                self.tree.insert_anchors(change.id, pieces.len(), *parent, *side, *right_origin);
+            ChangeKind::Move { pieces, parent, side, seen, into, .. } => {
+                self.order.take();
+                self.tree.insert_anchors(change.id, pieces.len(), *parent, *side);
                 self.note_into(*into, change.id, pieces.len());
                 self.moves.push((change.hlc, MoveInfo { id: change.id, pieces: pieces.clone(), seen: seen.clone() }));
             }
@@ -622,7 +689,7 @@ impl Doc {
             }
             ChangeKind::SetField { record, field, value, replaces } => {
                 // Changes nothing in the text; field() picks the latest value in effect.
-                self.fields.entry((record.clone(), field.clone())).or_default()
+                self.fields.entry(record.clone()).or_default().entry(field.clone()).or_default()
                     .push(FieldValue { hlc: change.hlc, id: change.id, value: value.clone(), replaces: *replaces });
             }
             ChangeKind::Milestone { name, seen } => {
@@ -692,6 +759,7 @@ impl Doc {
         let doomed: FxHashSet<u32> = doomed.iter().copied().collect();
         let at = self.shown_index_after(left, &doomed);
         self.visible.retain(|n| !doomed.contains(n));
+        self.visible_at.take();
         self.apply_change(&change);
         let count = text.chars().count() as u32;
         if count > 0 {
@@ -699,6 +767,7 @@ impl Doc {
             let nodes: Vec<u32> = (first..first + count).collect(); // a Change's nodes are consecutive
             self.layout.insert_typed(&nodes, into.map(|a| (a.change, a.offset as usize)));
             self.visible.splice(at..at, nodes);
+            self.visible_at.take();
         }
         self.place_burst();
         self.debug_check();
@@ -1068,22 +1137,26 @@ impl Doc {
         self.commit_local(ChangeKind::Move { pieces, parent, side, right_origin, seen, into }, now_ms)
     }
 
-    pub fn revert_local(&mut self, target: ChangeId, with_dependents: bool, now_ms: u64) -> Change {
+    /// Reverts one Change of any kind, such as a Comment or a Milestone (deleting it), with its
+    /// dependents if asked: the same ones `revert_changes_local` takes (`dependents`). None if
+    /// it isn't in effect. (Undo and the History view revert content, through
+    /// `revert_changes_local`, which also leaves out the Work's copies of library files.)
+    pub fn revert_local(&mut self, target: ChangeId, with_dependents: bool, now_ms: u64) -> Option<Change> {
+        if !self.has(target) || !self.is_in_effect(target) {
+            return None;
+        }
         let mut targets = vec![target];
         if with_dependents {
-            targets.extend(self.depends_on(target));
+            let mut dependents = self.dependents(&targets);
+            dependents.sort(); // by ID, as `crate::reference::doc` lists them
+            targets.extend(dependents);
         }
-        self.commit_local(ChangeKind::Revert { targets }, now_ms)
+        Some(self.commit_local(ChangeKind::Revert { targets }, now_ms))
     }
 
+    /// Brings one Change back (redo): `restore_changes_local` for just it. None if it isn't reverted.
     pub fn restore_local(&mut self, target: ChangeId, now_ms: u64) -> Option<Change> {
-        let reverters = self.reverted_by.get(&target).cloned().unwrap_or_default();
-        let in_effect: Vec<ChangeId> = reverters.into_iter().filter(|&r| self.is_in_effect(r)).collect();
-        if in_effect.is_empty() {
-            None
-        } else {
-            Some(self.commit_local(ChangeKind::Revert { targets: in_effect }, now_ms))
-        }
+        self.restore_changes_local(&[target], now_ms)
     }
 
     pub fn dismiss_local(&mut self, notice: NoticeKey, now_ms: u64) -> Change {
@@ -1121,26 +1194,11 @@ impl Doc {
     /// The Milestones that haven't been deleted (reverted), in the fixed Change order,
     /// with their current names.
     pub fn milestones(&self) -> Vec<Milestone> {
-        let mut list: Vec<Milestone> = self.milestones.iter()
-            .filter(|(id, ..)| self.is_in_effect(*id))
-            .map(|(id, hlc, name, seen)| Milestone {
-                id: *id,
-                hlc: *hlc,
-                name: self.field(&milestone_record(*id), "name").unwrap_or(name).to_string(),
-                seen: seen.clone(),
-            })
-            .collect();
-        list.sort_by_key(|m| (m.hlc, m.id.device));
-        list
+        self.milestones_and_deleted().into_iter().filter(|(_, deleted)| !deleted).map(|(m, _)| m).collect()
     }
 
     fn milestone(&self, id: ChangeId) -> &Vec<(DeviceId, u32)> {
         self.milestones.iter().find(|(m, ..)| *m == id).map(|(_, _, _, seen)| seen).expect("no such Milestone")
-    }
-
-    /// Is `change` part of Milestone `milestone`?
-    pub fn in_milestone(&self, milestone: ChangeId, change: ChangeId) -> bool {
-        holds(self.milestone(milestone), change)
     }
 
     /// The text as it was at a Milestone, without changing anything.
@@ -1200,20 +1258,12 @@ impl Doc {
         if pieces.is_empty() {
             return Vec::new();
         }
-        let order = self.tree.order();
-        let pos = positions(&order, self.tree.len());
-        let mut index_of = vec![u32::MAX; self.tree.len()];
-        for (i, &node) in self.visible.iter().enumerate() {
-            index_of[node as usize] = i as u32;
-        }
-        let mut at: Vec<usize> = Vec::new();
-        for span in pieces {
-            let (Some(first), Some(last)) = (self.tree.index_of(span.first), self.tree.index_of(span.last)) else { continue };
-            let (lo, hi) = (pos[first as usize] as usize, pos[last as usize] as usize);
-            if lo <= hi {
-                at.extend(order[lo..=hi].iter().map(|&n| index_of[n as usize]).filter(|&i| i != u32::MAX).map(|i| i as usize));
-            }
-        }
+        let order = self.fixed_order();
+        let mut at: Vec<usize> = pieces.iter()
+            .filter_map(|span| order.span(&self.tree, span))
+            .flatten()
+            .filter_map(|&n| self.visible_index(n))
+            .collect();
         at.sort_unstable();
         at.dedup();
         at
@@ -1255,14 +1305,14 @@ impl Doc {
     /// (such as text Moved out of the passage earlier, now shown elsewhere). Deleted characters
     /// and anchors don't split a piece; text later typed inside a piece is covered by it.
     fn comment_pieces(&self, selected: &[u32]) -> Vec<Span> {
-        let order = self.tree.order();
-        let pos = positions(&order, self.tree.len());
+        let order = self.fixed_order();
+        let pos = &order.pos;
         let chosen: FxHashSet<u32> = selected.iter().copied().collect();
         let lo = selected.iter().map(|&n| pos[n as usize]).min().expect("a Comment covers some text") as usize;
         let hi = selected.iter().map(|&n| pos[n as usize]).max().expect("a Comment covers some text") as usize;
         let mut pieces: Vec<Span> = Vec::new();
         let mut open: Option<Span> = None;
-        for &node in &order[lo..=hi] {
+        for &node in &order.order[lo..=hi] {
             if chosen.contains(&node) {
                 let id = self.tree.id_of(node);
                 match open.as_mut() {
@@ -1306,20 +1356,15 @@ impl Doc {
         if self.comments.is_empty() {
             return Vec::new(); // most Works: no need to walk the tree
         }
-        let order = self.tree.order();
-        let pos = positions(&order, self.tree.len());
+        let order = self.fixed_order();
         let shown = self.shown_positions();
         let mut list: Vec<CommentView> = self.comments.iter()
             .filter(|c| self.is_in_effect(c.id))
             .map(|c| {
                 // Every visible character in its pieces' ranges, as positions in the shown text.
                 let mut at: Vec<u32> = Vec::new();
-                for span in &c.pieces {
-                    let (Some(first), Some(last)) = (self.tree.index_of(span.first), self.tree.index_of(span.last)) else { continue };
-                    let (lo, hi) = (pos[first as usize] as usize, pos[last as usize] as usize);
-                    if lo <= hi {
-                        at.extend(order[lo..=hi].iter().map(|&n| shown[n as usize]).filter(|&p| p != NOT_SHOWN));
-                    }
+                for nodes in c.pieces.iter().filter_map(|span| order.span(&self.tree, span)) {
+                    at.extend(nodes.iter().map(|&n| shown[n as usize]).filter(|&p| p != NOT_SHOWN));
                 }
                 at.sort_unstable();
                 at.dedup();
@@ -1332,13 +1377,7 @@ impl Doc {
                         at.splice(i..i, start..start + len);
                     }
                 }
-                let mut ranges: Vec<(usize, usize)> = Vec::new();
-                for p in at.into_iter().map(|p| p as usize) {
-                    match ranges.last_mut() {
-                        Some((_, end)) if *end == p => *end = p + 1,
-                        _ => ranges.push((p, p + 1)),
-                    }
-                }
+                let ranges = runs(at.into_iter().map(|p| p as usize));
                 let record = comment_record(c.id);
                 let mut replies: Vec<&ReplyMade> = self.replies.iter().filter(|r| r.comment == c.id && self.is_in_effect(r.id)).collect();
                 replies.sort_by_key(|r| (r.hlc, r.id.device));
@@ -1395,13 +1434,13 @@ impl Doc {
     /// The layout and the visible nodes (in reading order) if only the Changes `member` accepts
     /// had ever happened.
     fn view_among(&self, member: &dyn Fn(ChangeId) -> bool) -> (Layout, Vec<u32>) {
-        let in_effect = |id: ChangeId| member(id) && self.is_in_effect_among(id, member);
+        let in_effect = |id: ChangeId| member(id) && self.in_effect_where(id, member, &FxHashSet::default());
         let mut moves: Vec<(Hlc, MoveInfo)> = self.moves.iter().filter(|(_, m)| in_effect(m.id)).cloned().collect();
         moves.sort_by_key(|(hlc, m)| (*hlc, m.id.device));
         let moves: Vec<MoveInfo> = moves.into_iter().map(|(_, m)| m).collect();
-        let layout = Layout::compute(&self.tree, &moves, &self.typed_into);
+        let layout = Layout::compute(&self.tree, self.fixed_order().clone(), &moves, &self.typed_into);
         let nodes = layout.reading_nodes(&self.tree).into_iter()
-            .filter(|&n| in_effect(self.tree.change_at(n)) && !self.tree.deleters_at(n).iter().any(|&d| in_effect(d)))
+            .filter(|&n| self.visible_where(n, &in_effect))
             .collect();
         (layout, nodes)
     }
@@ -1428,8 +1467,7 @@ impl Doc {
             self.view_among(&|c| holds(base, c))
         };
         let old: Vec<char> = nodes.iter().filter_map(|&n| self.tree.char_at(n)).collect();
-        // Editors may add a byte order mark or Windows line endings; the Work's text has neither.
-        let new: Vec<char> = file_text.strip_prefix('\u{feff}').unwrap_or(file_text).replace("\r\n", "\n").chars().collect();
+        let new: Vec<char> = text_file::normalise(file_text).chars().collect();
         let plan = text_file::plan(&old, &new);
         if plan.hunks.is_empty() {
             return Vec::new(); // nothing was edited outside the app
@@ -1445,25 +1483,27 @@ impl Doc {
         }
         // Each hunk's new text, in order: inserted text and moved blocks, placed one after the
         // other, starting right after the unchanged text before the hunk (as it was in `base`).
-        for (h, hunk) in plan.hunks.iter().enumerate() {
-            let mut parts: Vec<(usize, Option<(usize, usize)>)> = plan.inserted.iter()
-                .filter(|&&(ih, ..)| ih == h)
-                .map(|&(_, start, len)| (start, None))
-                .chain(plan.moved.iter().filter(|m| m.hunk == h).map(|m| (m.new_start, Some((m.old_start, m.len)))))
-                .collect();
+        // The parts of each hunk, sorted out once: (where it starts in the new text, what it is).
+        let mut parts: Vec<Vec<(usize, Part)>> = vec![Vec::new(); plan.hunks.len()];
+        for &(h, start, len) in &plan.inserted {
+            parts[h].push((start, Part::Inserted { len }));
+        }
+        for m in &plan.moved {
+            parts[m.hunk].push((m.new_start, Part::Moved { old_start: m.old_start, len: m.len }));
+        }
+        for (hunk, mut parts) in plan.hunks.iter().zip(parts) {
             parts.sort_by_key(|&(start, _)| start);
             let (mut left, into) = self.placement_after_in(&layout, hunk.old_start.checked_sub(1).map(|i| nodes[i]));
-            for (start, moved) in parts {
+            for (start, part) in parts {
                 let (parent, side, right_origin) = self.tree.place_after(left);
-                match moved {
-                    None => {
-                        let len = plan.inserted.iter().find(|&&(_, s, _)| s == start).expect("listed above").2;
+                match part {
+                    Part::Inserted { len } => {
                         let text: String = new[start..start + len].iter().collect();
                         let change = self.import_change(ChangeKind::Insert(InsertRun { text, parent, side, right_origin, into }), now_ms);
                         left = Some(CharId { change: change.id, offset: len as u32 - 1 });
                         recorded.push(change);
                     }
-                    Some((old_start, len)) => {
+                    Part::Moved { old_start, len } => {
                         let pieces = self.pieces_of(&layout, &nodes[old_start..old_start + len]);
                         let count = pieces.len() as u32;
                         // It only knew `base`: it takes text from Moves made since, like an offline Device would.
@@ -1493,14 +1533,6 @@ impl Doc {
         change
     }
 
-    /// Like `is_in_effect`, counting only Reverts that `member` accepts.
-    fn is_in_effect_among(&self, id: ChangeId, member: &dyn Fn(ChangeId) -> bool) -> bool {
-        match self.reverted_by.get(&id) {
-            Some(reverters) => reverters.iter().filter(|&&r| member(r)).all(|&r| !self.is_in_effect_among(r, member)),
-            None => true,
-        }
-    }
-
     /// Gives this Device a readable name, shown in the History.
     pub fn set_device_name_local(&mut self, name: &str, now_ms: u64) -> Change {
         let record = device_record(self.device);
@@ -1525,14 +1557,19 @@ impl Doc {
     /// value, and its Session.
     fn new_change(&mut self, reserved: Option<ChangeId>, kind: ChangeKind, now_ms: u64) -> Change {
         let id = reserved.unwrap_or_else(|| self.reserve_id());
-        // Same Session unless this is the first Change since the Work was opened, or there
-        // was a long pause. (A clock that jumped backwards counts as no pause.)
-        let session = match self.session {
-            Some((first, last)) if now_ms.saturating_sub(last) < SESSION_GAP_MS => first,
-            _ => id,
-        };
+        let session = self.session_for(id, now_ms);
         self.session = Some((session, now_ms));
         Change { id, hlc: self.clock.tick(now_ms), session, kind }
+    }
+
+    /// The Session a Change of this Device made at `now_ms` belongs to (`id` is the Change's):
+    /// the current one, unless this is the first Change since the Work was opened, or there was
+    /// a long pause (a clock that jumped backwards counts as no pause). Then it starts its own.
+    fn session_for(&self, id: ChangeId, now_ms: u64) -> ChangeId {
+        match self.session {
+            Some((first, last)) if now_ms.saturating_sub(last) < SESSION_GAP_MS => first,
+            _ => id,
+        }
     }
 
     /// Makes a new Change and applies it the general way.
@@ -1547,13 +1584,23 @@ impl Doc {
 /// A node that isn't shown, in `Doc::shown_positions`.
 const NOT_SHOWN: u32 = u32::MAX;
 
-/// Per tree node: its position in `order` (the tree's fixed order).
-fn positions(order: &[u32], len: usize) -> Vec<u32> {
-    let mut pos = vec![0u32; len];
-    for (i, &node) in order.iter().enumerate() {
-        pos[node as usize] = i as u32;
+/// Sorted, distinct positions as runs that sit together: (start, end) ranges, end exclusive.
+pub(crate) fn runs(positions: impl IntoIterator<Item = usize>) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for p in positions {
+        match ranges.last_mut() {
+            Some((_, end)) if *end == p => *end = p + 1,
+            _ => ranges.push((p, p + 1)),
+        }
     }
-    pos
+    ranges
+}
+
+/// One part of a hunk of an External edit: new text, or a block moved there.
+#[derive(Clone, Copy)]
+enum Part {
+    Inserted { len: usize },
+    Moved { old_start: usize, len: usize },
 }
 
 /// The byte position of the `chars`-th character of `s` (or its end).
@@ -1683,7 +1730,7 @@ mod test {
         let mut doc = Doc::new(DeviceId(1));
         doc.insert_local(0, "cat", 1000);
         let sat = doc.insert_local(3, " sat", 2000);
-        let r = doc.revert_local(sat.id, false, 3000);
+        let r = doc.revert_local(sat.id, false, 3000).unwrap();
         doc.revert_local(r.id, false, 4000);
         assert_eq!(doc.text(), "cat sat");
     }
@@ -1695,7 +1742,7 @@ mod test {
         let cat = a.insert_local(0, "cat", 1000);
         b.apply(&cat);
         a.revert_local(cat.id, false, 2000); // both revert it offline
-        let rb = b.revert_local(cat.id, false, 2000);
+        let rb = b.revert_local(cat.id, false, 2000).unwrap();
         a.apply(&rb);
         assert_eq!(a.text(), "");
         a.restore_local(cat.id, 3000).expect("cat had Reverts to undo");
@@ -2548,6 +2595,46 @@ mod test {
         assert_eq!(doc.insert_local(0, "!", 4000).id.counter, 2);
     }
 
+    #[test]
+    fn a_cut_with_text_merged_into_it_is_deleted_instead() {
+        let mut laptop = Doc::new(DeviceId(1));
+        let mut phone = Doc::new(DeviceId(2));
+        let base = laptop.insert_local(0, "abcde", 1000);
+        phone.apply(&base);
+        laptop.delete_text(1, 3, 2000); // cut "bcd", waiting for its paste
+        let x = phone.insert_local(2, "X", 2000); // "abXcde": inside the cut
+        laptop.apply(&x);
+        assert_eq!(laptop.text(), "aXe", "what's merged in shows; the cut stays hidden");
+        let CutPasted::Deleted(Some(deleted)) = laptop.cut_to_move(3, 3000) else { panic!("no longer one stretch") };
+        assert!(matches!(deleted.kind, ChangeKind::Delete(_)));
+        assert_eq!(laptop.text(), "aXe");
+        assert!(laptop.burst().is_none());
+    }
+
+    #[test]
+    fn reverting_text_redoes_the_layout_and_reverting_a_comment_does_not_need_to() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "The rain had stopped.", 1000);
+        let comment = doc.comment_local(4, 4, AUTHOR, "rain?", 2000);
+        let deleted = doc.revert_local(comment.id, false, 3000).expect("in effect");
+        assert!(doc.comments().is_empty());
+        doc.revert_local(deleted.id, false, 4000).expect("the deletion is in effect"); // undo it
+        assert_eq!(doc.comments()[0].ranges, vec![(4, 8)]);
+        assert!(doc.revert_local(deleted.id, false, 5000).is_none(), "already reverted");
+        let gone = doc.delete_local(0, 4, 6000);
+        doc.revert_local(gone.id, false, 7000).expect("in effect");
+        assert_eq!(doc.text(), "The rain had stopped.");
+    }
+
+    #[test]
+    #[should_panic(expected = "overlap")]
+    fn find_and_replace_refuses_overlapping_edits() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "The rain had stopped.", 1000);
+        let edit = |index, len| ReplaceEdit { index, len, text: "x".into() };
+        doc.replace_matches_local(&[edit(4, 4), edit(6, 4)], "rain", "x", 2, 2000);
+    }
+
     // ---- Comments ----
 
     use crate::change::AUTHOR;
@@ -2732,7 +2819,7 @@ mod test {
         let comment = laptop.comment_local(1, 3, AUTHOR, "too abrupt?", 2000);
         phone.apply(&comment);
         // Offline: the phone deletes it, the laptop replies to it.
-        let delete = phone.revert_local(comment.id, false, 3000);
+        let delete = phone.revert_local(comment.id, false, 3000).unwrap();
         let reply = laptop.reply_local(comment.id, AUTHOR, "or is it?", 4000);
         phone.apply(&reply);
         laptop.apply(&delete);

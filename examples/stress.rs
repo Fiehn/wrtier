@@ -119,7 +119,8 @@ fn write_history(n: usize, rng: &mut Rng) -> (Doc, Vec<Change>) {
                 }
                 let back = rng.below(changes.len().min(50));
                 let target = changes[changes.len() - 1 - back].id;
-                doc.revert_local(target, false, now)
+                let Some(change) = doc.revert_local(target, false, now) else { continue }; // already reverted
+                change
             }
         };
         changes.push(change);

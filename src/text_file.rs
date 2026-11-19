@@ -16,15 +16,20 @@ const MARKER: &str = "// wrtier version:";
 
 /// A Text file's contents: `text`, then the marker line.
 pub fn with_marker(text: &str, version: &[(DeviceId, u32)]) -> String {
-    let version: Vec<String> = version.iter().map(|&(device, counter)| ChangeId { device, counter }.to_string()).collect();
-    format!("{text}\n{MARKER} {}\n", version.join(", "))
+    format!("{text}\n{MARKER} {}\n", version_text(version))
+}
+
+/// Text from another editor as the Work's text has it: without a byte order mark, and with
+/// Unix line endings instead of Windows ones.
+pub fn normalise(text: &str) -> String {
+    text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n")
 }
 
 /// A Text file's text, and the version its marker line names (None if the line is missing or
 /// was edited, as in a file from elsewhere). A byte order mark and Windows line endings, which
-/// other editors may add, are dropped first.
+/// other editors may add, are dropped first (`normalise`).
 pub fn split_marker(file: &str) -> (String, Option<Vec<(DeviceId, u32)>>) {
-    let file = file.strip_prefix('\u{feff}').unwrap_or(file).replace("\r\n", "\n");
+    let file = normalise(file);
     let body = file.strip_suffix('\n').unwrap_or(&file); // an editor may drop the last line break
     if let Some((text, last)) = body.rsplit_once('\n') {
         if let Some(version) = last.strip_prefix(MARKER).and_then(|rest| parse_version(rest.trim())) {
@@ -149,6 +154,8 @@ pub const MOVE_MIN_CHARS: usize = 40;
 /// Comparing gives up refining after this long and settles for a coarser (still correct) result,
 /// so a completely rewritten file can't hang the app.
 const DIFF_DEADLINE: Duration = Duration::from_secs(2);
+/// Looking for moved blocks gives up after this long, for the same reason.
+const MOVE_DEADLINE: Duration = Duration::from_secs(1);
 
 /// One stretch where the file differs: `old[old_start..][..old_len]` became `new[new_start..][..new_len]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +191,10 @@ pub struct EditPlan {
 /// Compares `old` with `new`.
 pub fn plan(old: &[char], new: &[char]) -> EditPlan {
     let hunks = hunks(old, new);
+    // Looking for moved blocks compares every deleted segment with every inserted one: on a file
+    // reformatted throughout that could take very long, so it stops at a deadline too, and
+    // whatever it hasn't looked at yet stays deleted and inserted (still correct, just coarser).
+    let deadline = Instant::now() + MOVE_DEADLINE;
     let mut deleted: Vec<(usize, usize, usize)> = Vec::new(); // (hunk, start, len)
     let mut inserted: Vec<(usize, usize, usize)> = Vec::new();
     for (h, hunk) in hunks.iter().enumerate() {
@@ -200,7 +211,7 @@ pub fn plan(old: &[char], new: &[char]) -> EditPlan {
     //    the block without the spaces at its edges (cutting a passage from mid-line usually
     //    takes a space along on one side, and pasting adds one on the other).
     let mut i = 0;
-    'deleted: while i < deleted.len() {
+    'deleted: while i < deleted.len() && Instant::now() < deadline {
         let (dh, ds, dl) = deleted[i];
         for (k0, len) in candidates(&old[ds..ds + dl]) {
             let block = &old[ds + k0..ds + k0 + len];
@@ -220,7 +231,7 @@ pub fn plan(old: &[char], new: &[char]) -> EditPlan {
     // 2. An inserted block found inside deleted text elsewhere (e.g. one paragraph of a deleted
     //    chapter pasted somewhere else).
     let mut i = 0;
-    'inserted: while i < inserted.len() {
+    'inserted: while i < inserted.len() && Instant::now() < deadline {
         let (ih, is, il) = inserted[i];
         for (k0, len) in candidates(&new[is..is + il]) {
             let block = &new[is + k0..is + k0 + len];
@@ -349,7 +360,7 @@ mod tests {
     fn the_marker_comes_off_exactly() {
         let version = vec![(DeviceId(0x7f8c3ffd), 120), (DeviceId(0x3e91a2b0), 48)];
         let file = with_marker("The rain had stopped.", &version);
-        assert_eq!(file, "The rain had stopped.\n// wrtier version: 7f8c3ffd:120, 3e91a2b0:48\n");
+        assert_eq!(file, "The rain had stopped.\n// wrtier version: 7f8c3ffd:120,3e91a2b0:48\n");
         // Whatever the text ends with, it comes back as it was.
         for text in ["", "abc", "abc\n", "abc\n\n", "\n"] {
             assert_eq!(split_marker(&with_marker(text, &version)), (text.to_string(), Some(version.clone())), "{text:?}");

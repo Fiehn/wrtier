@@ -13,8 +13,10 @@ pub fn without_footnotes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find(HEAD) {
-        // `\#footnote[` is text, not a Footnote.
-        if rest[..at].ends_with('\\') {
+        // `\#footnote[` is text, not a Footnote; but in `\\#footnote[` the backslash is itself
+        // escaped (a literal `\`), and the Footnote is real. An odd number of them escapes it.
+        let backslashes = rest[..at].bytes().rev().take_while(|&b| b == b'\\').count();
+        if backslashes % 2 == 1 {
             out.push_str(&rest[..at + HEAD.len()]);
             rest = &rest[at + HEAD.len()..];
             continue;
@@ -66,6 +68,10 @@ mod tests {
         assert_eq!(without_footnotes("The End#footnote[Or is it?]"), "The End");
         assert_eq!(without_footnotes("A#footnote[b #footnote[c] d]B"), "AB");
         assert_eq!(without_footnotes(r"A\#footnote[b]"), r"A\#footnote[b]");
+        // An escaped backslash before it doesn't escape the Footnote; three backslashes do.
+        assert_eq!(without_footnotes(r"A\\#footnote[b]C"), r"A\\C");
+        assert_eq!(without_footnotes(r"A\\\#footnote[b]"), r"A\\\#footnote[b]");
+        assert_eq!(without_footnotes(r"A#footnote[b]\#footnote[c]"), r"A\#footnote[c]");
         assert_eq!(without_footnotes("A#footnote[open"), "A#footnote[open");
         assert_eq!(without_footnotes("A#footnote[x \\] y]B"), "AB");
         assert_eq!(without_footnotes("No notes"), "No notes");

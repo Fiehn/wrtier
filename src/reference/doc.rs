@@ -13,6 +13,7 @@ pub struct Doc {
     clock: Hlc,
     applied: HashSet<ChangeId>, // to avoid applying the same change twice
     reverted_by: HashMap<ChangeId, Vec<ChangeId>>, // to track which changes have been reverted by which other changes
+    hlc_of: HashMap<ChangeId, Hlc>, // every Change's time, for the fixed Change order
     seen: HashMap<DeviceId, u32>, // to track the highest counter seen from each device
     moves: Vec<(Hlc, MoveInfo)>, // to track the moves that have been applied, in order of their HLC
     typed_into: HashMap<CharId, Vec<CharId>>, // a piece's anchor → nodes typed or dropped into it
@@ -48,6 +49,7 @@ impl Doc {
             clock: Hlc(0),
             applied: HashSet::new(),
             reverted_by: HashMap::new(),
+            hlc_of: HashMap::new(),
             seen: HashMap::new(),
             moves: Vec::new(),
             typed_into: HashMap::new(),
@@ -75,10 +77,18 @@ impl Doc {
             .collect();
         self.tree.set_undone(undone);
     }
-    pub fn revert_local(&mut self, target: ChangeId, with_dependents: bool, now_ms: u64) -> Change {
+    /// Reverts one Change that's in effect (None if it isn't), with the Changes inside it that
+    /// are still in effect if asked.
+    pub fn revert_local(&mut self, target: ChangeId, with_dependents: bool, now_ms: u64) -> Option<Change> {
+        if !self.applied.contains(&target) || !self.is_in_effect(target) {
+            return None;
+        }
         let mut targets = vec![target];
-        if with_dependents { targets.extend(self.depends_on(target)); }
-        self.commit_local(ChangeKind::Revert { targets }, now_ms)
+        if with_dependents {
+            let inside: Vec<ChangeId> = self.depends_on(target).into_iter().filter(|&c| self.is_in_effect(c)).collect();
+            targets.extend(inside);
+        }
+        Some(self.commit_local(ChangeKind::Revert { targets }, now_ms))
     }
     /// The Merge notices the Author hasn't dismissed, worked out from the History.
     /// Every Device gets the same list, in the fixed Change order.
@@ -114,7 +124,9 @@ impl Doc {
 
     pub fn restore_local(&mut self, target: ChangeId, now_ms: u64) -> Option<Change> {
         let reverters = self.reverted_by.get(&target).cloned().unwrap_or_default();
-        let in_effect: Vec<ChangeId> = reverters.into_iter().filter(|&r| self.is_in_effect(r)).collect();
+        let mut in_effect: Vec<ChangeId> = reverters.into_iter().filter(|&r| self.is_in_effect(r)).collect();
+        in_effect.sort_by_key(|r| (self.hlc_of[r], r.device)); // in the fixed Change order
+        in_effect.dedup();
         if in_effect.is_empty() {
             None
         } else {
@@ -166,6 +178,7 @@ impl Doc {
         self.seen.entry(change.id.device).and_modify(|c| *c = (*c).max(change.id.counter)).or_insert(change.id.counter);
 
         self.clock.observe(change.hlc);
+        self.hlc_of.insert(change.id, change.hlc);
         if change.id.device == self.device {
             // raise the counter if this change is from us, so we don't reuse the same counter using Max()
             self.next_counter = self.next_counter.max(change.id.counter + 1);

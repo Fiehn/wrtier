@@ -10,8 +10,9 @@
 //! Snippets are split at line breaks the Changes didn't touch, so text they wrote, deleted or
 //! moved across several paragraphs stays one snippet (shortened in the middle when long).
 
-use super::history::{is_word_char, Did, Effect};
-use super::{positions, Doc};
+use super::history::{is_word, is_word_char, Did, Effect};
+use super::Doc;
+use crate::fugue::FixedOrder;
 use crate::change::{is_library_copy, PREAMBLE_RECORD};
 use crate::ids::{ChangeId, CharId};
 use crate::layout::Layout;
@@ -207,7 +208,7 @@ impl Doc {
             t.by.push(by);
         }
 
-        let mut moved = Moved { layout: Layout::compute(&self.tree, &self.in_effect_moves(), &self.typed_into), ..Moved::default() };
+        let mut moved = Moved { layout: Layout::compute(&self.tree, self.fixed_order().clone(), &self.in_effect_moves(), &self.typed_into), ..Moved::default() };
         for &(m, made, by) in &effect.moves {
             let happened = self.is_in_effect(m) && !moved.layout.is_skipped(m);
             if preview {
@@ -224,18 +225,13 @@ impl Doc {
                 moved.back.insert(m, by);
             }
         }
-        let (order, pos) = if effect.moves.is_empty() {
-            (Vec::new(), Vec::new())
-        } else {
-            let order = self.tree.order();
-            let pos = positions(&order, self.tree.len());
-            (order, pos)
-        };
-        for &m in moved.back.keys() {
-            for span in self.pieces_moved_by(m) {
-                let (Some(first), Some(last)) = (self.tree.index_of(span.first), self.tree.index_of(span.last)) else { continue };
-                for &n in &order[pos[first as usize] as usize..=pos[last as usize] as usize] {
-                    moved.back_nodes.entry(n).or_insert(m);
+        if !moved.back.is_empty() {
+            let order = self.fixed_order();
+            for &m in moved.back.keys() {
+                for span in self.pieces_moved_by(m) {
+                    for &n in order.span(&self.tree, &span).unwrap_or_default() {
+                        moved.back_nodes.entry(n).or_insert(m);
+                    }
                 }
             }
         }
@@ -308,7 +304,7 @@ impl Doc {
                 let to = paragraph.iter().find(|it| it.mark == Mark::Moved).map_or(at.0, |it| it.vis);
                 let visible = |n: u32| self.tree.is_visible_at(n);
                 let drawn_by_it = |n: u32| self.mover(n, &moved) == Some(m);
-                self.moved_from(m, back, to, &order, &pos, wf, &visible, &drawn_by_it)
+                self.moved_from(m, back, to, self.fixed_order(), wf, &visible, &drawn_by_it)
             }).collect();
             let find = if preview { None } else { find_in(self, paragraph, &self.visible) };
             let in_effect = by.iter().any(|&id| self.is_in_effect(id));
@@ -322,7 +318,7 @@ impl Doc {
             if record != PREAMBLE_RECORD && !library {
                 return None;
             }
-            let replaces = self.fields.get(&(record.clone(), field.clone()))?.iter().find(|v| v.id == change)?.replaces;
+            let replaces = self.values_of(record, field)?.iter().find(|v| v.id == change)?.replaces;
             Some(FieldLine {
                 by,
                 change,
@@ -358,7 +354,7 @@ impl Doc {
     /// that happened, that's before its first character in the tree; for one taken back, before
     /// its anchor (where it had put the text).
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn moved_from(&self, m: ChangeId, back: bool, to: usize, order: &[u32], pos: &[u32], wf: &WhereFrom,
+    pub(super) fn moved_from(&self, m: ChangeId, back: bool, to: usize, order: &FixedOrder, wf: &WhereFrom,
                              visible: &dyn Fn(u32) -> bool, drawn_by_it: &dyn Fn(u32) -> bool) -> MovedFrom {
         let start = if back {
             self.tree.index_of(CharId { change: m, offset: 0 })
@@ -367,10 +363,10 @@ impl Doc {
         };
         let mut origin = None;
         if let Some(start) = start {
-            let mut i = pos[start as usize] as usize;
+            let mut i = order.pos[start as usize] as usize;
             while i > 0 {
                 i -= 1;
-                let n = order[i];
+                let n = order.order[i];
                 if visible(n) && !drawn_by_it(n) {
                     origin = Some(wf.vis_of[n as usize] as usize);
                     break;
@@ -510,7 +506,7 @@ fn push(out: &mut Vec<Segment>, kind: SegmentKind, faded: bool, text: &str) {
 }
 
 pub(super) fn words_in(text: &str) -> usize {
-    text.split(|c: char| !is_word_char(c)).filter(|w| !w.is_empty()).count()
+    text.split(|c: char| !is_word_char(c)).filter(|w| is_word(w)).count()
 }
 
 /// Long changed stretches shortened in the middle: "…+212 words…".
@@ -754,7 +750,7 @@ mod tests {
         let text = "= One\nThe rain had stopped.\n= Two\nGulls circled.\n";
         doc.insert_local(0, text, 1_000);
         let mv = doc.move_local(text.find("Gulls").unwrap(), 15, text.find("= Two").unwrap(), 2_000);
-        let revert = doc.revert_local(mv.id, false, 1_000 + LATER);
+        let revert = doc.revert_local(mv.id, false, 1_000 + LATER).unwrap();
         assert_eq!(doc.text(), text);
         let snippets = doc.snippets(&[revert.id]).snippets;
         assert_eq!(snippets.iter().map(render).collect::<Vec<_>>(), ["[>Gulls circled.\n]"]);
@@ -767,7 +763,7 @@ mod tests {
         let mut doc = Doc::new(DeviceId(1));
         doc.insert_local(0, "The rain had stopped. ", 1_000);
         let gulls = doc.insert_local(22, "Gulls circled.", 2_000);
-        let revert = doc.revert_local(gulls.id, false, 1_000 + LATER);
+        let revert = doc.revert_local(gulls.id, false, 1_000 + LATER).unwrap();
         assert_eq!(rendered(&doc, &[revert.id]), ["The rain had stopped. [-Gulls circled.]"]);
         doc.restore_local(gulls.id, 1_000 + 2 * LATER);
         assert_eq!(rendered(&doc, &[revert.id]), ["The rain had stopped. [~-Gulls circled.]"]);
@@ -805,7 +801,7 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!((lines[0].value.as_deref(), lines[0].before.as_deref()), (Some("The Rain"), Some("Rain")));
         assert!(!lines[0].library && lines[1].library);
-        let revert = doc.revert_local(retitled.id, false, 3_000 + LATER);
+        let revert = doc.revert_local(retitled.id, false, 3_000 + LATER).unwrap();
         let undone = doc.snippets(&[revert.id]).fields;
         assert!(undone[0].taken_back);
         assert_eq!(undone[0].change, retitled.id);

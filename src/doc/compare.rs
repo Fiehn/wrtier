@@ -10,7 +10,7 @@
 //! moved away). It stays right while the Author writes and while Changes arrive.
 
 use super::snippets::{elided, find_in, segments, trimmed, words_in, Item, Mark, WhereFrom};
-use super::{holds, positions, Doc, SegmentKind, Snippet};
+use super::{holds, Doc, SegmentKind, Snippet};
 use crate::change::Span;
 use crate::ids::ChangeId;
 use rustc_hash::FxHashSet;
@@ -89,7 +89,6 @@ impl Doc {
         let mover = |n: u32| {
             layout_b.level_at(n).map(|p| (p.0, false)).or_else(|| layout_a.level_at(n).map(|p| (p.0, true)))
         };
-        let mut placed = None; // the tree's order and every node's place in it, if a Move needs them
         let mut where_from = None;
         let mut all_moves = FxHashSet::default();
         let (mut added_words, mut removed_words) = (0, 0);
@@ -124,16 +123,11 @@ impl Doc {
             }
             let moves = moved.into_iter().map(|(m, back)| {
                 all_moves.insert((m, back));
-                let (order, pos) = placed.get_or_insert_with(|| {
-                    let order = self.tree.order();
-                    let pos = positions(&order, self.tree.len());
-                    (order, pos)
-                });
                 let wf = where_from.get_or_insert_with(|| WhereFrom::new(self, &nodes_b));
                 let to = paragraph.iter().find(|it| it.mark == Mark::Moved).map_or(at.0, |it| it.vis);
                 let visible = |n: u32| in_b[n as usize];
                 let drawn_by_it = |n: u32| mover(n).map(|(x, _)| x) == Some(m);
-                self.moved_from(m, back, to, order, pos, wf, &visible, &drawn_by_it)
+                self.moved_from(m, back, to, self.fixed_order(), wf, &visible, &drawn_by_it)
             }).collect();
             // Only the Work as it is now is in the editor to go to.
             let find = if to == Version::Now { find_in(self, paragraph, &nodes_b) } else { None };
@@ -171,38 +165,26 @@ impl Doc {
     /// Every node that is, or ever was, part of the stretch: everything from each piece's first
     /// to its last character in the tree's fixed order, deleted and moved-away text included.
     pub(super) fn stretch_nodes(&self, stretch: &Stretch) -> FxHashSet<u32> {
-        let (order, _, ranges) = self.stretch_ranges(stretch);
-        ranges.iter().flat_map(|&(lo, hi)| order[lo as usize..=hi as usize].iter().copied()).collect()
-    }
-
-    /// The tree's order, every node's place in it, and the stretch's pieces as ranges of places.
-    fn stretch_ranges(&self, stretch: &Stretch) -> (Vec<u32>, Vec<u32>, Vec<(u32, u32)>) {
-        let order = self.tree.order();
-        let pos = positions(&order, self.tree.len());
-        let ranges = stretch.spans.iter()
-            .filter_map(|span| Some((self.tree.index_of(span.first)?, self.tree.index_of(span.last)?)))
-            .map(|(first, last)| (pos[first as usize], pos[last as usize]))
-            .filter(|(lo, hi)| lo <= hi)
-            .collect();
-        (order, pos, ranges)
+        let order = self.fixed_order();
+        stretch.spans.iter().filter_map(|span| order.span(&self.tree, span)).flatten().copied().collect()
     }
 
     /// The Changes to the Work's content that touched the stretch, in the fixed Change order:
     /// those that wrote or deleted its characters, Moves that took any of it or dropped text into
     /// it, and every Revert of those (and of those Reverts).
     pub fn changes_in(&self, stretch: &Stretch) -> Vec<ChangeId> {
-        let (order, pos, ranges) = self.stretch_ranges(stretch);
+        let order = self.fixed_order();
+        let ranges: Vec<(usize, usize)> = stretch.spans.iter().filter_map(|span| order.range(&self.tree, span)).collect();
         let mut found: FxHashSet<ChangeId> = FxHashSet::default();
         for &(lo, hi) in &ranges {
-            for &n in &order[lo as usize..=hi as usize] {
+            for &n in &order.order[lo..=hi] {
                 found.insert(self.tree.change_at(n)); // an anchor's is the Move that dropped text here
                 found.extend(self.tree.deleters_at(n).iter().copied());
             }
         }
         for (_, info) in &self.moves {
             let took_some = info.pieces.iter().any(|span| {
-                let (Some(first), Some(last)) = (self.tree.index_of(span.first), self.tree.index_of(span.last)) else { return false };
-                let (a, b) = (pos[first as usize], pos[last as usize]);
+                let Some((a, b)) = order.range(&self.tree, span) else { return false };
                 ranges.iter().any(|&(lo, hi)| a <= hi && lo <= b)
             });
             if took_some {
@@ -312,7 +294,7 @@ mod tests {
         assert_eq!(changes, vec![rain.id, inside.id, deleted.id]);
         assert!(!changes.contains(&before.id) && !changes.contains(&edge.id));
         // A Revert of something in it is in it too.
-        let revert = doc.revert_local(deleted.id, false, 6_000);
+        let revert = doc.revert_local(deleted.id, false, 6_000).unwrap();
         assert!(doc.changes_in(&stretch).contains(&revert.id));
     }
     #[test]

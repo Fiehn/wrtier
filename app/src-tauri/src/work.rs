@@ -473,6 +473,19 @@ impl OpenWork {
         }
     }
 
+    /// Changes already in the Work that opening it couldn't save (an External edit read from a
+    /// Conflict copy): kept like any unsaved Change, so saving is tried again and the recovery
+    /// file holds them meanwhile.
+    pub fn keep_unsaved(&mut self, changes: Vec<Change>) {
+        if changes.is_empty() {
+            return;
+        }
+        self.unsaved.extend(changes);
+        self.text_file_behind = true;
+        self.keep_recovery(true);
+        self.save();
+    }
+
     pub fn text(&self) -> String {
         self.doc.text()
     }
@@ -634,7 +647,7 @@ impl OpenWork {
             }
             Op::DeleteComment { id } => {
                 let id = self.comment_id(&id, true)?;
-                self.doc.revert_local(id, false, now_ms)
+                self.doc.revert_local(id, false, now_ms).ok_or_else(|| format!("This Comment is already deleted: {id}"))?
             }
             _ => unreachable!("only Comment ops come here"),
         };
@@ -745,7 +758,7 @@ impl OpenWork {
         }
         self.close_burst(now_ms);
         let change = if deleted {
-            self.doc.is_in_effect(milestone).then(|| self.doc.revert_local(milestone, false, now_ms))
+            self.doc.revert_local(milestone, false, now_ms)
         } else {
             self.doc.restore_local(milestone, now_ms)
         };
@@ -1189,15 +1202,16 @@ impl OpenWork {
             self.doc.cancel_burst();
             return;
         }
-        let latest = self.sitting.iter().rev().copied().find(|&id| self.doc.is_in_effect(id));
+        // By the History view's rule (`revert_changes_local`): Changes already reverted, and the
+        // Work's copies of library files, are skipped.
+        let latest = self.sitting.iter().rev().copied().find(|&id| !self.doc.revertable(&[id]).is_empty());
         if let Some(target) = latest {
-            let change = match self.doc.replace_group(target) {
-                Some(group) => self.doc.revert_changes_local(&group, true, now_ms),
-                None => Some(self.doc.revert_local(target, true, now_ms)),
-            };
-            self.unsaved.extend(change);
-            // Redo restores it by taking back that Revert, which brings the whole group back.
-            self.redo.push(target);
+            let group = self.doc.replace_group(target).unwrap_or_else(|| vec![target]);
+            if let Some(change) = self.doc.revert_changes_local(&group, true, now_ms) {
+                self.unsaved.push(change);
+                // Redo restores it by taking back that Revert, which brings the whole group back.
+                self.redo.push(target);
+            }
         }
     }
 
@@ -1333,6 +1347,20 @@ impl OpenWork {
                         self.mine.extend(changes);
                         self.text_file_behind = true; // written again, with its marker line
                         if is_copy { let _ = std::fs::remove_file(&path); }
+                    }
+                    // Recorded, but not saved: kept with the other unsaved Changes, so saving is
+                    // tried again and the recovery file holds them. Nothing more is read now: a
+                    // later file's Changes could build on these and must not be saved first.
+                    Ok(storage::TextFileRead::NotSaved { changes, error }) => {
+                        if header_in_file.is_some_and(|h| h != self.text_file_header()) {
+                            header_dropped = true;
+                        }
+                        edited |= !changes.is_empty();
+                        self.unsaved.extend(changes);
+                        self.text_file_behind = true;
+                        self.save_error = Some(format!("Couldn't save to {}: {error}. Your writing is kept and saving is tried again.", file_name(&self.db)));
+                        if is_copy { let _ = std::fs::remove_file(&path); }
+                        break;
                     }
                     Ok(storage::TextFileRead::Known) => if is_copy { let _ = std::fs::remove_file(&path); },
                     Ok(storage::TextFileRead::NotYet) => {} // its History hasn't arrived yet: read again when it does

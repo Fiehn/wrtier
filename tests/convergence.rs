@@ -1,6 +1,6 @@
 use proptest::prelude::*;
 use wrtier::change::Change;
-use wrtier::doc::{Doc, Version};
+use wrtier::doc::{Doc, ReplaceEdit, Version};
 use wrtier::ids::DeviceId;
 
 // Random thing that can happen.
@@ -21,6 +21,8 @@ enum Action {
     Reply { device: usize, pick: u16 },
     EditComment { device: usize, pick: u16, body: u8 },
     Resolve { device: usize, pick: u16, resolved: bool },
+    /// Find and replace: several word edits at once, as (at, len, text) in the text before any of them.
+    ReplaceAll { device: usize, edits: Vec<(u16, u8, String)> },
 }
 
 // Generate a random Action.
@@ -42,6 +44,8 @@ fn action() -> impl Strategy<Value = Action> {
         (0..3usize, any::<u16>()).prop_map(|(device, pick)| Action::Reply { device, pick }),
         (0..3usize, any::<u16>(), 0..3u8).prop_map(|(device, pick, body)| Action::EditComment { device, pick, body }),
         (0..3usize, any::<u16>(), any::<bool>()).prop_map(|(device, pick, resolved)| Action::Resolve { device, pick, resolved }),
+        (0..3usize, prop::collection::vec((any::<u16>(), 0..4u8, "[a-cé😀 ]{0,3}"), 1..6))
+            .prop_map(|(device, edits)| Action::ReplaceAll { device, edits }),
     ]
 }
 
@@ -105,7 +109,9 @@ fn run(actions: &[Action]) {
                     continue;
                 }
                 let target = changes[*device][*pick as usize % changes[*device].len()].id;
-                let change = docs[*device].revert_local(target, *deps, now_ms - skew[*device]);
+                let Some(change) = docs[*device].revert_local(target, *deps, now_ms - skew[*device]) else {
+                    continue; // already reverted
+                };
                 all.push(change.clone());
                 changes[*device].push(change);
                 now_ms += 1;
@@ -254,6 +260,37 @@ fn run(actions: &[Action]) {
                 let change = docs[*device].resolve_comment_local(id, *resolved, now_ms - skew[*device]);
                 all.push(change.clone());
                 changes[*device].push(change);
+                now_ms += 1;
+            }
+            Action::ReplaceAll { device, edits } => {
+                // Edits that don't overlap, as the interface sends them, in the text as it is now.
+                let before: Vec<char> = docs[*device].text().chars().collect();
+                let n = before.len();
+                let mut wanted: Vec<ReplaceEdit> = edits.iter().map(|(at, len, text)| {
+                    let index = *at as usize % (n + 1);
+                    ReplaceEdit { index, len: (*len as usize).min(n - index), text: text.clone() }
+                }).collect();
+                wanted.sort_by_key(|e| e.index);
+                let mut apart: Vec<ReplaceEdit> = Vec::new();
+                for e in wanted {
+                    // (Two edits at one place have no order of their own: the interface never sends them.)
+                    let free = apart.last().is_none_or(|p| p.index + p.len <= e.index && p.index < e.index);
+                    if free && (e.len > 0 || !e.text.is_empty()) {
+                        apart.push(e);
+                    }
+                }
+                if apart.is_empty() {
+                    continue;
+                }
+                // The plain model: each edit made in the text as it was, last first.
+                let mut model = before.clone();
+                for e in apart.iter().rev() {
+                    model.splice(e.index..e.index + e.len, e.text.chars());
+                }
+                let made = docs[*device].replace_matches_local(&apart, "find", "with", apart.len(), now_ms - skew[*device]);
+                assert_eq!(docs[*device].text(), model.iter().collect::<String>(), "replacing {apart:?} in {before:?}");
+                all.extend(made.iter().cloned());
+                changes[*device].extend(made);
                 now_ms += 1;
             }
         }

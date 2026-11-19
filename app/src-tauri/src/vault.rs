@@ -658,6 +658,8 @@ impl Vault {
         }
         let mut header_dropped = false;
         // The History, and the Changes this Device made in it (see `OpenWork::mine`).
+        // Changes made while opening that couldn't be saved: the open Work keeps them to save again.
+        let mut unsaved: Vec<Change> = Vec::new();
         let result = catch_unwind(AssertUnwindSafe(|| -> Result<(Doc, Vec<Change>), String> {
             if db.exists() {
                 match storage::probe(&db) {
@@ -670,9 +672,21 @@ impl Vault {
                 let mut mine: Vec<Change> = loaded.into_iter().filter(|c| c.id.device == me).collect();
                 let saved_before = mine.len();
                 if !conflict_copies(&db).is_empty() || !conflict_copies(&typ).is_empty() {
-                    let absorbed = absorb_conflict_copies(&db, &typ, &mut doc, now_ms);
+                    let mut absorbed = absorb_conflict_copies(&db, &typ, &mut doc, now_ms);
                     mine.extend(absorbed.changes.into_iter().filter(|c| c.id.device == me));
+                    if let Some((copy, changes)) = absorbed.unsaved.take() {
+                        // The edit is in `doc`: the open Work saves it, so the copy has done its job.
+                        unsaved = changes;
+                        if std::fs::remove_file(&copy).is_ok() {
+                            absorbed.kept.retain(|(path, _)| *path != copy);
+                        }
+                        problems.push(self.problem(&db, format!("an edit from {} couldn't be saved yet: it's kept, and saving is tried again", copy.display())));
+                    }
                     problems.extend(absorbed.kept.into_iter().map(|(path, reason)| self.problem(&path, reason)));
+                }
+                if !unsaved.is_empty() {
+                    // Nothing more is read or written now: later Changes could build on these.
+                    return Ok((doc, mine));
                 }
                 // An External edit made while the app was closed becomes Changes now. Edits
                 // inside the header are dropped (it's written again from the History): said so,
@@ -725,6 +739,7 @@ impl Vault {
         }
         let recovery = Recovery::for_work(&self.recovery_dir, &self.root, id);
         let mut work = OpenWork::new(db, typ, doc, now_ms, recovery, sitting, mine);
+        work.keep_unsaved(unsaved);
         work.style_notice = preamble::update_notice(&work.doc, &Shelf::read(&self.root));
         work.vault_root = self.root.clone();
         self.works.insert(id.to_string(), work);

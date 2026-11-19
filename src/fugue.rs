@@ -11,6 +11,7 @@
 //! `crate::reference::fugue` is the first, simple version; this one must behave identically.
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use crate::change::Span;
 use crate::ids::{CharId, Side, ChangeId};
 
 /// "No node": the root as a parent, or the end of a list.
@@ -43,6 +44,33 @@ pub struct Tree {
     deleted_by: FxHashMap<u32, Vec<ChangeId>>,
     undone: FxHashSet<ChangeId>,
     change_undone: Vec<bool>, // per Change index: the hot path of `is_visible_at`
+}
+
+/// The tree's fixed order (every node, deleted ones and anchors too) and every node's place in
+/// it, worked out once (`Tree::fixed_order`). Only right for the tree as it was then: inserting
+/// a node makes it stale.
+#[derive(Default)]
+pub struct FixedOrder {
+    /// Every node's array index, in the fixed order.
+    pub order: Vec<u32>,
+    /// Per node (by array index): its place in `order`.
+    pub pos: Vec<u32>,
+}
+
+impl FixedOrder {
+    /// The places in `order` of a span's first and last node, if the tree has both and the
+    /// first doesn't come after the last.
+    pub fn range(&self, tree: &Tree, span: &Span) -> Option<(usize, usize)> {
+        let (first, last) = (tree.index_of(span.first)?, tree.index_of(span.last)?);
+        let (lo, hi) = (self.pos[first as usize] as usize, self.pos[last as usize] as usize);
+        (lo <= hi).then_some((lo, hi))
+    }
+
+    /// The nodes a span covers: every node from its first to its last, in the fixed order.
+    /// None if the tree lacks either end, or they're the wrong way round (a damaged span).
+    pub fn span(&self, tree: &Tree, span: &Span) -> Option<&[u32]> {
+        self.range(tree, span).map(|(lo, hi)| &self.order[lo..=hi])
+    }
 }
 
 enum Visit {
@@ -146,7 +174,7 @@ impl Tree {
 
     // ---- Changing the tree ----
 
-    pub fn insert_node(&mut self, id: CharId, ch: Option<char>, parent: Option<CharId>, side: Side, _right_origin: Option<CharId>) {
+    pub fn insert_node(&mut self, id: CharId, ch: Option<char>, parent: Option<CharId>, side: Side) {
         let at = self.nodes.len() as u32;
         // A Change's nodes sit side by side: this must be its next node, right at the end.
         let change = match self.by_change.get_mut(&id.change) {
@@ -230,24 +258,24 @@ impl Tree {
 
     /// Insert `text` as one run: the first char where (parent, side) says,
     /// each next char as the right child of the one before.
-    pub fn insert_chain(&mut self, change: ChangeId, items: Vec<Option<char>>, parent: Option<CharId>, side: Side, ro: Option<CharId>) {
+    pub fn insert_chain(&mut self, change: ChangeId, items: Vec<Option<char>>, parent: Option<CharId>, side: Side) {
         let mut prev: Option<CharId> = None;
         for (i, ch) in items.into_iter().enumerate() {
             let id = CharId { change, offset: i as u32 };
             match prev {
-                None => self.insert_node(id, ch, parent, side, ro),
-                Some(p) => self.insert_node(id, ch, Some(p), Side::Right, ro),
+                None => self.insert_node(id, ch, parent, side),
+                Some(p) => self.insert_node(id, ch, Some(p), Side::Right),
             }
             prev = Some(id);
         }
     }
 
-    pub fn insert_run(&mut self, change: ChangeId, text: &str, parent: Option<CharId>, side: Side, ro: Option<CharId>) {
-        self.insert_chain(change, text.chars().map(Some).collect(), parent, side, ro);
+    pub fn insert_run(&mut self, change: ChangeId, text: &str, parent: Option<CharId>, side: Side) {
+        self.insert_chain(change, text.chars().map(Some).collect(), parent, side);
     }
 
-    pub fn insert_anchors(&mut self, change: ChangeId, count: usize, parent: Option<CharId>, side: Side, ro: Option<CharId>) {
-        self.insert_chain(change, vec![None; count], parent, side, ro);
+    pub fn insert_anchors(&mut self, change: ChangeId, count: usize, parent: Option<CharId>, side: Side) {
+        self.insert_chain(change, vec![None; count], parent, side);
     }
 
     // ---- The fixed order ----
@@ -274,6 +302,16 @@ impl Tree {
             }
         }
         out
+    }
+
+    /// The fixed order, with every node's place in it.
+    pub fn fixed_order(&self) -> FixedOrder {
+        let order = self.order();
+        let mut pos = vec![0u32; self.nodes.len()];
+        for (i, &node) in order.iter().enumerate() {
+            pos[node as usize] = i as u32;
+        }
+        FixedOrder { order, pos }
     }
 
     /// Every node's ID in the fixed order.
@@ -314,6 +352,8 @@ impl Tree {
     // ---- Placing new text ----
 
     /// Decides where to place new text typed at a visible index, ignoring Moves.
+    /// (For tests: it walks the whole tree.)
+    #[cfg(test)]
     pub fn place(&self, index: usize) -> (Option<CharId>, Side, Option<CharId>) {
         let left = if index == 0 { None } else { self.visible_id(index - 1) };
         self.place_after(left)
@@ -364,29 +404,21 @@ impl Tree {
             .collect()
     }
 
+    /// (For tests: it walks the whole tree.)
+    #[cfg(test)]
     pub fn visible_id(&self, index: usize) -> Option<CharId> {
         self.visible_ids().get(index).copied()
     }
 
-    pub fn visible_id_ranges(&self, index: usize, len: usize) -> Vec<CharId> {
-        self.visible_ids().into_iter().skip(index).take(len).collect()
-    }
-
-    /// Every other Change with a character strictly between this Change's first and last node
-    /// in the fixed order: the Changes that depend on it when it's reverted.
-    pub fn inside(&self, change: ChangeId) -> Vec<ChangeId> {
-        self.inside_all(&[change])
-    }
-
-    /// `inside` for several Changes at once (a Replace all's), with the fixed order worked out
-    /// once rather than for each: every other Change with a character strictly between one of
-    /// these Changes' first and last node, sorted.
-    pub fn inside_all(&self, changes: &[ChangeId]) -> Vec<ChangeId> {
+    /// Every other Change with a character strictly between one of these Changes' first and
+    /// last node in the fixed order (`order`, this tree's): the Changes that depend on them when
+    /// they're reverted. Sorted.
+    pub fn inside_all(&self, changes: &[ChangeId], order: &FixedOrder) -> Vec<ChangeId> {
         let wanted: FxHashSet<u32> = changes.iter().filter_map(|c| self.by_change.get(c)).map(|e| e.index).collect();
         if wanted.is_empty() {
             return Vec::new();
         }
-        let order = self.order();
+        let order = &order.order;
         // Each Change's first and last place in the fixed order.
         let mut span: FxHashMap<u32, (usize, usize)> = FxHashMap::default();
         for (pos, &i) in order.iter().enumerate() {
@@ -424,15 +456,15 @@ mod tests {
     fn cat_then_chat() {
         let mut t = Tree::new();
         // "cat" typed in one go: one Change, a chain of right children.
-        t.insert_node(id(1, 0), Some('c'), None, Side::Right, None);
-        t.insert_node(id(1, 1), Some('a'), Some(id(1, 0)), Side::Right, None);
-        t.insert_node(id(1, 2), Some('t'), Some(id(1, 1)), Side::Right, None);
+        t.insert_node(id(1, 0), Some('c'), None, Side::Right);
+        t.insert_node(id(1, 1), Some('a'), Some(id(1, 0)), Side::Right);
+        t.insert_node(id(1, 2), Some('t'), Some(id(1, 1)), Side::Right);
         assert_eq!(t.text(), "cat");
 
         // "h" at index 1: c already has a right child (a), so h becomes a's LEFT child.
         let (parent, side, ro) = t.place(1);
         assert_eq!((parent, side, ro), (Some(id(1, 1)), Side::Left, Some(id(1, 1))));
-        t.insert_node(id(2, 0), Some('h'), parent, side, ro);
+        t.insert_node(id(2, 0), Some('h'), parent, side);
         assert_eq!(t.text(), "chat");
     }
 
@@ -442,7 +474,7 @@ mod tests {
 
     fn cat() -> Tree {
         let mut t = Tree::new();
-        t.insert_run(change(1, 1), "cat", None, Side::Right, None);
+        t.insert_run(change(1, 1), "cat", None, Side::Right);
         t
     }
 
@@ -450,21 +482,21 @@ mod tests {
     fn hat_mat() {
         // Both Devices start from the same synced "cat".
         // Each one decides where its text goes on its own copy.
-        let (p1, s1, ro1) = cat().place(3); // laptop, Device 1
-        let (p2, s2, ro2) = cat().place(3); // phone, Device 2
+        let (p1, s1, _) = cat().place(3); // laptop, Device 1
+        let (p2, s2, _) = cat().place(3); // phone, Device 2
 
         let hat = change(1, 2); // the laptop's next Change
         let mat = change(2, 1); // the phone's first Change
 
         // Merge in one order...
         let mut a = cat();
-        a.insert_run(hat, " hat", p1, s1, ro1);
-        a.insert_run(mat, " mat", p2, s2, ro2);
+        a.insert_run(hat, " hat", p1, s1);
+        a.insert_run(mat, " mat", p2, s2);
 
         // ...and in the other.
         let mut b = cat();
-        b.insert_run(mat, " mat", p2, s2, ro2);
-        b.insert_run(hat, " hat", p1, s1, ro1);
+        b.insert_run(mat, " mat", p2, s2);
+        b.insert_run(hat, " hat", p1, s1);
 
         assert_eq!(a.text(), b.text());
         assert!(a.text() == "cat hat mat" || a.text() == "cat mat hat",
@@ -478,16 +510,16 @@ mod tests {
         let mut t = cat();
         t.delete(id(1, 1), change(1, 2));
         assert_eq!(t.text(), "ct");
-        let (p, s, ro) = t.place(1);
-        t.insert_run(change(1, 2), "o", p, s, ro);
+        let (p, s, _) = t.place(1);
+        t.insert_run(change(1, 3), "o", p, s);
         assert_eq!(t.text(), "cot");
     }
 
     #[test]
     fn anchors_are_invisible() {
         let mut t = cat();
-        let (p, s, ro) = t.place(3);
-        t.insert_anchors(change(1, 2), 1, p, s, ro);
+        let (p, s, _) = t.place(3);
+        t.insert_anchors(change(1, 2), 1, p, s);
         assert_eq!(t.text(), "cat");
         assert_eq!(t.visible_ids().len(), 3);
         assert_eq!(t.all_in_order().len(), 4); // still a node in the tree
@@ -496,19 +528,19 @@ mod tests {
     #[test]
     fn anchors_are_not_dependents() {
         let mut t = cat();
-        let (p, s, ro) = t.place(1);
-        t.insert_anchors(change(1, 2), 1, p, s, ro); // an anchor between c and a
-        assert!(t.inside(change(1, 1)).is_empty());
+        let (p, s, _) = t.place(1);
+        t.insert_anchors(change(1, 2), 1, p, s); // an anchor between c and a
+        assert!(t.inside_all(&[change(1, 1)], &t.fixed_order()).is_empty());
     }
 
     #[test]
     fn typing_after_an_anchor() {
         let mut t = cat();
-        let (p, s, ro) = t.place(3);
+        let (p, s, _) = t.place(3);
         let anchor = CharId { change: change(1, 2), offset: 0 };
-        t.insert_anchors(anchor.change, 1, p, s, ro);
-        let (p, s, ro) = t.place_after(Some(anchor));
-        t.insert_run(change(1, 3), "s", p, s, ro);
+        t.insert_anchors(anchor.change, 1, p, s);
+        let (p, s, _) = t.place_after(Some(anchor));
+        t.insert_run(change(1, 3), "s", p, s);
         assert_eq!(t.text(), "cats");
         assert_eq!(t.all_in_order().last().unwrap().change, change(1, 3)); // after the anchor
     }
@@ -517,18 +549,18 @@ mod tests {
     #[should_panic(expected = "inserted twice")]
     fn a_node_cannot_be_inserted_twice() {
         let mut t = cat();
-        t.insert_node(id(1, 1), Some('x'), None, Side::Right, None);
+        t.insert_node(id(1, 1), Some('x'), None, Side::Right);
     }
 
     #[test]
     fn siblings_stay_in_id_order_whatever_order_they_arrive_in() {
         // Three Devices type at the very start of "cat" at once; every arrival order agrees.
         let runs = [(change(3, 1), "z"), (change(2, 1), "y"), (change(4, 1), "w")];
-        let (p, s, ro) = cat().place(0);
+        let (p, s, _) = cat().place(0);
         let texts: Vec<String> = [[0, 1, 2], [2, 1, 0], [1, 2, 0]].iter().map(|arrival| {
             let mut t = cat();
             for &k in arrival {
-                t.insert_run(runs[k].0, runs[k].1, p, s, ro);
+                t.insert_run(runs[k].0, runs[k].1, p, s);
             }
             t.text()
         }).collect();

@@ -98,7 +98,7 @@ fn run(actions: &[Action]) {
                 }
                 let target = changes[*d][*pick as usize % changes[*d].len()].id;
                 let t = now - skew[*d];
-                (*d, Some(fast[*d].revert_local(target, *deps, t)), Some(slow[*d].revert_local(target, *deps, t)))
+                (*d, fast[*d].revert_local(target, *deps, t), slow[*d].revert_local(target, *deps, t))
             }
             Action::Restore { device: d, pick } => {
                 if changes[*d].is_empty() {

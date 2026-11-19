@@ -5,7 +5,8 @@
 //! those), the same set a Milestone captures. Comments, Milestones, dismissed notices and Device
 //! names aren't listed, and a Session with nothing to list is left out.
 
-use super::{holds, positions, Doc};
+use super::{holds, Doc};
+use crate::fugue::FixedOrder;
 use crate::change::{is_library_copy, session_record, Change, ChangeKind, CharRange};
 use crate::ids::{ChangeId, CharId, DeviceId, Hlc};
 
@@ -135,17 +136,22 @@ pub enum Reverted {
 const LONGEST_GAP: u32 = 64;
 
 /// Letters, digits and apostrophes make words; everything else (spaces, punctuation, Typst
-/// markup) separates them.
+/// markup) separates them. A word needs a letter or digit, though (`is_word`): apostrophes on
+/// their own, such as a closing quote, aren't one.
 pub(super) fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '\'' || c == '’'
+}
+
+/// Is this run of word characters a word? Only if it holds a letter or digit.
+pub(super) fn is_word(run: &str) -> bool {
+    run.chars().any(char::is_alphanumeric)
 }
 
 impl Doc {
     /// Every Session with something to list, cut where a Milestone falls inside it, newest
     /// first (by when each part's last Change was made).
     pub fn sessions(&self) -> Vec<SessionPart> {
-        let order = self.tree.order();
-        let pos = positions(&order, self.tree.len());
+        let order = self.fixed_order().clone();
         let milestones = self.milestones();
         let mut parts = Vec::new();
         for (&session, ids) in &self.sessions {
@@ -161,7 +167,7 @@ impl Doc {
                 let cut = i == listed.len()
                     || milestones.iter().any(|m| holds(&m.seen, listed[i - 1]) != holds(&m.seen, listed[i]));
                 if cut {
-                    parts.push(self.part(session, start > 0, &listed[start..i], &milestones, &order, &pos));
+                    parts.push(self.part(session, start > 0, &listed[start..i], &milestones, &order));
                     start = i;
                 }
             }
@@ -170,7 +176,7 @@ impl Doc {
         parts
     }
 
-    fn part(&self, session: ChangeId, continued: bool, changes: &[ChangeId], milestones: &[super::Milestone], order: &[u32], pos: &[u32]) -> SessionPart {
+    fn part(&self, session: ChangeId, continued: bool, changes: &[ChangeId], milestones: &[super::Milestone], order: &FixedOrder) -> SessionPart {
         let device = session.device;
         let start = self.made[&changes[0]].hlc;
         let end = self.made[changes.last().expect("a part has Changes")].hlc;
@@ -190,8 +196,8 @@ impl Doc {
             end,
             continued,
             source: self.field(&session_record(session), "source").map(str::to_string),
-            added_words: self.count_words(added, span, order, pos),
-            removed_words: self.count_words(removed, span, order, pos),
+            added_words: self.count_words(added, span, order),
+            removed_words: self.count_words(removed, span, order),
             reverted: match in_effect {
                 0 => Reverted::All,
                 n if n == changes.len() => Reverted::No,
@@ -237,7 +243,11 @@ impl Doc {
     /// letters lies between them in the tree's fixed order, as the text was during `span`
     /// (first and last Change, by the fixed order): text written after it is ignored, and so is
     /// text deleted before it. So the count is what the Changes did when they were made.
-    fn count_words(&self, nodes: Vec<u32>, span: ((Hlc, DeviceId), (Hlc, DeviceId)), order: &[u32], pos: &[u32]) -> usize {
+    ///
+    /// A run of touched characters only counts if the word it's in holds a letter or digit: a
+    /// closing quote after punctuation (`‘Yes,’ she said.`) is no word of its own.
+    fn count_words(&self, nodes: Vec<u32>, span: ((Hlc, DeviceId), (Hlc, DeviceId)), order: &FixedOrder) -> usize {
+        let (pos, order) = (&order.pos, &order.order);
         let mut at: Vec<u32> = nodes.into_iter()
             .filter(|&n| self.tree.char_at(n).is_some_and(is_word_char))
             .map(|n| pos[n as usize])
@@ -256,7 +266,37 @@ impl Doc {
                 && order[from as usize + 1..to as usize].iter()
                     .all(|&n| self.tree.is_anchor_at(n) || !there(n) || self.tree.char_at(n).is_some_and(is_word_char))
         };
-        (0..at.len()).filter(|&i| i == 0 || !joined(at[i - 1], at[i])).count()
+        // What a node was then: None if it wasn't part of the text (or is an anchor), else its character.
+        let then = |p: usize| Some(order[p]).filter(|&n| !self.tree.is_anchor_at(n) && there(n)).and_then(|n| self.tree.char_at(n));
+        // Does the word reaching from `from` to `to` (places in the fixed order) hold a letter
+        // or digit? Its untouched letters on either side count too.
+        let has_letter = |from: u32, to: u32| {
+            let (from, to) = (from as usize, to as usize);
+            let inside = (from..=to).any(|p| then(p).is_some_and(char::is_alphanumeric));
+            let outward = |places: &mut dyn Iterator<Item = usize>| {
+                for p in places.take(LONGEST_GAP as usize) {
+                    match then(p) {
+                        None => continue,
+                        Some(c) if c.is_alphanumeric() => return true,
+                        Some(c) if is_word_char(c) => continue,
+                        Some(_) => return false,
+                    }
+                }
+                false
+            };
+            inside || outward(&mut (0..from).rev()) || outward(&mut (to + 1..order.len()))
+        };
+        let mut words = 0;
+        let mut start = 0;
+        for i in 1..=at.len() {
+            if i == at.len() || !joined(at[i - 1], at[i]) {
+                if has_letter(at[start], at[i - 1]) {
+                    words += 1;
+                }
+                start = i;
+            }
+        }
+        words
     }
 
     /// What reverting these Changes (a Session part, or some of it) would take: those still in
@@ -327,7 +367,7 @@ impl Doc {
     /// among them. In the fixed Change order.
     pub fn dependents(&self, changes: &[ChangeId]) -> Vec<ChangeId> {
         let given: rustc_hash::FxHashSet<ChangeId> = changes.iter().copied().collect();
-        let mut found: Vec<ChangeId> = self.tree.inside_all(changes).into_iter()
+        let mut found: Vec<ChangeId> = self.tree.inside_all(changes, self.fixed_order()).into_iter()
             .filter(|id| !given.contains(id) && self.is_in_effect(*id) && self.content_set.contains(id))
             .collect();
         found.sort_by_key(|id| self.made[id].hlc_key(*id));
@@ -362,9 +402,7 @@ impl Doc {
     /// What restoring these Changes would bring back: everything the Reverts it takes back had
     /// taken, for "Restore (brings back 5 places)".
     pub fn restored_by(&self, changes: &[ChangeId]) -> Vec<ChangeId> {
-        let mut back: Vec<ChangeId> = changes.iter()
-            .flat_map(|id| self.reverted_by.get(id).cloned().unwrap_or_default())
-            .filter(|&r| self.is_in_effect(r))
+        let mut back: Vec<ChangeId> = self.reverts_of(changes).into_iter()
             .flat_map(|r| match self.made.get(&r).map(|m| &m.did) {
                 Some(Did::Revert(targets)) => targets.clone(),
                 _ => Vec::new(),
@@ -377,20 +415,12 @@ impl Doc {
 
     /// Would this Change be in effect if a Revert of `targets` were made now?
     pub(super) fn in_effect_if_reverted(&self, id: ChangeId, targets: &rustc_hash::FxHashSet<ChangeId>) -> bool {
-        if targets.contains(&id) {
-            return false;
-        }
-        match self.reverted_by.get(&id) {
-            Some(reverters) => reverters.iter().all(|&r| !self.in_effect_if_reverted(r, targets)),
-            None => true,
-        }
+        self.in_effect_where(id, &|_| true, targets)
     }
 
     /// Would this character be visible if a Revert of `targets` were made now?
     pub(super) fn visible_if_reverted(&self, node: u32, targets: &rustc_hash::FxHashSet<ChangeId>) -> bool {
-        !self.tree.is_anchor_at(node)
-            && self.in_effect_if_reverted(self.tree.change_at(node), targets)
-            && !self.tree.deleters_at(node).iter().any(|&d| self.in_effect_if_reverted(d, targets))
+        self.visible_where(node, &|c| self.in_effect_if_reverted(c, targets))
     }
 
     /// Do any of these Changes set (or take back) a Preamble setting? Returning to a Milestone
@@ -452,14 +482,13 @@ impl Doc {
         for &id in &sorted {
             self.effect(id, id, true, &mut effect);
         }
-        let order = self.tree.order();
-        let pos = positions(&order, self.tree.len());
+        let order = self.fixed_order().clone();
         let span = (self.made[&first].hlc_key(first), self.made[&last].hlc_key(last));
         Some(Summary {
             start: self.made[&first].hlc,
             end: self.made[&last].hlc,
-            added_words: self.count_words(effect.shown.into_iter().map(|(n, _)| n).collect(), span, &order, &pos),
-            removed_words: self.count_words(effect.hidden.into_iter().map(|(n, _)| n).collect(), span, &order, &pos),
+            added_words: self.count_words(effect.shown.into_iter().map(|(n, _)| n).collect(), span, &order),
+            removed_words: self.count_words(effect.hidden.into_iter().map(|(n, _)| n).collect(), span, &order),
         })
     }
 
@@ -505,15 +534,11 @@ impl Doc {
         let seen = self.milestone(milestone).clone();
         let (_, nodes) = self.view_among(&|c| holds(&seen, c));
         let there: rustc_hash::FxHashSet<u32> = nodes.into_iter().collect();
-        let order = self.tree.order();
-        let pos = positions(&order, self.tree.len());
+        let order = self.fixed_order();
         let attached: Vec<ChangeId> = self.comments().into_iter().filter(|c| !c.ranges.is_empty()).map(|c| c.id).collect();
         self.comments.iter()
             .filter(|c| attached.contains(&c.id))
-            .filter(|c| !c.pieces.iter().any(|span| {
-                let (Some(first), Some(last)) = (self.tree.index_of(span.first), self.tree.index_of(span.last)) else { return false };
-                order[pos[first as usize] as usize..=pos[last as usize] as usize].iter().any(|n| there.contains(n))
-            }))
+            .filter(|c| !c.pieces.iter().filter_map(|span| order.span(&self.tree, span)).flatten().any(|n| there.contains(n)))
             .count()
     }
 
@@ -604,6 +629,25 @@ mod tests {
         doc.insert_local(0, "The rain had stoped.", 1_000);
         doc.insert_local(16, "p", 1_000 + LATER);
         assert_eq!(counts(&doc.sessions()[0]), (1, 0));
+    }
+
+    #[test]
+    fn quotes_and_dashes_on_their_own_are_not_words() {
+        // British-style dialogue: the closing quote after the comma is no word of its own.
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "‘Yes,’ she said. ‘I don’t — ’", 1_000);
+        assert_eq!(counts(&doc.sessions()[0]), (5, 0), "Yes, she, said, I, don’t");
+        // An apostrophe added to a word touches that word.
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "dont", 1_000);
+        doc.insert_local(3, "’", 1_000 + LATER);
+        assert_eq!(counts(&doc.sessions()[0]), (1, 0));
+        // A closing quote added on its own after punctuation adds no word.
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "‘Yes, she said.", 1_000);
+        doc.insert_local(5, "’", 1_000 + LATER);
+        assert_eq!(counts(&doc.sessions()[0]), (0, 0));
+        assert_eq!(super::super::snippets::words_in("‘Yes,’ she said. ’ — '"), 3);
     }
 
     #[test]

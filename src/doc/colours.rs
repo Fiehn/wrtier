@@ -5,9 +5,9 @@
 //! are now (a Move doesn't make text the moving Session's). The open burst's draft belongs to
 //! the Session it will be recorded in.
 
-use super::{BurstKind, Doc, NOT_SHOWN, SESSION_GAP_MS};
+use super::{runs, BurstKind, Doc, NOT_SHOWN};
 use crate::ids::{ChangeId, DeviceId, Hlc};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// The text one of the newest Sessions wrote, as the Author sees it now.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,7 +43,7 @@ impl Doc {
         };
 
         // The Sessions with text shown, and when each ended.
-        let mut ends: HashMap<ChangeId, Hlc> = HashMap::new();
+        let mut ends: HashMap<ChangeId, Hlc> = HashMap::default();
         for &node in &self.visible {
             if shown[node as usize] == NOT_SHOWN {
                 continue;
@@ -54,12 +54,8 @@ impl Doc {
         let draft = self.burst.as_ref()
             .filter(|b| b.kind == BurstKind::Typing && !b.draft.is_empty())
             .map(|b| {
-                // The same rule `new_change` uses when the burst is recorded.
-                let session = match self.session {
-                    Some((first, last)) if b.last_ms.saturating_sub(last) < SESSION_GAP_MS => first,
-                    _ => b.id,
-                };
-                (session, Hlc(b.last_ms), b.at, b.draft.chars().count())
+                // The Session the burst will be recorded in.
+                (self.session_for(b.id, b.last_ms), Hlc(b.last_ms), b.at, b.draft.chars().count())
             });
         if let Some((session, end, _, _)) = draft {
             let e = ends.entry(session).or_insert(end);
@@ -89,13 +85,7 @@ impl Doc {
         }
 
         newest.into_iter().map(|(session, end)| {
-            let mut ranges: Vec<(usize, usize)> = Vec::new();
-            for p in at.remove(&session).unwrap_or_default() {
-                match ranges.last_mut() {
-                    Some((_, e)) if *e == p => *e = p + 1,
-                    _ => ranges.push((p, p + 1)),
-                }
-            }
+            let ranges = runs(at.remove(&session).unwrap_or_default());
             SessionText { session, device: session.device, end, ranges }
         }).collect()
     }

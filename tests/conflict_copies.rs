@@ -62,8 +62,8 @@ fn run(actions: &[Action]) {
             }
             Action::Revert { device: d, pick } => (!known[*d].is_empty()).then(|| {
                 let target = known[*d][*pick as usize % known[*d].len()].id;
-                (*d, docs[*d].revert_local(target, false, now))
-            }),
+                docs[*d].revert_local(target, false, now).map(|c| (*d, c)) // None: already reverted
+            }).flatten(),
             Action::Rename { device: d, name } => {
                 Some((*d, docs[*d].set_device_name_local(["Laptop", "Phone", "Desk"][*name as usize], now)))
             }

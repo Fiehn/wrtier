@@ -145,7 +145,7 @@ impl Tree {
     pub fn visible_id(&self, index: usize) -> Option<CharId> {
         let mut count = 0;
         for id in self.all_in_order() {
-            if let Some(node) = self.nodes.get(&id) {
+            if let Some(_node) = self.nodes.get(&id) {
                 if !self.is_visible(id) { continue; }
                 if count == index {
                     return Some(id);

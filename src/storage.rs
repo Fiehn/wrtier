@@ -88,6 +88,12 @@ pub fn probe(path: &Path) -> Probe {
 
 // Inner functions take a connection
 fn migrate(conn: &Connection) -> Result<()> {
+    migrate_to(conn, STORAGE_VERSION)
+}
+
+/// Brings a History up to storage version `target` (never past it): `STORAGE_VERSION` for real,
+/// an older one in tests, to make the files older apps wrote.
+fn migrate_to(conn: &Connection, target: i64) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version > STORAGE_VERSION {
         return Err(format!("this History was written by a newer version of the app (storage version {version})").into());
@@ -100,10 +106,10 @@ fn migrate(conn: &Connection) -> Result<()> {
             return Err("this is not a History file".into());
         }
     }
-    if version < 1 {
+    if version < 1 && 1 <= target {
         conn.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = 1; COMMIT;"))?;
     }
-    if version < 2 {
+    if version < 2 && 2 <= target {
         conn.execute_batch("
         BEGIN;
         CREATE TABLE revert_targets (
@@ -115,7 +121,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
-    if version < 3 {
+    if version < 3 && 3 <= target {
         conn.execute_batch("
         BEGIN;
         CREATE TABLE moves (
@@ -143,7 +149,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
-    if version < 4 {
+    if version < 4 && 4 <= target {
         // The piece text was typed or dropped into. Existing rows get NULL: the main text.
         conn.execute_batch("
         BEGIN;
@@ -153,7 +159,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
-    if version < 5 {
+    if version < 5 && 5 <= target {
         // Dismissed Merge notices. The notice is named by the Moves involved.
         conn.execute_batch("
         BEGIN;
@@ -167,7 +173,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
-    if version < 6 {
+    if version < 6 && 6 <= target {
         // Sessions, record fields (such as Device names), and a readable view of the History.
         conn.execute_batch("
         BEGIN;
@@ -206,7 +212,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
-    if version < 7 {
+    if version < 7 && 7 <= target {
         // Milestones, and the readable view rebuilt so a Milestone row shows its name.
         conn.execute_batch("
         BEGIN;
@@ -248,7 +254,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
-    if version < 8 {
+    if version < 8 && 8 <= target {
         // Text files: every one the app writes is recorded with the version it was built from.
         // And `dismissals` accepts a third kind of notice; SQLite can't change a CHECK in place,
         // so the table is rebuilt.
@@ -274,7 +280,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
-    if version < 9 {
+    if version < 9 && 9 <= target {
         // A field records which value it replaced, so two edits made without seeing each other
         // are known as such (older rows have none). And `dismissals` accepts the notice for
         // that; the table is rebuilt to change its CHECK.
@@ -294,7 +300,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         COMMIT;
         ")?;
     }
-    if version < 10 {
+    if version < 10 && 10 <= target {
         // Comments and Replies, and the readable view rebuilt so their rows read as sentences
         // ("Anna commented on "The rain had stopped": too abrupt?").
         conn.execute_batch("
@@ -362,121 +368,101 @@ fn migrate(conn: &Connection) -> Result<()> {
 }
 /// One row in `insertions`. Insert and Replace both write one.
 fn write_insertion(conn: &Connection, change: ChangeId, run: &InsertRun) -> Result<()> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT OR IGNORE INTO insertions (change, text, parent, side, right_origin, into_anchor)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            change.to_string(),
-            run.text,
-            run.parent.map(|id| id.to_string()),
-            side_to_str(run.side),
-            run.right_origin.map(|id| id.to_string()),
-            run.into.map(|id| id.to_string()),
-        ],
-    )?;
+    )?.execute(params![
+        change.to_string(),
+        run.text,
+        run.parent.map(|id| id.to_string()),
+        side_to_str(run.side),
+        run.right_origin.map(|id| id.to_string()),
+        run.into.map(|id| id.to_string()),
+    ])?;
     Ok(())
 }
 
+/// One row in `deletions` per range, with the deleted text as a readable copy. Delete and
+/// Replace both write them.
+fn write_deletions(conn: &Connection, change: ChangeId, ranges: &[CharRange], doc: &Doc) -> Result<()> {
+    let mut stmt = conn.prepare_cached(
+        "INSERT OR IGNORE INTO deletions (change, first_char, len, deleted_text) VALUES (?1, ?2, ?3, ?4)")?;
+    for range in ranges {
+        stmt.execute(params![change.to_string(), range.first.to_string(), range.len, doc.text_of(range)])?;
+    }
+    Ok(())
+}
+
+/// Writes one Change. Every statement is prepared once per connection (`prepare_cached`), so
+/// saving thousands of Changes at once (a Replace all over a novel) doesn't parse them again.
 fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
-    conn.execute(
+    let id = change.id.to_string();
+    conn.prepare_cached(
         "INSERT OR IGNORE INTO changes (id, device, counter, hlc, time, kind, session)
          VALUES (?1, ?2, ?3, ?4, datetime(?4 / 1000, 'unixepoch'), ?5, ?6)",
-        params![
-            change.id.to_string(),
-            change.id.device.to_string(),
-            change.id.counter,
-            change.hlc.0 as i64,
-            match &change.kind {
-                ChangeKind::Insert(_) => "insert",
-                ChangeKind::Delete(_) => "delete",
-                ChangeKind::Replace { .. } => "replace",
-                ChangeKind::Revert { .. } => "revert",
-                ChangeKind::Move { .. } => "move",
-                ChangeKind::Dismiss { .. } => "dismiss",
-                ChangeKind::SetField { .. } => "field",
-                ChangeKind::Milestone { .. } => "milestone",
-                ChangeKind::Comment { .. } => "comment",
-                ChangeKind::Reply { .. } => "reply",
-            },
-            change.session.to_string(),
-        ],
-    )?;
+    )?.execute(params![
+        id,
+        change.id.device.to_string(),
+        change.id.counter,
+        change.hlc.0 as i64,
+        match &change.kind {
+            ChangeKind::Insert(_) => "insert",
+            ChangeKind::Delete(_) => "delete",
+            ChangeKind::Replace { .. } => "replace",
+            ChangeKind::Revert { .. } => "revert",
+            ChangeKind::Move { .. } => "move",
+            ChangeKind::Dismiss { .. } => "dismiss",
+            ChangeKind::SetField { .. } => "field",
+            ChangeKind::Milestone { .. } => "milestone",
+            ChangeKind::Comment { .. } => "comment",
+            ChangeKind::Reply { .. } => "reply",
+        },
+        change.session.to_string(),
+    ])?;
     match &change.kind {
         ChangeKind::Insert(run) => write_insertion(conn, change.id, run)?,
-        ChangeKind::Delete(ranges) => {
-            for range in ranges {
-                let text = doc.text_of(range);
-                conn.execute(
-                    "INSERT OR IGNORE INTO deletions (change, first_char, len, deleted_text) VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        change.id.to_string(),
-                        range.first.to_string(),
-                        range.len,
-                        text,
-                    ],
-                )?;
-            }
-        }
+        ChangeKind::Delete(ranges) => write_deletions(conn, change.id, ranges, doc)?,
         ChangeKind::Replace { deleted, inserted } => {
-            for range in deleted {
-                let text = doc.text_of(range);
-                conn.execute(
-                    "INSERT OR IGNORE INTO deletions (change, first_char, len, deleted_text) VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        change.id.to_string(),
-                        range.first.to_string(),
-                        range.len,
-                        text,
-                    ],
-                )?;
-            }
+            write_deletions(conn, change.id, deleted, doc)?;
             write_insertion(conn, change.id, inserted)?;
         }
         ChangeKind::Revert { targets } => {
             // One row per target
+            let mut stmt = conn.prepare_cached("INSERT OR IGNORE INTO revert_targets (change, target) VALUES (?1, ?2)")?;
             for target in targets {
-                conn.execute(
-                    "INSERT OR IGNORE INTO revert_targets (change, target) VALUES (?1, ?2)",
-                    params![
-                        change.id.to_string(),
-                        target.to_string(),
-                    ],
-                )?;
+                stmt.execute(params![id, target.to_string()])?;
             }
         }
         ChangeKind::Move { pieces, parent, side, right_origin, seen, into } => {
             // Where the anchors go: the same fields an insertion has.
-            conn.execute(
+            conn.prepare_cached(
                 "INSERT OR IGNORE INTO moves (change, parent, side, right_origin, into_anchor) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    change.id.to_string(),
-                    parent.map(|id| id.to_string()),
-                    side_to_str(*side),
-                    right_origin.map(|id| id.to_string()),
-                    into.map(|id| id.to_string()),
-                ],
-            )?;
+            )?.execute(params![
+                id,
+                parent.map(|id| id.to_string()),
+                side_to_str(*side),
+                right_origin.map(|id| id.to_string()),
+                into.map(|id| id.to_string()),
+            ])?;
             // One row per piece; `piece` is its index, which keeps them in reading order.
+            let mut stmt = conn.prepare_cached(
+                "INSERT OR IGNORE INTO move_pieces (change, piece, first_char, last_char, from_anchor, moved_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
             for (k, span) in pieces.iter().enumerate() {
-                conn.execute(
-                    "INSERT OR IGNORE INTO move_pieces (change, piece, first_char, last_char, from_anchor, moved_text)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        change.id.to_string(),
-                        k as i64,
-                        span.first.to_string(),
-                        span.last.to_string(),
-                        span.from.map(|id| id.to_string()),
-                        doc.piece_text(span),
-                    ],
-                )?;
+                stmt.execute(params![
+                    id,
+                    k as i64,
+                    span.first.to_string(),
+                    span.last.to_string(),
+                    span.from.map(|id| id.to_string()),
+                    doc.piece_text(span),
+                ])?;
             }
             // What the moving Device had seen: one row per Device.
+            let mut stmt = conn.prepare_cached("INSERT OR IGNORE INTO move_seen (change, device, counter) VALUES (?1, ?2, ?3)")?;
             for (device, counter) in seen {
-                conn.execute(
-                    "INSERT OR IGNORE INTO move_seen (change, device, counter) VALUES (?1, ?2, ?3)",
-                    params![change.id.to_string(), device.to_string(), counter],
-                )?;
+                stmt.execute(params![id, device.to_string(), counter])?;
             }
         }
         ChangeKind::Dismiss { notice } => {
@@ -486,46 +472,33 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
                 NoticeKey::UnknownTextFile { session } => ("unknown_text_file", session, None),
                 NoticeKey::ConcurrentField { later, earlier } => ("concurrent_field", later, Some(earlier)),
             };
-            conn.execute(
-                "INSERT OR IGNORE INTO dismissals (change, notice, move, other_move) VALUES (?1, ?2, ?3, ?4)",
-                params![change.id.to_string(), kind, mv.to_string(), other.map(|o| o.to_string())],
-            )?;
+            conn.prepare_cached("INSERT OR IGNORE INTO dismissals (change, notice, move, other_move) VALUES (?1, ?2, ?3, ?4)")?
+                .execute(params![id, kind, mv.to_string(), other.map(|o| o.to_string())])?;
         }
         ChangeKind::SetField { record, field, value, replaces } => {
-            conn.execute(
-                "INSERT OR IGNORE INTO fields (change, record, field, value, replaces) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![change.id.to_string(), record, field, value, replaces.map(|r| r.to_string())],
-            )?;
+            conn.prepare_cached("INSERT OR IGNORE INTO fields (change, record, field, value, replaces) VALUES (?1, ?2, ?3, ?4, ?5)")?
+                .execute(params![id, record, field, value, replaces.map(|r| r.to_string())])?;
         }
         ChangeKind::Milestone { name, seen } => {
-            conn.execute(
-                "INSERT OR IGNORE INTO milestones (change, name) VALUES (?1, ?2)",
-                params![change.id.to_string(), name],
-            )?;
+            conn.prepare_cached("INSERT OR IGNORE INTO milestones (change, name) VALUES (?1, ?2)")?
+                .execute(params![id, name])?;
+            let mut stmt = conn.prepare_cached("INSERT OR IGNORE INTO milestone_seen (change, device, counter) VALUES (?1, ?2, ?3)")?;
             for (device, counter) in seen {
-                conn.execute(
-                    "INSERT OR IGNORE INTO milestone_seen (change, device, counter) VALUES (?1, ?2, ?3)",
-                    params![change.id.to_string(), device.to_string(), counter],
-                )?;
+                stmt.execute(params![id, device.to_string(), counter])?;
             }
         }
         ChangeKind::Comment { pieces, quote, sender, body } => {
-            conn.execute(
-                "INSERT OR IGNORE INTO comments (change, sender, body, quote) VALUES (?1, ?2, ?3, ?4)",
-                params![change.id.to_string(), sender, body, quote],
-            )?;
+            conn.prepare_cached("INSERT OR IGNORE INTO comments (change, sender, body, quote) VALUES (?1, ?2, ?3, ?4)")?
+                .execute(params![id, sender, body, quote])?;
+            let mut stmt = conn.prepare_cached(
+                "INSERT OR IGNORE INTO comment_pieces (change, piece, first_char, last_char) VALUES (?1, ?2, ?3, ?4)")?;
             for (k, span) in pieces.iter().enumerate() {
-                conn.execute(
-                    "INSERT OR IGNORE INTO comment_pieces (change, piece, first_char, last_char) VALUES (?1, ?2, ?3, ?4)",
-                    params![change.id.to_string(), k as i64, span.first.to_string(), span.last.to_string()],
-                )?;
+                stmt.execute(params![id, k as i64, span.first.to_string(), span.last.to_string()])?;
             }
         }
         ChangeKind::Reply { comment, sender, body } => {
-            conn.execute(
-                "INSERT OR IGNORE INTO replies (change, comment, sender, body) VALUES (?1, ?2, ?3, ?4)",
-                params![change.id.to_string(), comment.to_string(), sender, body],
-            )?;
+            conn.prepare_cached("INSERT OR IGNORE INTO replies (change, comment, sender, body) VALUES (?1, ?2, ?3, ?4)")?
+                .execute(params![id, comment.to_string(), sender, body])?;
         }
     }
     Ok(())
@@ -881,13 +854,51 @@ pub fn merge(main: &Path, other: &Path) -> Result<()> {
         // Opening it would quietly create an empty database.
         return Err(format!("no such file: {}", other.display()).into());
     }
-    migrate(&Connection::open(other)?)?; // bring the other file up to date first
+    // A copy that's refused is kept as a Sync problem exactly as the sync tool wrote it, so an
+    // older one is brought up to date in a temporary copy, never in place.
+    let version: i64 = {
+        let conn = Connection::open_with_flags(other, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))?
+    };
+    let migrated = if version == STORAGE_VERSION { None } else { Some(TempCopy::of(other)?) };
+    let source = migrated.as_ref().map_or(other, |copy| copy.path.as_path());
+    if migrated.is_some() {
+        migrate(&Connection::open(source)?)?;
+    }
     let conn = Connection::open(main)?;
     migrate(&conn)?;
-    conn.execute("ATTACH DATABASE ?1 AS other", [other.to_string_lossy()])?;
+    conn.execute("ATTACH DATABASE ?1 AS other", [source.to_string_lossy()])?;
     let result = merge_attached(&conn);
-    conn.execute("DETACH DATABASE other", [])?;
-    result
+    let detached = conn.execute("DETACH DATABASE other", []);
+    // A failed merge's reason matters more than a failed detach after it.
+    result?;
+    detached?;
+    Ok(())
+}
+
+/// A copy of a file in the system's temporary folder (not the Vault, which is synced), removed
+/// when dropped.
+struct TempCopy {
+    path: std::path::PathBuf,
+}
+
+impl TempCopy {
+    fn of(file: &Path) -> Result<TempCopy> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let name = format!("wrtier-merge-{}-{nanos}-{}.db", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+        let path = std::env::temp_dir().join(name);
+        std::fs::copy(file, &path)?;
+        Ok(TempCopy { path })
+    }
+}
+
+impl Drop for TempCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(self.path.with_extension("db-journal"));
+    }
 }
 
 fn merge_attached(conn: &Connection) -> Result<()> {
@@ -934,19 +945,21 @@ fn merge_attached(conn: &Connection) -> Result<()> {
 /// SHA-256 of a Text file's contents, as hex.
 fn text_hash(text: &str) -> String {
     use sha2::{Digest, Sha256};
-    Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(64);
+    for b in Sha256::digest(text.as_bytes()) {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
 }
 
 /// A version as stored: "device:counter" per Device, comma-separated (readable, and sorted).
 fn version_to_str(version: &[(DeviceId, u32)]) -> String {
-    version.iter().map(|&(device, counter)| ChangeId { device, counter }.to_string()).collect::<Vec<_>>().join(",")
+    crate::text_file::version_text(version)
 }
 
 fn version_from_str(s: &str) -> Result<Vec<(DeviceId, u32)>> {
-    s.split(',').filter(|p| !p.is_empty()).map(|p| {
-        let id: ChangeId = p.parse()?;
-        Ok((id.device, id.counter))
-    }).collect()
+    crate::text_file::parse_version(s).ok_or_else(|| format!("a damaged version: {s:?}").into())
 }
 
 /// Writes the Work's text to its Text file, and records the file's hash and the version it was
@@ -1015,6 +1028,11 @@ pub enum TextFileRead {
     Known,
     /// It was edited outside the app: these Changes record the edit (already saved).
     Imported(Vec<Change>),
+    /// It was edited outside the app, and these Changes record the edit: they're in the `Doc`
+    /// already, but saving them failed (`error`). The caller must keep them and save them again
+    /// (before any Change made after them), or throw the `Doc` away: Changes made later may
+    /// build on them, and a History holding those without these can't be opened.
+    NotSaved { changes: Vec<Change>, error: String },
     /// It was written from Changes this History doesn't have yet (another Device's Text file
     /// arrived before its History did). Read it again once they're here.
     NotYet,
@@ -1056,8 +1074,10 @@ pub fn read_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -
     drop(conn);
     let mut changes = doc.import_text(base.as_deref(), &text, now_ms);
     changes.extend(relink_inclusions(doc, &named, now_ms));
-    save(db, &changes, doc)?;
-    Ok(TextFileRead::Imported(changes))
+    Ok(match save(db, &changes, doc) {
+        Ok(()) => TextFileRead::Imported(changes),
+        Err(e) => TextFileRead::NotSaved { changes, error: e.to_string() },
+    })
 }
 
 /// After an External edit: an Inclusion's block moved in another editor too short a way to be
@@ -1083,11 +1103,13 @@ fn relink_inclusions(doc: &mut Doc, named: &[Option<CharId>], now_ms: u64) -> Ve
 }
 
 /// `read_text_file`, for callers that only need the Changes (none if it was known or not yet).
+/// Changes that couldn't be saved are an error: the caller must then throw `doc` away.
 pub fn import_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -> Result<Vec<Change>> {
-    Ok(match read_text_file(db, text_file, doc, now_ms)? {
-        TextFileRead::Imported(changes) => changes,
-        TextFileRead::Known | TextFileRead::NotYet => Vec::new(),
-    })
+    match read_text_file(db, text_file, doc, now_ms)? {
+        TextFileRead::Imported(changes) => Ok(changes),
+        TextFileRead::Known | TextFileRead::NotYet => Ok(Vec::new()),
+        TextFileRead::NotSaved { error, .. } => Err(error.into()),
+    }
 }
 
 /// A History's first Change, in the fixed Change order, and its time. None for a History with
@@ -1140,7 +1162,8 @@ pub fn wrote_text(db: &Path, text: &str) -> Result<bool> {
 /// Keeps a Work's Text file in step: records an External edit if there is one, then writes the
 /// current text (after `header`, see `write_text_file`). Returns the Changes the External edit
 /// became (empty if there was none). A file written from Changes this History doesn't have yet
-/// is left alone: it's newer.
+/// is left alone: it's newer. If the External edit's Changes couldn't be saved it's an error,
+/// and the caller must throw `doc` away (it holds them).
 pub fn sync_text_file(db: &Path, text_file: &Path, doc: &mut Doc, header: &str, now_ms: u64) -> Result<Vec<Change>> {
     sync_text_file_with(db, text_file, doc, header, &Expansions::new(), now_ms)
 }
@@ -1152,6 +1175,7 @@ pub fn sync_text_file_with(db: &Path, text_file: &Path, doc: &mut Doc, header: &
         TextFileRead::NotYet => Ok(Vec::new()),
         TextFileRead::Known => write_text_file_with(db, text_file, doc, header, inclusions, now_ms).map(|()| Vec::new()),
         TextFileRead::Imported(changes) => write_text_file_with(db, text_file, doc, header, inclusions, now_ms).map(|()| changes),
+        TextFileRead::NotSaved { error, .. } => Err(error.into()),
     }
 }
 
@@ -1245,7 +1269,7 @@ mod test {
         let rain = doc.insert_local(0, "The rain had stopped.", 1000);
         let del = doc.delete_local(13, 7, 2000);
         let eased = doc.insert_local(13, "eased", 3000);
-        let revert = doc.revert_local(rain.id, true, 4000);
+        let revert = doc.revert_local(rain.id, true, 4000).unwrap();
         assert_eq!(doc.text(), "");
 
         let changes = vec![rain, del, eased, revert];
@@ -1715,5 +1739,102 @@ mod test {
         std::thread::sleep(std::time::Duration::from_millis(20));
         write_text_file(&db, &typ, &doc, "", 3000).unwrap();
         assert_eq!(std::fs::metadata(&typ).unwrap().modified().unwrap(), written);
+    }
+
+    /// Makes a file write-protected (or not again), so writing to it fails.
+    fn write_protect(path: &Path, protected: bool) {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(protected);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[test]
+    fn an_external_edit_whose_save_fails_stays_in_the_doc_to_be_saved_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, typ) = (dir.path().join("work.db"), dir.path().join("work.typ"));
+        let mut doc = Doc::new(DeviceId(1));
+        let first = doc.insert_local(0, "The rain had stopped.", 1000);
+        save(&db, &[first], &doc).unwrap();
+        write_text_file(&db, &typ, &doc, "", 1500).unwrap();
+        let (text, version) = crate::text_file::split_marker(&std::fs::read_to_string(&typ).unwrap());
+        std::fs::write(&typ, crate::text_file::with_marker(&text.replace("stopped", "eased"), &version.unwrap())).unwrap();
+
+        write_protect(&db, true); // locked by the sync tool, say
+        let read = read_text_file(&db, &typ, &mut doc, 2000);
+        write_protect(&db, false);
+        let Ok(TextFileRead::NotSaved { changes, .. }) = read else { panic!("the save fails: {read:?}") };
+        assert_eq!(doc.text(), "The rain had eased.", "the edit is in the Doc");
+        assert_eq!(load(&db, DeviceId(1)).unwrap().1.text(), "The rain had stopped.", "but not in the file");
+        // Typing on builds on the imported text. Saved after it, the History opens.
+        let typed = doc.insert_local(doc.len(), " Gulls circled.", 3000);
+        let mut unsaved = changes;
+        unsaved.push(typed);
+        save(&db, &unsaved, &doc).unwrap();
+        assert_eq!(load(&db, DeviceId(1)).unwrap().1.text(), "The rain had eased. Gulls circled.");
+        // The callers that only take saved Changes say it failed.
+        let mut other = load(&db, DeviceId(1)).unwrap().1;
+        std::fs::write(&typ, "Something else entirely.").unwrap();
+        write_protect(&db, true);
+        let failed = import_text_file(&db, &typ, &mut other, 4000).is_err();
+        write_protect(&db, false);
+        assert!(failed);
+    }
+
+    #[test]
+    fn a_history_from_every_older_storage_version_opens_and_merges() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.db");
+        let mut laptop = Doc::new(DeviceId(1));
+        let base = laptop.insert_local(0, "Rain.", 1000);
+        save(&main, &[base], &laptop).unwrap();
+        for version in 1..STORAGE_VERSION {
+            // A file as an app of that storage version left it, with one Change in it (written
+            // with only the columns the first version had, which every later one still has).
+            let old = dir.path().join(format!("v{version}.db"));
+            {
+                let conn = Connection::open(&old).unwrap();
+                migrate_to(&conn, version).unwrap();
+                let id = ChangeId { device: DeviceId(2), counter: version as u32 };
+                conn.execute(
+                    "INSERT INTO changes (id, device, counter, hlc, time, kind)
+                     VALUES (?1, ?2, ?3, ?4, datetime(?4 / 1000, 'unixepoch'), 'insert')",
+                    params![id.to_string(), id.device.to_string(), id.counter, 2000 + version]).unwrap();
+                conn.execute(
+                    "INSERT INTO insertions (change, text, parent, side, right_origin) VALUES (?1, ?2, NULL, 'R', NULL)",
+                    params![id.to_string(), format!("v{version}")]).unwrap();
+            }
+            assert_eq!(probe(&old), Probe::History, "storage version {version}");
+            // Merged as a Conflict copy: brought up to date in a temporary copy, never in place.
+            let before = std::fs::read(&old).unwrap();
+            merge(&main, &old).unwrap();
+            assert_eq!(std::fs::read(&old).unwrap(), before, "storage version {version}: the copy is untouched");
+            // Opened: brought up to date in place.
+            assert_eq!(load(&old, DeviceId(1)).unwrap().1.text(), format!("v{version}"));
+            let now: i64 = Connection::open(&old).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(now, STORAGE_VERSION);
+        }
+        let text = load(&main, DeviceId(1)).unwrap().1.text();
+        for version in 1..STORAGE_VERSION {
+            assert!(text.contains(&format!("v{version}")), "storage version {version} merged: {text}");
+        }
+    }
+
+    #[test]
+    fn a_refused_merge_leaves_an_older_copy_exactly_as_it_was() {
+        // Two Devices that wrongly share Device ID 1; the copy comes from an older app.
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.db"), dir.path().join("b.db"));
+        let mut laptop = Doc::new(DeviceId(1));
+        let mut clone = Doc::new(DeviceId(1));
+        save(&a, &[laptop.insert_local(0, "mine", 1000)], &laptop).unwrap();
+        save(&b, &[clone.insert_local(0, "theirs", 1000)], &clone).unwrap();
+        // Storage version 9: before Comments.
+        Connection::open(&b).unwrap().execute_batch(
+            "DROP TABLE comments; DROP TABLE comment_pieces; DROP TABLE replies; PRAGMA user_version = 9;").unwrap();
+        let before = std::fs::read(&b).unwrap();
+
+        let err = merge(&a, &b).unwrap_err();
+        assert!(err.downcast_ref::<SameIdDifferentContent>().is_some(), "{err}");
+        assert_eq!(std::fs::read(&b).unwrap(), before, "kept as the sync tool wrote it");
     }
 }

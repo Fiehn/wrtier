@@ -50,6 +50,16 @@ impl Doc {
         // again once at the end. (Updating it after each, as typing does, would take seconds
         // for a few thousand matches in a novel.)
         sorted.sort_by_key(|e| std::cmp::Reverse(e.index));
+        // That shortcut needs them apart: overlapping edits would delete characters twice and
+        // put text in the wrong place, without any error. (Two insertions at one place, or an
+        // insertion right at another edit's edge, don't overlap.)
+        for pair in sorted.windows(2) {
+            let (later, earlier) = (pair[0], pair[1]);
+            let apart = earlier.index + earlier.len <= later.index
+                || (earlier.index == later.index && (earlier.len == 0 || later.len == 0));
+            assert!(apart,
+                    "Find and replace edits overlap: {earlier:?} and {later:?}");
+        }
         let mut changes = Vec::new();
         for edit in sorted {
             let end = (edit.index + edit.len).min(self.visible.len());
