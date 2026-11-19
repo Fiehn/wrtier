@@ -93,6 +93,19 @@ impl Positions {
     }
 }
 
+/// For every byte index in `text` that starts a character (and its end), the UTF-16 position
+/// there; other bytes' entries are meaningless. For turning many byte ranges into UTF-16 ones.
+pub fn utf16_at_bytes(text: &str) -> Vec<usize> {
+    let mut utf16 = vec![0; text.len() + 1];
+    let mut units = 0;
+    for (byte, c) in text.char_indices() {
+        utf16[byte] = units;
+        units += c.len_utf16();
+    }
+    utf16[text.len()] = units;
+    utf16
+}
+
 /// The byte index in `text` of UTF-16 position `utf16` (or the end).
 pub fn byte_at_utf16(text: &str, utf16: usize) -> usize {
     let mut units = 0;

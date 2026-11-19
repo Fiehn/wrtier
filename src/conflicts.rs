@@ -16,22 +16,30 @@ use crate::storage;
 /// Syncthing names them `<name>.sync-conflict-<YYYYMMDD>-<HHMMSS>-<device>.<extension>`, and a
 /// copy of a copy gets a second such part. Only names that match exactly count.
 pub fn conflict_copies(path: &Path) -> Vec<PathBuf> {
-    let (Some(dir), Some(stem), Some(ext)) = (
-        path.parent(),
-        path.file_stem().and_then(|s| s.to_str()),
-        path.extension().and_then(|s| s.to_str()),
-    ) else {
-        return Vec::new();
-    };
+    copies_among(path, &files_beside(path))
+}
+
+/// The files in the folder `path` is in (not its subfolders). With `copies_among`, one read of
+/// a folder finds the Conflict copies of every file in it.
+pub fn files_beside(path: &Path) -> Vec<PathBuf> {
+    let Some(dir) = path.parent() else { return Vec::new() };
     let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut copies: Vec<PathBuf> = entries
+    entries
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            is_conflict_name(&name, stem, ext).then(|| e.path())
-        })
+        .map(|e| e.path())
+        .collect()
+}
+
+/// `conflict_copies`, among `files` (those in `path`'s folder, from `files_beside`).
+pub fn copies_among(path: &Path, files: &[PathBuf]) -> Vec<PathBuf> {
+    let (Some(stem), Some(ext)) = (path.file_stem().and_then(|s| s.to_str()), path.extension().and_then(|s| s.to_str())) else {
+        return Vec::new();
+    };
+    let mut copies: Vec<PathBuf> = files.iter()
+        .filter(|file| file.file_name().and_then(|n| n.to_str()).is_some_and(|name| is_conflict_name(name, stem, ext)))
+        .cloned()
         .collect();
     copies.sort();
     copies

@@ -8,14 +8,12 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use wrtier::change::Change;
+use wrtier::change::{Change, CharRange};
 use wrtier::doc::{Burst, BurstKind, Doc};
 use wrtier::ids::{ChangeId, CharId};
 use wrtier::storage;
 
-fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
-}
+use crate::err;
 
 /// What the `.json` holds.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -43,18 +41,12 @@ pub struct KeptBurst {
 
 impl KeptBurst {
     pub fn of(burst: &Burst) -> Self {
-        let mut replacing: Vec<(CharId, u32)> = Vec::new();
-        for &c in &burst.replacing {
-            match replacing.last_mut() {
-                Some((first, n)) if first.change == c.change && first.offset + *n == c.offset => *n += 1,
-                _ => replacing.push((c, 1)),
-            }
-        }
+        let replacing = CharRange::runs(burst.replacing.iter().copied());
         KeptBurst {
             deleting: burst.kind == BurstKind::Deleting,
             id: burst.id.to_string(),
             left: burst.left.map(|c| c.to_string()),
-            replacing: replacing.into_iter().map(|(c, n)| (c.to_string(), n)).collect(),
+            replacing: replacing.into_iter().map(|run| (run.first.to_string(), run.len)).collect(),
             draft: burst.draft.clone(),
             opened_ms: burst.opened_ms,
             last_ms: burst.last_ms,
@@ -83,7 +75,8 @@ pub struct Recovery {
     work: String,
     /// What's on disk now, so an unchanged state isn't written again.
     written: Option<String>,
-    written_changes: usize,
+    /// Which unsaved Changes the `.db` holds (see `fingerprint`); 0 when there's no `.db`.
+    written_changes: u64,
     unflushed: bool,
 }
 
@@ -126,13 +119,24 @@ impl Recovery {
         if burst.is_none() && unsaved.is_empty() {
             return self.clear();
         }
-        if unsaved.len() != self.written_changes {
-            let _ = std::fs::remove_file(&self.db);
-            if !unsaved.is_empty() {
+        let changes = fingerprint(unsaved);
+        if changes != self.written_changes {
+            if unsaved.is_empty() {
+                remove(&self.db)?;
+            } else {
+                // Written beside the old one and then put in its place: this matters most while the
+                // Work's own save is failing (a full or locked disk), and a failed write here must
+                // still leave the last copy.
                 std::fs::create_dir_all(self.db.parent().expect("in a folder")).map_err(err)?;
-                storage::save(&self.db, unsaved, doc).map_err(err)?;
+                let partial = self.db.with_extension("db.writing");
+                remove(&partial)?;
+                if let Err(e) = storage::save(&partial, unsaved, doc) {
+                    let _ = std::fs::remove_file(&partial);
+                    return Err(e.to_string());
+                }
+                std::fs::rename(&partial, &self.db).map_err(err)?;
             }
-            self.written_changes = unsaved.len();
+            self.written_changes = changes;
             self.unflushed = true;
         }
         let kept = Kept { vault: self.vault.clone(), work: self.work.clone(), burst: burst.map(KeptBurst::of), cut };
@@ -170,17 +174,38 @@ impl Recovery {
             return Ok(());
         }
         for path in [&self.json, &self.db] {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.to_string()),
-            }
+            remove(path)?;
         }
         self.written = None;
         self.written_changes = 0;
         self.unflushed = false;
         Ok(())
     }
+}
+
+/// Removes `path`, if it's there.
+fn remove(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Which Changes `unsaved` is, as one number (FNV-1a of their IDs; 0 for none), so a different
+/// set is written again even when it has as many Changes as the last.
+fn fingerprint(unsaved: &[Change]) -> u64 {
+    if unsaved.is_empty() {
+        return 0;
+    }
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for change in unsaved {
+        for byte in change.id.to_string().bytes().chain(std::iter::once(b'\n')) {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash.max(1)
 }
 
 /// The Works in `vault` with recovery files in `dir`.
@@ -250,5 +275,58 @@ mod tests {
         let mut recovery = Recovery::for_work(dir.path(), Path::new("C:/Vault"), "Rain");
         recovery.keep(&doc, false, std::slice::from_ref(&change)).unwrap();
         assert_eq!(storage::read_all(&recovery.db).unwrap(), vec![change]);
+    }
+
+    #[test]
+    fn a_different_set_of_as_many_changes_is_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = Doc::new(DeviceId(1));
+        let first = doc.insert_local(0, "abc", 1000);
+        let second = doc.insert_local(3, "def", 2000);
+        let mut recovery = Recovery::for_work(dir.path(), Path::new("C:/Vault"), "Rain");
+        recovery.keep(&doc, false, std::slice::from_ref(&first)).unwrap();
+        recovery.keep(&doc, false, std::slice::from_ref(&second)).unwrap();
+        assert_eq!(storage::read_all(&recovery.db).unwrap(), vec![second]);
+        assert!(!recovery.db.with_extension("db.writing").exists());
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_last_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = Doc::new(DeviceId(1));
+        let first = doc.insert_local(0, "abc", 1000);
+        let second = doc.insert_local(3, "def", 2000);
+        let mut recovery = Recovery::for_work(dir.path(), Path::new("C:/Vault"), "Rain");
+        recovery.keep(&doc, false, std::slice::from_ref(&first)).unwrap();
+        // A folder where the new copy would be written: writing it fails.
+        std::fs::create_dir(recovery.db.with_extension("db.writing")).unwrap();
+        assert!(recovery.keep(&doc, false, &[first.clone(), second.clone()]).is_err());
+        assert_eq!(storage::read_all(&recovery.db).unwrap(), vec![first.clone()], "the last copy is still there");
+
+        // Once writing works again, the next keep writes them all.
+        std::fs::remove_dir(recovery.db.with_extension("db.writing")).unwrap();
+        recovery.keep(&doc, false, &[first.clone(), second.clone()]).unwrap();
+        assert_eq!(storage::read_all(&recovery.db).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn what_was_kept_survives_a_failing_save_and_a_crash() {
+        // The Work's save fails (simulated: nothing reaches its .db), keep succeeds, then the app
+        // crashes: reopening finds the Changes and the burst in the recovery files.
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = Doc::new(DeviceId(1));
+        let unsaved = vec![doc.insert_local(0, "The rain had stopped.", 1000)];
+        doc.type_text(21, " At last.", 2000);
+        let mut recovery = Recovery::for_work(dir.path(), Path::new("C:/Vault"), "Rain");
+        recovery.keep(&doc, false, &unsaved).unwrap();
+        recovery.flush().unwrap();
+        drop(recovery);
+
+        let again = Recovery::for_work(dir.path(), Path::new("C:/Vault"), "Rain");
+        let kept = again.read().unwrap().unwrap();
+        let mut reopened = Doc::new(DeviceId(1));
+        reopened.apply_all(&storage::read_all(&again.db).unwrap());
+        assert!(kept.burst.unwrap().resume(&mut reopened).unwrap());
+        assert_eq!(reopened.text(), "The rain had stopped. At last.");
     }
 }

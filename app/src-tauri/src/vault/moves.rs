@@ -262,24 +262,20 @@ impl Vault {
                 work.whereabouts = None;
             }
         }
-        let lost: Vec<String> = self.works.iter().filter(|(_, w)| w.is_lost()).map(|(id, _)| id.clone()).collect();
+        // (A diverged one stays paused until the Author chooses: nothing to look for.)
+        let lost: Vec<String> = self.works.iter()
+            .filter(|(_, w)| w.whereabouts != Some(Whereabouts::Diverged) && w.is_lost())
+            .map(|(id, _)| id.clone())
+            .collect();
         if lost.is_empty() {
             return;
         }
         // Every History in the Vault and in its trash, by what tells each Work apart (the
-        // Vault's own win over the trash's).
+        // Vault's own win over the trash's). Walked again only when something there changed.
         let trash = self.trash_root();
-        let mut found: HashMap<String, PathBuf> = HashMap::new();
-        for db in walk_works(&trash).dbs.into_iter().chain(self.walk().dbs) {
-            if let Ok(Some(identity)) = storage::identity(&db) {
-                found.insert(identity, db);
-            }
-        }
+        let found = self.work_index();
         for id in lost {
-            if self.works[&id].whereabouts == Some(Whereabouts::Diverged) {
-                continue; // stays paused until the Author chooses
-            }
-            let place = self.works[&id].identity().and_then(|identity| found.get(identity)).cloned();
+            let place = self.works[&id].identity().and_then(|identity| found.get(identity)).map(|located| located.db.clone());
             // Only onto a History that has everything this tab saved: one that went its own
             // way (a copy edited separately) would be broken by mixing.
             let place = match place {

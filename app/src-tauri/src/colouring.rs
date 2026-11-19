@@ -21,13 +21,7 @@ pub struct Colour {
 pub fn colour(text: &str) -> Vec<Colour> {
     let root = typst::syntax::parse(text);
     // Every byte offset that starts a character, as a UTF-16 position.
-    let mut utf16 = vec![0; text.len() + 1];
-    let mut units = 0;
-    for (byte, c) in text.char_indices() {
-        utf16[byte] = units;
-        units += c.len_utf16();
-    }
-    utf16[text.len()] = units;
+    let utf16 = crate::positions::utf16_at_bytes(text);
 
     let mut colours = Vec::new();
     walk(&LinkedNode::new(&root), &utf16, &mut colours);

@@ -61,7 +61,7 @@ pub enum Loaded {
     /// Nothing needed reading.
     Nothing,
     /// The History, and the file's stamp from just before it was read.
-    Doc(Option<(std::time::SystemTime, u64)>, Doc),
+    Doc(Option<crate::stamps::Stamp>, Doc),
     Text(String),
     Unreadable(String),
 }
@@ -106,8 +106,8 @@ impl Vault {
 
     fn history_found(&self, located: Located) -> Found {
         let open = self.works.values().any(|w| w.db == located.db);
-        let cached = self.included_docs.get(&(located.db.clone(), String::new()))
-            .is_some_and(|(seen, _)| *seen == file_stamp(&located.db));
+        let cached = self.included_docs.stamp_of(&(located.db.clone(), String::new()))
+            .is_some_and(|seen| seen == file_stamp(&located.db));
         Found::History { located, fresh: open || cached }
     }
 
@@ -124,7 +124,7 @@ impl Vault {
             },
             (Found::History { located, .. }, loaded) => {
                 if let Loaded::Doc(stamp, doc) = loaded {
-                    self.included_docs.insert((located.db.clone(), String::new()), (stamp, Arc::new(doc)));
+                    self.included_docs.insert((located.db.clone(), String::new()), stamp, Arc::new(doc));
                 }
                 match self.read_history(&located, identity.clone()) {
                     Ok(reading) => reading,
@@ -148,7 +148,7 @@ impl Vault {
     /// A History's text, Inclusions, Comments and Story elements (it's in the cache, or open).
     fn read_history(&mut self, located: &Located, identity: Option<String>) -> Result<Reading, String> {
         let index = self.work_index();
-        let shelf = Shelf::read(&self.root);
+        let shelf = self.shelf();
         let name = name_of(&located.id);
         // Open in a tab here: as Rust has it. Otherwise from the cache (read just now, or still
         // the same file), or read here if it went from the cache meanwhile.
@@ -158,10 +158,10 @@ impl Vault {
         } else {
             let key = (located.db.clone(), String::new());
             Some(match self.included_docs.get(&key) {
-                Some((_, doc)) => doc.clone(),
+                Some((_, doc)) => doc,
                 None => {
                     let doc = Arc::new(storage::load(&located.db, self.device).map_err(|e| format!("{name} can't be read right now ({e})."))?.1);
-                    self.included_docs.insert(key, (file_stamp(&located.db), doc.clone()));
+                    self.included_docs.insert(key, file_stamp(&located.db), doc.clone());
                     doc
                 }
             })

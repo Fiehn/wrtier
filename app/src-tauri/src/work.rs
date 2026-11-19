@@ -13,7 +13,7 @@ use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use wrtier::change::{Change, ChangeKind, NoticeKey};
-use wrtier::conflicts::conflict_copies;
+use wrtier::conflicts::{conflict_copies, copies_among, files_beside};
 use wrtier::doc::{BurstKind, CutPasted, Doc, MergeNotice, Stretch};
 use wrtier::ids::{ChangeId, CharId, DeviceId};
 use wrtier::storage;
@@ -318,6 +318,20 @@ pub struct DismissedMark {
     pub whole: bool,
 }
 
+/// The files in each folder, read once per tick and shared by the open Works in it, which look
+/// there for their Conflict copies.
+#[derive(Default)]
+pub struct Folders(HashMap<PathBuf, Vec<PathBuf>>);
+
+impl Folders {
+    /// The Conflict copies of `path`, as its folder was when first read this tick.
+    pub fn copies_of(&mut self, path: &Path) -> Vec<PathBuf> {
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let files = self.0.entry(dir).or_insert_with(|| files_beside(path));
+        copies_among(path, files)
+    }
+}
+
 /// Where a Work's History went when it disappeared from under an open tab.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -334,12 +348,8 @@ pub enum Whereabouts {
 }
 
 /// When a file was last modified, and its size: if either changes, someone else wrote it.
-type Stamp = Option<(std::time::SystemTime, u64)>;
-
-fn stamp(path: &Path) -> Stamp {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.modified().ok()?, meta.len()))
-}
+type Stamp = Option<crate::stamps::Stamp>;
+use crate::stamps::file_stamp as stamp;
 
 pub struct OpenWork {
     pub db: PathBuf,
@@ -388,9 +398,9 @@ pub struct OpenWork {
     /// library generation): an edit after the library changed records the new versions first.
     styles_checked: Option<u64>,
     pub style_notice: Option<String>,
-    /// The Vault's folder: the Text file's header falls back to its Style library for anything
-    /// the Work hasn't recorded yet.
-    pub vault_root: PathBuf,
+    /// The Vault's Style library: the Text file's header falls back to it for anything the
+    /// Work hasn't recorded yet.
+    pub shelves: crate::preamble::ShelfCache,
     /// What the Text file writes out for each Inclusion (ADR 0015), kept up to date by the Vault,
     /// which can find the included Works.
     pub inclusions: storage::Expansions,
@@ -423,9 +433,7 @@ pub fn notice_key(key: NoticeKey) -> String {
     }
 }
 
-fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
-}
+use crate::err;
 
 /// Is this a Change to the text that undo can take back?
 pub fn undoable(change: &Change) -> bool {
@@ -443,7 +451,7 @@ impl OpenWork {
             whereabouts: None,
             styles_checked: None,
             style_notice: None,
-            vault_root: PathBuf::new(),
+            shelves: crate::preamble::ShelfCache::default(),
             inclusions: storage::Expansions::new(),
             stretch: None,
             stretch_answer: None,
@@ -1249,6 +1257,11 @@ impl OpenWork {
 
     /// The timer: closes a burst after a pause, retries saving, and writes the Text file when due.
     pub fn tick(&mut self, now_ms: u64) {
+        self.tick_in(now_ms, &mut Folders::default());
+    }
+
+    /// `tick`, with the folders already read this tick (shared by the open Works).
+    pub fn tick_in(&mut self, now_ms: u64, folders: &mut Folders) {
         if self.cut.is_none() { // a cut waits for its paste, however long that takes
             let change = self.doc.tick(now_ms);
             self.recorded(change);
@@ -1258,15 +1271,15 @@ impl OpenWork {
         if now_ms.saturating_sub(self.text_file_written_ms) >= TEXT_FILE_EVERY_MS {
             self.write_text_file(now_ms);
         }
-        self.look_outside();
+        self.look_outside(folders);
     }
 
     /// Has anything changed outside the app: the `.db` or Text file written by someone else
     /// (Syncthing, another editor), or a new Conflict copy? Then `outside` goes up, and the
     /// editor sends a `Sync` to take it in.
-    fn look_outside(&mut self) {
-        let copies = conflict_copies(&self.db).into_iter().chain(conflict_copies(&self.typ));
-        let new_copy = copies.into_iter().any(|copy| !self.copies_tried.contains(&copy));
+    fn look_outside(&mut self, folders: &mut Folders) {
+        let copies: Vec<PathBuf> = folders.copies_of(&self.db).into_iter().chain(folders.copies_of(&self.typ)).collect();
+        let new_copy = copies.iter().any(|copy| !self.copies_tried.contains(copy));
         let typ_ready = self.typ_waiting && self.doc.burst().is_none();
         if stamp(&self.db) != self.db_stamp || stamp(&self.typ) != self.typ_stamp || new_copy || typ_ready {
             self.outside += 1;
@@ -1274,7 +1287,7 @@ impl OpenWork {
             self.db_stamp = stamp(&self.db);
             self.typ_stamp = stamp(&self.typ);
             self.typ_waiting = false;
-            self.copies_tried.extend(conflict_copies(&self.db).into_iter().chain(conflict_copies(&self.typ)));
+            self.copies_tried.extend(copies);
         }
     }
 
@@ -1295,14 +1308,14 @@ impl OpenWork {
         // Then the History itself: whatever it has that this Work doesn't yet. Unless it has
         // this Device's own IDs for different Changes: then it's a copy that went its own way,
         // and taking anything from it would mix the two.
-        let in_file = storage::read_all(&self.db).map_err(err)?;
+        // (Only the Changes this Work doesn't have are read in full: the rest only by ID.)
+        let (in_file, new) = storage::read_new(&self.db, |id| self.doc.has(id)).map_err(err)?;
         let mine: HashMap<ChangeId, wrtier::ids::Hlc> = self.mine.iter().map(|c| (c.id, c.hlc)).collect();
-        if in_file.iter().any(|c| mine.get(&c.id).is_some_and(|&hlc| hlc != c.hlc)) {
+        if in_file.iter().any(|(id, hlc)| mine.get(id).is_some_and(|mine| mine != hlc)) {
             self.diverged();
             return Ok(());
         }
-        let ids: HashSet<ChangeId> = in_file.iter().map(|c| c.id).collect();
-        let new: Vec<Change> = in_file.into_iter().filter(|c| !self.doc.has(c.id)).collect();
+        let ids: HashSet<ChangeId> = in_file.iter().map(|(id, _)| *id).collect();
         from.extend(new.iter().map(|c| c.id.device).filter(|&d| d != self.doc.device()));
         self.doc.apply_all(&new);
         // Changes this Device saved must stay saved, even if the `.db` that arrived lacks them.
@@ -1410,7 +1423,7 @@ impl OpenWork {
 
     /// What goes at the top of the Text file: the Work's Preamble, from its recorded copies.
     fn text_file_header(&self) -> String {
-        crate::preamble::text_file_header(&self.doc, &crate::preamble::Shelf::read(&self.vault_root))
+        crate::preamble::text_file_header(&self.doc, &self.shelves.shelf())
     }
 
     /// Writes the Text file if it lags behind. Never over a file this Work hasn't read yet (an

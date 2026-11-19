@@ -6,6 +6,9 @@ describe("counting words and characters", () => {
     expect(wordsIn("She said, \"It's late.\" #scene-break() // a note\nAfter.")).toBe(5);
     expect(wordsIn("#epigraph[Every word] /* not this */ counts")).toBe(3);
     expect(wordsIn("Café — 1984 l’été")).toBe(3);
+    // As the History counts them (Unicode's Alphabetic): a vowel sign doesn't split a word.
+    expect(wordsIn("किताब")).toBe(1); // ि and ा are vowel signs
+    expect(wordsIn("’ ' —")).toBe(0);
   });
 
   it("counts characters as they read: no markup, comments or line breaks, spaces apart", () => {

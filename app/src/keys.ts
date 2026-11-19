@@ -76,7 +76,7 @@ export function normalize(key: string): string {
   return [mod && "Mod", mods.has("alt") && "Alt", mods.has("shift") && "Shift", name].filter(Boolean).join("-");
 }
 
-type KeyEvent = { key: string; code: string; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; metaKey: boolean };
+export type KeyEvent = { key: string; code: string; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; metaKey: boolean };
 
 /** The key pressed, in the fixed form; null for a modifier on its own. */
 export function keyOfEvent(e: KeyEvent): string | null {

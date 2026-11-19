@@ -1,2 +1,5 @@
 # The shipped Hunspell Dictionaries are hashed byte for byte (scripts/dictionaries.mjs): never rewrite their line endings.
 app/src-tauri/dictionaries/** -text
+# The shipped default Styles are compiled in with include_str!, so the checkout's line endings
+# would end up in every Vault: always check them out with LF, whatever core.autocrlf says.
+app/src-tauri/defaults/** text eol=lf

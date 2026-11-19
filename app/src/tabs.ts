@@ -153,10 +153,12 @@ class Tab {
     this.fetchingInclusions = true;
     try {
       await this.sync.idle();
+      const asked = this.view.state.doc;
       const views = await invoke<InclusionView[]>("get_inclusions", { id: this.sync.id });
       this.hasInclusions = views.length > 0 || this.view.state.doc.toString().includes(INCLUSION);
-      // Typed meanwhile: they're asked for again next time rather than put in the wrong place.
-      if (this.sync.isIdle()) {
+      // Typed meanwhile (or patched from Rust): they're asked for again next time rather than
+      // put in the wrong place. (The answer can come after a later edit's: it runs off the main thread.)
+      if (this.sync.isIdle() && this.view.state.doc === asked) {
         const before = inclusionsOf(this.view.state);
         const comments = (list: InclusionView[]) => JSON.stringify(list.map((v) => v.comments));
         const commentsChanged = comments(before) !== comments(views);

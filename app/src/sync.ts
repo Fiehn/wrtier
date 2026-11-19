@@ -3,12 +3,14 @@
 // The editor shows every edit at once and sends it to Rust, in order, in batches: while one
 // batch is on its way, new edits wait and go together next. Rust may answer with patches (an
 // undo that reverted a Change); those are fitted around anything typed in the meantime, the
-// way collaborative editors do it. If the two ever disagree, the editor takes the History's text.
+// way collaborative editors do it. If the two ever disagree, the editor takes the History's text,
+// fitting whatever is still waiting around it the same way.
 
 import { invoke } from "@tauri-apps/api/core";
-import { Annotation, ChangeSet, Transaction } from "@codemirror/state";
+import { Annotation, ChangeSet, Text, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
+import { INCLUSION } from "./inclusions";
 
 // The same shapes as the Rust side's (work.rs).
 type Origin = "input" | "undo" | "redo";
@@ -154,7 +156,8 @@ export const replacing = Annotation.define<ReplaceInfo>();
 
 /** Something waiting to be sent. Positions are in the text as it was just before it. */
 type Item =
-  | { kind: "edit"; changes: ChangeSet; event: string; origin: Origin; replace?: ReplaceInfo }
+  /** `before`: the text it applies to, so the editor can work out where it fell out of step (see `resync`). */
+  | { kind: "edit"; changes: ChangeSet; before: Text; event: string; origin: Origin; replace?: ReplaceInfo }
   | { kind: "cursor"; pos: number }
   | { kind: "undo" }
   | { kind: "redo" }
@@ -264,6 +267,8 @@ export class WorkSync {
   private outside = 0;
   /** The History's size when the highlights were last asked for (see `WorkState.changes`). */
   private changes = -1;
+  /** Those waiting for `idle()`: answered once the queue has drained. */
+  private waiting: (() => void)[] = [];
   /** "Colour text by Session" is on: the tints are asked for whenever the History grows. */
   private tinting = false;
   /** The editor shows Marks: where the Dismissed ones are is asked for whenever the History grows. */
@@ -283,7 +288,7 @@ export class WorkSync {
     if (tr.docChanged || tr.annotation(replacing)?.annotations?.length) {
       const event = EVENTS.find((e) => tr.isUserEvent(e)) ?? "edit";
       const origin: Origin = tr.isUserEvent("undo") ? "undo" : tr.isUserEvent("redo") ? "redo" : "input";
-      this.queue.push({ kind: "edit", changes: tr.changes, event, origin, replace: tr.annotation(replacing) });
+      this.queue.push({ kind: "edit", changes: tr.changes, before: tr.startState.doc, event, origin, replace: tr.annotation(replacing) });
     } else if (tr.selection) {
       // Only where the cursor ends up matters: a burst closes when the cursor leaves it.
       const pos = tr.newSelection.main.head;
@@ -330,10 +335,9 @@ export class WorkSync {
   }
 
   /** Waits until everything typed so far has reached Rust. */
-  async idle() {
-    while (this.inFlight || this.queue.length > 0) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
+  idle(): Promise<void> {
+    if (this.isIdle()) return Promise.resolve();
+    return new Promise((resolve) => this.waiting.push(resolve));
   }
 
   /** The timer on the Rust side saved something, closed the burst, or noticed a change from outside. */
@@ -497,7 +501,13 @@ export class WorkSync {
       await this.resync();
     } finally {
       this.inFlight = false;
-      void this.flush();
+      if (this.queue.length > 0) {
+        void this.flush();
+      } else {
+        const waiting = this.waiting;
+        this.waiting = [];
+        for (const resolve of waiting) resolve();
+      }
     }
   }
 
@@ -505,30 +515,9 @@ export class WorkSync {
   private receive(state: WorkState, len: number, undone: boolean, items: Item[]) {
     let expected = len;
     if (state.patches.length > 0) {
-      let patch = ChangeSet.of(state.patches, len);
+      const patch = ChangeSet.of(state.patches, len);
       expected = patch.newLength;
-      // Fit the patch around what was typed since the batch left, and those edits around the patch.
-      for (const item of this.queue) {
-        if (item.kind === "edit") {
-          const mine = item.changes;
-          item.changes = mine.map(patch);
-          patch = patch.map(mine, true);
-        } else if (item.kind === "cursor") {
-          item.pos = patch.mapPos(item.pos);
-        } else if (item.kind === "include") {
-          item.at = patch.mapPos(item.at, 1);
-        } else if (item.kind === "dismiss") {
-          item.from = patch.mapPos(item.from, 1);
-          item.to = Math.max(item.from, patch.mapPos(item.to, -1));
-        } else if (item.kind === "stretch") {
-          item.from = patch.mapPos(item.from, 1);
-          item.to = patch.mapPos(item.to, -1);
-          if (item.to < item.from) item.to = item.from;
-        } else if (item.kind === "comment" && item.op.op === "comment") {
-          item.op = { ...item.op, from: patch.mapPos(item.op.from, 1), to: patch.mapPos(item.op.to, -1) };
-        }
-      }
-      this.view.dispatch({ changes: patch, annotations: [fromHistory.of(true), Transaction.addToHistory.of(false)] });
+      this.view.dispatch({ changes: this.fitQueue(patch), annotations: [fromHistory.of(true), Transaction.addToHistory.of(false)] });
     }
     if (state.len !== expected) throw new Error(`The editor and the History disagree about the text's length (${expected} and ${state.len}).`);
     if (state.highlights) {
@@ -561,17 +550,55 @@ export class WorkSync {
     this.events.state(state);
   }
 
-  /** The editor fell out of step: show the History's text. Anything not sent yet is dropped. */
+  /**
+   * Fits `patch`, which is for the text right after the batch that was sent, around everything
+   * queued since, and those around the patch, the way collaborative editors do. Returns the
+   * patch as it applies to the editor's text now.
+   */
+  private fitQueue(patch: ChangeSet): ChangeSet {
+    for (const item of this.queue) {
+      if (item.kind === "edit") {
+        const mine = item.changes;
+        item.before = patch.apply(item.before);
+        item.changes = mine.map(patch);
+        patch = patch.map(mine, true);
+      } else if (item.kind === "cursor") {
+        item.pos = patch.mapPos(item.pos);
+      } else if (item.kind === "include") {
+        item.at = patch.mapPos(item.at, 1);
+      } else if (item.kind === "dismiss") {
+        item.from = patch.mapPos(item.from, 1);
+        item.to = Math.max(item.from, patch.mapPos(item.to, -1));
+      } else if (item.kind === "stretch") {
+        item.from = patch.mapPos(item.from, 1);
+        item.to = patch.mapPos(item.to, -1);
+        if (item.to < item.from) item.to = item.from;
+      } else if (item.kind === "comment" && item.op.op === "comment") {
+        const from = patch.mapPos(item.op.from, 1);
+        item.op = { ...item.op, from, to: Math.max(from, patch.mapPos(item.op.to, -1)) };
+      }
+    }
+    return patch;
+  }
+
+  /**
+   * The editor fell out of step (a batch failed, or the lengths disagree): it takes the History's
+   * text. What it showed right after the failed batch differs from that only in one stretch, and
+   * that difference is treated like a patch from Rust: everything still queued (typing, Comments,
+   * Inclusions, History actions) is fitted around it and sent after all, so nothing the Author
+   * did since is lost.
+   */
   private async resync() {
-    this.queue = [];
     try {
       const { text, state } = await invoke<{ text: string; state: WorkState }>("work_text", { id: this.id });
-      const head = Math.min(this.view.state.selection.main.head, text.length);
-      this.view.dispatch({
-        changes: { from: 0, to: this.view.state.doc.length, insert: text },
-        selection: { anchor: head },
-        annotations: [fromHistory.of(true), Transaction.addToHistory.of(false)],
-      });
+      // (Anything typed while waiting was queued too, so it's fitted along with the rest.)
+      const first = this.queue.find((item) => item.kind === "edit");
+      const base = first?.kind === "edit" ? first.before : this.view.state.doc;
+      const patch = this.fitQueue(difference(base, text));
+      this.view.dispatch({ changes: patch, annotations: [fromHistory.of(true), Transaction.addToHistory.of(false)] });
+      if (this.dropLostInclusions(Text.of(text.split("\n"))) > 0) {
+        this.events.error("An Inclusion that was just inserted couldn't be recorded, so it isn't in the text: insert it again.");
+      }
       this.burst = state.burst;
       this.events.burstClosed();
       this.events.state(state);
@@ -579,7 +606,60 @@ export class WorkSync {
       this.requestTints();
       this.requestDismissed();
     } catch (e) {
-      this.events.error(String(e));
+      // The History's text can't be had (the Work closed, or its file is gone), so what's queued can't be fitted to it.
+      const lost = this.queue;
+      this.queue = [];
+      for (const item of lost) if (item.kind === "locate" || item.kind === "stretch") item.answer(null);
+      const what = lostSummary(lost);
+      this.events.error(what ? `${String(e)} (${what} couldn't be kept.)` : String(e));
     }
   }
+
+  /**
+   * After a resync: an Inclusion record whose character didn't make it into the History's text
+   * (it was in the batch that failed) can't be sent, since Rust has no Inclusion there to record
+   * it on. `doc`: the History's text. Returns how many were dropped.
+   */
+  private dropLostInclusions(doc: Text): number {
+    const before = this.queue.length;
+    this.queue = this.queue.filter((item) => {
+      if (item.kind === "edit") doc = item.changes.apply(doc);
+      return item.kind !== "include" || (item.at < doc.length && doc.sliceString(item.at, item.at + 1) === INCLUSION);
+    });
+    return before - this.queue.length;
+  }
+}
+
+/**
+ * The difference between `from` and `to` as one replacement: everything between their common
+ * start and their common end. (A surrogate pair is never split.)
+ */
+export function difference(from: Text, to: string): ChangeSet {
+  const old = from.toString();
+  const shorter = Math.min(old.length, to.length);
+  let start = 0;
+  while (start < shorter && old.charCodeAt(start) === to.charCodeAt(start)) start++;
+  let end = 0;
+  while (end < shorter - start && old.charCodeAt(old.length - 1 - end) === to.charCodeAt(to.length - 1 - end)) end++;
+  if (start > 0 && isHighSurrogate(old.charCodeAt(start - 1))) start--;
+  if (end > 0 && isLowSurrogate(old.charCodeAt(old.length - end))) end--;
+  if (start === old.length && start === to.length) return ChangeSet.empty(old.length);
+  return ChangeSet.of({ from: start, to: old.length - end, insert: to.slice(start, to.length - end) }, old.length);
+}
+
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
+
+/** What the Author did among `items`, in words ("2 edits and a change to Comments"); empty if nothing they'd miss. */
+function lostSummary(items: Item[]): string {
+  const count = (kind: Item["kind"]) => items.filter((item) => item.kind === kind).length;
+  const words = (n: number, one: string, many: string) => (n === 0 ? "" : n === 1 ? one : `${n} ${many}`);
+  const parts = [
+    words(count("edit"), "an edit", "edits"),
+    words(count("comment"), "a change to Comments", "changes to Comments"),
+    words(count("include"), "an Inclusion", "Inclusions"),
+    words(count("history"), "a History action", "History actions"),
+  ].filter((part) => part !== "");
+  if (parts.length <= 1) return parts[0] ?? "";
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }

@@ -17,6 +17,8 @@ use crate::library;
 use crate::preamble::{self, Preamble, Shelf, Version};
 use crate::typeset::Block;
 use crate::recovery::{self, Recovery};
+use crate::err;
+use crate::stamps::{file_stamp, Stamp};
 use crate::work::{undoable, Op, OpenWork, Whereabouts, WorkState};
 use wrtier::change::Change;
 use wrtier::ids::ChangeId;
@@ -44,11 +46,11 @@ pub struct Vault {
     /// their way under the old ID find them.
     aliases: HashMap<String, String>,
     /// `vault.db` as this Vault last wrote or read it: if it changes, another Device's settings arrived.
-    vault_stamp: Option<(std::time::SystemTime, u64)>,
+    vault_stamp: Option<Stamp>,
     /// The Style library's files as last seen: if they change, the interface hears of it.
-    library_stamp: Vec<(PathBuf, u64, Option<std::time::SystemTime>)>,
+    library_stamp: Vec<(PathBuf, Option<Stamp>)>,
     /// The theme files as last seen: if they change, the interface hears of it.
-    themes_stamp: Vec<(PathBuf, u64, Option<std::time::SystemTime>)>,
+    themes_stamp: Vec<(PathBuf, Option<Stamp>)>,
     /// Counts the library's changes: a Work that recorded what it uses as of an older count
     /// records the new versions before its next edit.
     library_generation: u64,
@@ -59,6 +61,15 @@ pub struct Vault {
     identities: HashMap<PathBuf, (Option<std::time::SystemTime>, Option<String>)>,
     /// Included Works read from disk (see `inclusions::DocCache`).
     included_docs: inclusions::DocCache,
+    /// The Style library, read once until it changes.
+    shelves: preamble::ShelfCache,
+    /// The last walk of the Vault and its trash, while it holds (see `walked`).
+    walked: Option<walked::Walked>,
+    /// What each `.db` is (`storage::probe`), by its stamp: read again only when it changes.
+    probes: HashMap<PathBuf, (Stamp, Probe)>,
+    /// What each Text file without a History is (see `Vault::list`), while it and the Histories
+    /// it was checked against are unchanged: (its stamp, theirs, the History that wrote it).
+    text_files: HashMap<PathBuf, (Option<Stamp>, u64, Option<PathBuf>)>,
 }
 
 /// How a Work is exported: in which Look, and whether a `.docx` carries its Comments.
@@ -173,6 +184,7 @@ mod mods;
 mod moves;
 mod reviewers;
 mod settings;
+mod walked;
 pub use colours::Colours;
 pub use marks::ModSettings;
 pub use find::TextForFinding;
@@ -185,10 +197,6 @@ pub use moves::{TrashedWork, TRASH};
 pub use reviewers::{Reviewer, COLOURS};
 pub use settings::Settings;
 
-fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.modified().ok()?, meta.len()))
-}
 
 /// Syncthing must never sync SQLite's temporary `-journal` files (Phase 0c). Its ignore
 /// patterns don't sync themselves, so each Device adds the pattern when it opens the Vault, in
@@ -284,17 +292,17 @@ pub enum Opened {
 }
 
 /// The files found in a Vault.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Files {
     dbs: Vec<PathBuf>,
     typs: Vec<PathBuf>,
     copies: Vec<PathBuf>,
     folders: Vec<PathBuf>,
+    /// Every folder walked (the top one too), with its modification time from just before it
+    /// was read: if one differs now, something in it changed since (see `walked`).
+    stamps: Vec<(PathBuf, Option<std::time::SystemTime>)>,
 }
 
-fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
-}
 
 /// What a caught panic said.
 pub fn panic_message(panic: &(dyn Any + Send)) -> String {
@@ -355,7 +363,11 @@ impl Vault {
             library_generation: 0,
             defaults_problem: None,
             identities: HashMap::new(),
-            included_docs: HashMap::new(),
+            included_docs: inclusions::DocCache::default(),
+            shelves: preamble::ShelfCache::new(root),
+            walked: None,
+            probes: HashMap::new(),
+            text_files: HashMap::new(),
         };
         vault.absorb_vault_copies(&mut Vec::new()); // any left are reported when the Works are listed
         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
@@ -400,6 +412,7 @@ impl Vault {
     /// Uses the newer version of a default (`styles/…`); the Vault's copy goes to its trash.
     pub fn use_newer_default(&mut self, path: &str, now_ms: u64) -> Result<(), String> {
         let given = library::use_newer(&self.root, &self.root.join(TRASH), path)?;
+        self.library_written();
         self.record_defaults(&[given], now_ms)
     }
 
@@ -418,20 +431,41 @@ impl Vault {
     /// If so, open Works get their Style update notices, and record the new versions before
     /// their next edit.
     pub fn library_changed(&mut self) -> bool {
-        let now = library::stamp(&self.root);
+        self.library_changed_to(library::stamp(&self.root))
+    }
+
+    /// `library_changed`, with the library's stamp (`library::stamp`) worked out already: the
+    /// timer does that without holding the app's lock.
+    pub fn library_changed_to(&mut self, now: Vec<(PathBuf, Option<Stamp>)>) -> bool {
         let changed = now != self.library_stamp;
         self.library_stamp = now;
         if changed {
+            self.shelves.forget();
             self.library_generation += 1;
             self.refresh_style_notices();
         }
         changed
     }
 
+    /// The app wrote to the Style library: what's kept of it is read again when next needed.
+    /// (The timer still notices the change, and tells the interface and the open Works.)
+    pub fn library_written(&mut self) {
+        self.shelves.forget();
+    }
+
+    /// The Style library, as read since it last changed.
+    pub(crate) fn shelf(&self) -> std::sync::Arc<Shelf> {
+        self.shelves.shelf()
+    }
+
     /// Has a theme in `themes/` been added, changed or removed since this was last asked (here,
     /// in another editor, or from another Device)?
     pub fn themes_changed(&mut self) -> bool {
-        let now = crate::themes::stamp(&self.root);
+        self.themes_changed_to(crate::themes::stamp(&self.root))
+    }
+
+    /// `themes_changed`, with the themes' stamp (`themes::stamp`) worked out already.
+    pub fn themes_changed_to(&mut self, now: Vec<(PathBuf, Option<Stamp>)>) -> bool {
         let changed = now != self.themes_stamp;
         self.themes_stamp = now;
         changed
@@ -511,10 +545,6 @@ impl Vault {
         paths_under(&self.root, id)
     }
 
-    fn walk(&self) -> Files {
-        walk_works(&self.root)
-    }
-
     /// Every Work in the Vault, after absorbing any Conflict copies.
     pub fn list(&mut self, now_ms: u64) -> Listing {
         let mut problems = Vec::new();
@@ -524,8 +554,8 @@ impl Vault {
         if let Some(reason) = &self.defaults_problem {
             problems.push(SyncProblem { path: library::FOLDER.into(), reason: format!("couldn't write the default Styles: {reason}"), newer: false });
         }
-        for conflict in library::list(&self.root).conflicts {
-            problems.push(SyncProblem { path: conflict.copy, reason: format!("another version of {}: pick one in the Style library", conflict.path), newer: false });
+        for conflict in &self.shelves.library().conflicts {
+            problems.push(SyncProblem { path: conflict.copy.clone(), reason: format!("another version of {}: pick one in the Style library", conflict.path), newer: false });
         }
         for (path, reason) in crate::spelling::conflicts(&self.root) {
             problems.push(SyncProblem { path, reason, newer: false });
@@ -560,7 +590,7 @@ impl Vault {
         let mut foreign: HashSet<PathBuf> = HashSet::new(); // other programs' databases
         for db in &files.dbs {
             let (id, name) = (self.id_of(db), name_of(db));
-            match storage::probe(db) {
+            match self.probe(db) {
                 Probe::History => {
                     let typ = db.with_extension("typ");
                     if with_copies.contains(db) || with_copies.contains(&typ) {
@@ -586,6 +616,7 @@ impl Vault {
         problems.extend(self.duplicate_problems(&histories));
 
         let dbs: HashSet<&PathBuf> = files.dbs.iter().collect();
+        let histories_key = self.histories_key(&histories);
         for typ in &files.typs {
             let (id, name) = (self.id_of(typ), name_of(typ));
             let db = typ.with_extension("db");
@@ -598,23 +629,82 @@ impl Vault {
             if dbs.contains(&db) {
                 continue; // a Work's own Text file
             }
-            let kind = match std::fs::read_to_string(typ) {
-                Ok(text) => match histories.iter().find(|db| storage::wrote_text(db, &text).unwrap_or(false)) {
-                    Some(db) => EntryKind::Leftover { of: self.id_of(db) },
-                    None => EntryKind::NewWork,
-                },
+            let kind = match self.written_by(typ, &histories, histories_key) {
+                Ok(Some(db)) => EntryKind::Leftover { of: self.id_of(&db) },
+                Ok(None) => EntryKind::NewWork,
                 Err(e) => {
                     problems.push(self.problem(typ, format!("can't be read right now: {e}")));
-                    EntryKind::Unreadable { reason: e.to_string() }
+                    EntryKind::Unreadable { reason: e }
                 }
             };
             entries.push(Entry { id, name, kind });
         }
+        // What's remembered of files that are gone is forgotten.
+        self.probes.retain(|db, _| dbs.contains(db));
+        let typs: HashSet<&PathBuf> = files.typs.iter().collect();
+        self.text_files.retain(|typ, _| typs.contains(typ));
         entries.sort_by_key(|e| e.id.to_lowercase());
         let mut folders: Vec<String> = files.folders.iter().map(|dir| self.relative(dir)).collect();
         folders.sort_by_key(|f| f.to_lowercase());
         let colours = self.colours(&histories);
         Listing { entries, problems, folders, hidden: self.hidden_folders(), colours }
+    }
+
+    /// What a `.db` is (`storage::probe`, which opens it), read again only when the file changed.
+    fn probe(&mut self, db: &Path) -> Probe {
+        let stamp = file_stamp(db);
+        if let (Some(stamp), Some((seen, probe))) = (stamp, self.probes.get(db)) {
+            if *seen == stamp {
+                return probe.clone();
+            }
+        }
+        let probe = storage::probe(db);
+        match stamp {
+            // (One that can't be read right now is tried again next time.)
+            Some(stamp) if !matches!(probe, Probe::Unreadable(_)) => {
+                self.probes.insert(db.to_path_buf(), (stamp, probe.clone()));
+            }
+            _ => {
+                self.probes.remove(db);
+            }
+        }
+        probe
+    }
+
+    /// Which of `histories` wrote the Text file `typ` (one left behind by a renamed Work), if
+    /// any. Remembered while the file is unchanged: it stays a leftover while its History is
+    /// there, and one none of them wrote is checked again only when they changed (`key`, see
+    /// `histories_key`). Reading it, or checking it against each History, is what's saved.
+    fn written_by(&mut self, typ: &Path, histories: &[PathBuf], key: u64) -> Result<Option<PathBuf>, String> {
+        let stamp = file_stamp(typ);
+        if let Some((seen, checked, by)) = self.text_files.get(typ) {
+            if stamp.is_some() && *seen == stamp {
+                match by {
+                    Some(db) if histories.contains(db) => return Ok(Some(db.clone())),
+                    None if *checked == key => return Ok(None),
+                    _ => {}
+                }
+            }
+        }
+        let text = std::fs::read_to_string(typ).map_err(err)?;
+        let by = histories.iter().find(|db| storage::wrote_text(db, &text).unwrap_or(false)).cloned();
+        self.text_files.insert(typ.to_path_buf(), (stamp, key, by.clone()));
+        Ok(by)
+    }
+
+    /// One number for `histories` as they are now: their paths, and the stamps of those not
+    /// open here (an open Work's own saves never make it the writer of some other Text file).
+    fn histories_key(&self, histories: &[PathBuf]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let open: HashSet<&Path> = self.works.values().map(|w| w.db.as_path()).collect();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for db in histories {
+            db.hash(&mut hasher);
+            if !open.contains(db.as_path()) {
+                file_stamp(db).hash(&mut hasher);
+            }
+        }
+        hasher.finish()
     }
 
     /// Absorbs the Conflict copies of a Work that isn't open, into a History loaded just for
@@ -691,7 +781,7 @@ impl Vault {
                 // An External edit made while the app was closed becomes Changes now. Edits
                 // inside the header are dropped (it's written again from the History): said so,
                 // but only for a file the app didn't write itself.
-                let header = preamble::text_file_header(&doc, &Shelf::read(&self.root));
+                let header = preamble::text_file_header(&doc, &self.shelf());
                 if let Ok(contents) = std::fs::read_to_string(&typ) {
                     let in_file = wrtier::text_file::split_header(&wrtier::text_file::split_marker(&contents).0).0;
                     header_dropped = !storage::wrote_text(&db, &contents).unwrap_or(true) && in_file.is_some_and(|h| h != header);
@@ -713,7 +803,7 @@ impl Vault {
                 let mut doc = Doc::new(me);
                 let changes = doc.import_text(Some(&[]), &text, now_ms);
                 storage::save(&db, &changes, &doc).map_err(err)?;
-                let header = preamble::text_file_header(&doc, &Shelf::read(&self.root));
+                let header = preamble::text_file_header(&doc, &self.shelf());
                 storage::write_text_file(&db, &typ, &doc, &header, now_ms).map_err(err)?;
                 record_name(&db, &mut doc, device_name.as_deref(), now_ms)?;
                 Ok((doc, changes))
@@ -740,8 +830,8 @@ impl Vault {
         let recovery = Recovery::for_work(&self.recovery_dir, &self.root, id);
         let mut work = OpenWork::new(db, typ, doc, now_ms, recovery, sitting, mine);
         work.keep_unsaved(unsaved);
-        work.style_notice = preamble::update_notice(&work.doc, &Shelf::read(&self.root));
-        work.vault_root = self.root.clone();
+        work.style_notice = preamble::update_notice(&work.doc, &self.shelf());
+        work.shelves = self.shelves.clone();
         self.works.insert(id.to_string(), work);
         self.refresh_text_file_inclusions(id);
         Ok(OpenedWork { id: id.to_string(), name, text, problems, notice })
@@ -770,7 +860,7 @@ impl Vault {
         if storage::probe(&db) != Probe::History {
             return Err(problem(format!("{id}.db isn't a History in the Vault right now")));
         }
-        let (me, device_name, root) = (self.device, self.device_name(), self.root.clone());
+        let (me, device_name, shelves) = (self.device, self.device_name(), self.shelves.clone());
         let result = catch_unwind(AssertUnwindSafe(|| -> Result<(Vec<ChangeId>, Vec<String>), String> {
             let (_, mut doc) = storage::load(&db, me).map_err(err)?;
             let mut recovered: Vec<ChangeId> = Vec::new();
@@ -804,7 +894,7 @@ impl Vault {
             if !recovered.is_empty() {
                 record_name(&db, &mut doc, device_name.as_deref(), now_ms)?;
             }
-            let header = preamble::text_file_header(&doc, &Shelf::read(&root));
+            let header = preamble::text_file_header(&doc, &shelves.shelf());
             storage::sync_text_file(&db, &typ, &mut doc, &header, now_ms).map_err(err)?;
             Ok((recovered, lines))
         }));
@@ -847,7 +937,7 @@ impl Vault {
             changes.extend(preamble.record(&mut doc, now_ms));
         }
         storage::save(&db, &changes, &doc).map_err(err)?;
-        let header = preamble::text_file_header(&doc, &Shelf::read(&self.root));
+        let header = preamble::text_file_header(&doc, &self.shelf());
         storage::write_text_file(&db, &typ, &doc, &header, now_ms).map_err(err)?;
         self.give_new_work_mods(&work_id, now_ms)?;
         self.open_work(&id, now_ms)
@@ -931,10 +1021,10 @@ impl Vault {
         let dismissed_asked = ops.contains(&Op::Dismissed);
         // Before the first edit since the Style library last changed, the Work records the
         // versions of everything it uses (read here only when that's due).
-        let (root, generation) = (self.root.clone(), self.library_generation);
+        let (shelves, generation) = (self.shelves.clone(), self.library_generation);
         let mut state = self.with_work(id, now_ms, |w, name| {
-            let shelf = w.styles_due(generation).then(|| Shelf::read(&root));
-            w.edit(ops, name, shelf.as_ref().map(|s| (s, generation)), now_ms)
+            let shelf = w.styles_due(generation).then(|| shelves.shelf());
+            w.edit(ops, name, shelf.as_deref().map(|s| (s, generation)), now_ms)
         })?;
         if reshapes {
             self.refresh_text_file_inclusions(id);
@@ -986,7 +1076,7 @@ impl Vault {
     /// A Work that isn't open is changed in its `.db` directly. Returns the open Work's state.
     pub fn set_preamble(&mut self, id: &str, preamble: &Preamble, now_ms: u64) -> Result<Option<WorkState>, String> {
         preamble.check()?;
-        let shelf = Shelf::read(&self.root);
+        let shelf = self.shelf();
         let generation = self.library_generation;
         if self.works.contains_key(&self.current_id(id)) {
             return self.with_work(id, now_ms, |w, _| Ok(Some(w.set_preamble(preamble, &shelf, generation, now_ms))));
@@ -1005,7 +1095,7 @@ impl Vault {
     /// with the Style library's current versions. `look`: the one to render (else its first).
     /// Its Inclusions are written out as the included Works are now, and `Block`s say where.
     pub fn typeset_input(&mut self, id: &str, look: Option<&str>, now_ms: u64) -> Result<(String, preamble::Header, Vec<Block>), String> {
-        let shelf = Shelf::read(&self.root);
+        let shelf = self.shelf();
         let shown = self.shown_in(id, false)?;
         self.with_work(id, now_ms, |w, _| {
             let uses = preamble::uses_plus(&w.doc, &shelf, Version::Library, &inclusions::elements_of(&shown));
@@ -1035,7 +1125,7 @@ impl Vault {
         if name.is_empty() || name.chars().count() > 200 {
             return Err("A Milestone's name needs 1 to 200 characters.".into());
         }
-        let shelf = Shelf::read(&self.root);
+        let shelf = self.shelf();
         let generation = self.library_generation;
         if self.works.contains_key(&self.current_id(id)) {
             // The versions of the included Works it shows now go in first (ADR 0015).
@@ -1087,7 +1177,7 @@ impl Vault {
     /// Its Inclusions show the versions it had recorded then (ADR 0015).
     pub fn typeset_input_at(&mut self, id: &str, milestone: &str, look: Option<&str>, now_ms: u64) -> Result<(String, preamble::Header, Vec<Block>), String> {
         let doc = self.at_milestone(id, milestone, now_ms)?;
-        let uses = preamble::uses(&doc, &Shelf::read(&self.root), Version::Recorded);
+        let uses = preamble::uses(&doc, &self.shelf(), Version::Recorded);
         let shown = self.shown_in_doc(&doc);
         let (body, places) = inclusions::typst_body(&doc.committed_text(), &shown);
         let blocks = Block::all(&body, &places);
@@ -1101,7 +1191,7 @@ impl Vault {
         let doc = self.at_milestone(id, milestone, now_ms)?;
         let named: ChangeId = milestone.parse().map_err(|_| format!("Not a Milestone: {milestone}"))?;
         let date_ms = self.milestone_time(id, named, now_ms)?;
-        let (header, made) = look.header(&doc, &Shelf::read(&self.root));
+        let (header, made) = look.header(&doc, &self.shelf());
         let shown = self.shown_in_doc(&doc);
         let missing: Vec<String> = shown.iter().filter_map(|s| s.missing.as_ref().map(|m| format!("{}: {m}", s.label))).collect();
         let committed = doc.committed_text();
@@ -1127,7 +1217,7 @@ impl Vault {
     /// exactly a version in its History): its text, the header from its recorded copies in
     /// `look` (else its first), the time of its newest Change, and its ID.
     pub fn export_input(&mut self, id: &str, look: Export, now_ms: u64) -> Result<ExportInput, String> {
-        let shelf = Shelf::read(&self.root);
+        let shelf = self.shelf();
         let generation = self.library_generation;
         let typeset = |doc: &Doc| (doc.committed_text(), look.header(doc, &shelf), Preamble::of(doc));
         let (db, (text, (header, made), preamble), shown, own) = if self.works.contains_key(&self.current_id(id)) {
@@ -1208,7 +1298,7 @@ impl Vault {
 
     /// The Style update notice of every open Work, as the library is now.
     fn refresh_style_notices(&mut self) {
-        let shelf = Shelf::read(&self.root);
+        let shelf = self.shelf();
         for work in self.works.values_mut() {
             work.style_notice = preamble::update_notice(&work.doc, &shelf);
         }
@@ -1232,15 +1322,18 @@ impl Vault {
     pub fn tick(&mut self, now_ms: u64) -> Vec<(String, WorkState)> {
         let ids: Vec<String> = self.works.keys().cloned().collect();
         let mut before = HashMap::new();
+        // Each folder with open Works in it is read once, for all of them.
+        let mut folders = crate::work::Folders::default();
         for id in &ids {
             let _ = self.with_work(id, now_ms, |w, _| {
                 before.insert(id.clone(), w.state(Vec::new()));
-                w.tick(now_ms);
+                w.tick_in(now_ms, &mut folders);
                 Ok(())
             });
         }
         // A History that disappeared from under an open tab: find where it went.
         self.follow_lost();
+        self.included_docs.sweep();
         let mut changed = Vec::new();
         for id in ids {
             let current = self.current_id(&id);
@@ -1366,6 +1459,7 @@ fn paths_under(base: &Path, id: &str) -> Result<(PathBuf, PathBuf), String> {
 /// The Histories, Text files and Conflict copies under `root` (the Vault, or its trash).
 fn walk_works(root: &Path) -> Files {
     fn walk_dir(dir: &Path, top: bool, files: &mut Files) {
+        files.stamps.push((dir.to_path_buf(), walked::modified(dir)));
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {
             let (path, name) = (entry.path(), entry.file_name().to_string_lossy().into_owned());
@@ -1445,7 +1539,7 @@ mod tests {
         // A default the Author deleted stays deleted, on this Device or another.
         std::fs::remove_file(dir.path().join("styles/A4 draft.look")).unwrap();
         drop(vault);
-        let Opened::Vault(other) = Vault::open(dir.path(), OTHER, false, &dir.path().join(".recovery")).unwrap() else { panic!() };
+        let Opened::Vault(mut other) = Vault::open(dir.path(), OTHER, false, &dir.path().join(".recovery")).unwrap() else { panic!() };
         assert!(!dir.path().join("styles/A4 draft.look").exists());
         assert_eq!(other.library().items.len(), library::DEFAULTS.len() - 1);
         // The library isn't listed as Works.

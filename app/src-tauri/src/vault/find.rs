@@ -84,9 +84,8 @@ impl TextSource {
 /// whenever its content is. None if there's no such file.
 fn stamp_of(path: &Path) -> Option<String> {
     let part = |path: &Path| {
-        let meta = std::fs::metadata(path).ok()?;
-        let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
-        Some(format!("{modified}:{}", meta.len()))
+        let (modified, len) = crate::stamps::file_stamp(path)?;
+        Some(format!("{}:{len}", modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos()))
     };
     let main = part(path)?;
     let mut wal = path.as_os_str().to_owned();

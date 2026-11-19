@@ -505,12 +505,19 @@ fn write_change(conn: &Connection, change: &Change, doc: &Doc) -> Result<()> {
 }
 
 fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
+    read_changes_of(conn, false)
+}
+
+/// `read_changes`, or with `wanted`, only the Changes whose IDs are in the temporary table
+/// `wanted` (see `read_new`).
+fn read_changes_of(conn: &Connection, wanted: bool) -> Result<Vec<Change>> {
+    let only = |column: &str| if wanted { format!(" WHERE {column} IN (SELECT id FROM temp.wanted)") } else { String::new() };
     // Read every row of deletions into a HashMap<ChangeId, Vec<CharRange>> 
 
     // Pass 1: every deletion range, grouped by the change it belongs to.
     // (The two big passes read text straight from SQLite's buffer instead of copying it into a String first.)
     let mut ranges: FxHashMap<ChangeId, Vec<CharRange>> = FxHashMap::default();
-    let mut stmt = conn.prepare("SELECT change, first_char, len FROM deletions ORDER BY rowid")?;
+    let mut stmt = conn.prepare(&format!("SELECT change, first_char, len FROM deletions{} ORDER BY rowid", only("change")))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let change: ChangeId = column(row, 0)?.parse()?;
@@ -519,7 +526,7 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
     }
     // Pass 2: read every row of revert_targets into a HashMap<ChangeId, Vec<ChangeId>>
     let mut revert_targets: HashMap<ChangeId, Vec<ChangeId>> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT change, target FROM revert_targets ORDER BY rowid")?;
+    let mut stmt = conn.prepare(&format!("SELECT change, target FROM revert_targets{} ORDER BY rowid", only("change")))?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
@@ -533,7 +540,7 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
     // Pass 3a: read every row of move_seen into a HashMap<ChangeId, Vec<(DeviceId, u32)>>
     let mut move_seen: HashMap<ChangeId, Vec<(DeviceId, u32)>> = HashMap::new();
     // Device IDs are fixed-width hex, so sorting the text sorts the numbers too.
-    let mut stmt = conn.prepare("SELECT change, device, counter FROM move_seen ORDER BY change, device")?;
+    let mut stmt = conn.prepare(&format!("SELECT change, device, counter FROM move_seen{} ORDER BY change, device", only("change")))?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u32>(2)?))
     })?;
@@ -545,7 +552,7 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
     }
     // Pass 3b: where each Move's anchors go: (parent, side, right_origin, into).
     let mut moves: HashMap<ChangeId, (Option<CharId>, Side, Option<CharId>, Option<CharId>)> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT change, parent, side, right_origin, into_anchor FROM moves")?;
+    let mut stmt = conn.prepare(&format!("SELECT change, parent, side, right_origin, into_anchor FROM moves{}", only("change")))?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,         // change
@@ -567,7 +574,7 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
     // Pass 3c: every piece, grouped by its Move, in piece order.
     // (moved_text is only a readable copy, so it isn't read back.)
     let mut move_pieces: HashMap<ChangeId, Vec<Span>> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT change, first_char, last_char, from_anchor FROM move_pieces ORDER BY change, piece")?;
+    let mut stmt = conn.prepare(&format!("SELECT change, first_char, last_char, from_anchor FROM move_pieces{} ORDER BY change, piece", only("change")))?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,         // change
@@ -587,7 +594,7 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
 
     // Pass 3d: which notice each Dismiss hides.
     let mut dismissals: HashMap<ChangeId, NoticeKey> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT change, notice, move, other_move FROM dismissals")?;
+    let mut stmt = conn.prepare(&format!("SELECT change, notice, move, other_move FROM dismissals{}", only("change")))?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,         // change
@@ -612,7 +619,7 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
 
     // Pass 3e: which field each SetField sets.
     let mut fields: HashMap<ChangeId, (String, String, String, Option<ChangeId>)> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT change, record, field, value, replaces FROM fields")?;
+    let mut stmt = conn.prepare(&format!("SELECT change, record, field, value, replaces FROM fields{}", only("change")))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let change: ChangeId = column(row, 0)?.parse()?;
@@ -622,14 +629,14 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
 
     // Pass 3f: Milestones: their names, and what each holds.
     let mut milestone_names: HashMap<ChangeId, String> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT change, name FROM milestones")?;
+    let mut stmt = conn.prepare(&format!("SELECT change, name FROM milestones{}", only("change")))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         milestone_names.insert(column(row, 0)?.parse()?, row.get(1)?);
     }
     let mut milestone_seen: HashMap<ChangeId, Vec<(DeviceId, u32)>> = HashMap::new();
     // Device IDs are fixed-width hex, so sorting the text sorts the numbers too.
-    let mut stmt = conn.prepare("SELECT change, device, counter FROM milestone_seen ORDER BY change, device")?;
+    let mut stmt = conn.prepare(&format!("SELECT change, device, counter FROM milestone_seen{} ORDER BY change, device", only("change")))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let change: ChangeId = column(row, 0)?.parse()?;
@@ -639,13 +646,13 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
 
     // Pass 3g: Comments, what each covers, and Replies.
     let mut comments: HashMap<ChangeId, (String, String, String)> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT change, sender, body, quote FROM comments")?;
+    let mut stmt = conn.prepare(&format!("SELECT change, sender, body, quote FROM comments{}", only("change")))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         comments.insert(column(row, 0)?.parse()?, (row.get(1)?, row.get(2)?, row.get(3)?));
     }
     let mut comment_pieces: HashMap<ChangeId, Vec<Span>> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT change, first_char, last_char FROM comment_pieces ORDER BY change, piece")?;
+    let mut stmt = conn.prepare(&format!("SELECT change, first_char, last_char FROM comment_pieces{} ORDER BY change, piece", only("change")))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let change: ChangeId = column(row, 0)?.parse()?;
@@ -653,18 +660,19 @@ fn read_changes(conn: &Connection) -> Result<Vec<Change>> {
         comment_pieces.entry(change).or_default().push(span);
     }
     let mut replies: HashMap<ChangeId, (ChangeId, String, String)> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT change, comment, sender, body FROM replies")?;
+    let mut stmt = conn.prepare(&format!("SELECT change, comment, sender, body FROM replies{}", only("change")))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         replies.insert(column(row, 0)?.parse()?, (column(row, 1)?.parse()?, row.get(2)?, row.get(3)?));
     }
 
     // Pass 4: read every change
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT c.id, c.hlc, c.kind, i.text, i.parent, i.side, i.right_origin, i.into_anchor, c.session
-        FROM changes c LEFT JOIN insertions i ON i.change = c.id
+        FROM changes c LEFT JOIN insertions i ON i.change = c.id{}
         ORDER BY c.hlc, c.device",
-    )?;
+        only("c.id"),
+    ))?;
     let mut changes = Vec::new();
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
@@ -800,6 +808,37 @@ pub fn read_all(path: &Path) -> Result<Vec<Change>> {
     let conn = Connection::open(path)?;
     migrate(&conn)?;
     read_changes(&conn)
+}
+
+/// What taking in another Device's writes needs: the ID and time of every Change in a History
+/// file (to check against), and in full, in the fixed Change order, only those `known` says
+/// aren't known yet. While another Device writes to a long History, reading every Change every
+/// few seconds would be slow; their IDs alone are quick.
+pub fn read_new(path: &Path, known: impl Fn(ChangeId) -> bool) -> Result<(Vec<(ChangeId, Hlc)>, Vec<Change>)> {
+    let conn = Connection::open(path)?;
+    migrate(&conn)?;
+    let mut all = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, hlc FROM changes")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: ChangeId = column(row, 0)?.parse()?;
+            all.push((id, Hlc(row.get::<_, i64>(1)? as u64)));
+        }
+    }
+    let wanted: Vec<String> = all.iter().filter(|(id, _)| !known(*id)).map(|(id, _)| id.to_string()).collect();
+    if wanted.is_empty() {
+        return Ok((all, Vec::new()));
+    }
+    conn.execute_batch("CREATE TEMP TABLE wanted (id TEXT PRIMARY KEY)")?;
+    {
+        let mut insert = conn.prepare("INSERT INTO temp.wanted (id) VALUES (?1)")?;
+        for id in &wanted {
+            insert.execute([id])?;
+        }
+    }
+    let changes = read_changes_of(&conn, true)?;
+    Ok((all, changes))
 }
 
 pub fn load(path: &Path, device: DeviceId) -> Result<(Vec<Change>, Doc)> {
@@ -1182,6 +1221,28 @@ pub fn sync_text_file_with(db: &Path, text_file: &Path, doc: &mut Doc, header: &
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn read_new_reads_in_full_only_what_isnt_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Rain.db");
+        let mut doc = Doc::new(DeviceId(1));
+        let a = doc.insert_local(0, "The rain", 1000);
+        let b = doc.insert_local(8, " had stopped.", 2000);
+        let c = doc.delete_local(4, 4, 3000);
+        let d = doc.set_field_local("work", "title", "Rain", 4000);
+        save(&path, &[a.clone(), b.clone(), c.clone(), d.clone()], &doc).unwrap();
+
+        let (all, new) = read_new(&path, |id| id == a.id || id == d.id).unwrap();
+        let mut ids: Vec<ChangeId> = all.iter().map(|(id, _)| *id).collect();
+        ids.sort();
+        let mut expected = vec![a.id, b.id, c.id, d.id];
+        expected.sort();
+        assert_eq!(ids, expected);
+        assert!(all.iter().any(|&(id, hlc)| id == c.id && hlc == c.hlc));
+        assert_eq!(new, vec![b, c], "only the unknown ones, in Change order, with their deletions");
+        assert!(read_new(&path, |_| true).unwrap().1.is_empty());
+    }
     
     #[test]
     fn what_a_field_replaced_and_its_notice_round_trip() {

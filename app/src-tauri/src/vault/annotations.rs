@@ -230,7 +230,7 @@ impl Vault {
         // The characters, in that Work as it is now.
         let index = self.work_index();
         let located = index.get(&work).cloned().ok_or("The Work it's on can't be found.")?;
-        let shelf = crate::preamble::Shelf::read(&self.root);
+        let shelf = self.shelf();
         let pieces = {
             let mut ctx = Ctx { works: &self.works, index: &index, cache: &mut self.included_docs, shelf: &shelf, device: self.device, recorded: false };
             let doc = ctx.doc(&located, None)?;

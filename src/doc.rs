@@ -798,19 +798,7 @@ impl Doc {
 
     /// Visible nodes (in reading order) as ranges of consecutive characters of one Change.
     fn ranges_of(&self, nodes: &[u32]) -> Vec<CharRange> {
-        let mut ranges: Vec<CharRange> = Vec::new();
-        for &node in nodes {
-            let id = self.tree.id_of(node);
-            // Extend the last range if this character follows on in the same Change.
-            if let Some(last) = ranges.last_mut() {
-                if last.first.change == id.change && last.first.offset + last.len == id.offset {
-                    last.len += 1;
-                    continue;
-                }
-            }
-            ranges.push(CharRange { first: id, len: 1 });
-        }
-        ranges
+        CharRange::runs(nodes.iter().map(|&node| self.tree.id_of(node)))
     }
 
     /// The visible node just before `index` (None = the start).

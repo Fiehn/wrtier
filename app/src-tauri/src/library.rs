@@ -98,9 +98,7 @@ pub struct Library {
     pub built_in: Vec<String>,
 }
 
-fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
-}
+use crate::err;
 
 /// A path inside the Vault as the Author sees it: `styles/elements/part.typ`.
 fn relative(root: &Path, path: &Path) -> String {
@@ -128,12 +126,8 @@ fn files(root: &Path) -> Vec<PathBuf> {
 }
 
 /// What the library's files are now, cheaply: if it changes, something in it changed.
-pub fn stamp(root: &Path) -> Vec<(PathBuf, u64, Option<std::time::SystemTime>)> {
-    files(root).into_iter().map(|path| {
-        let meta = std::fs::metadata(&path).ok();
-        let (len, modified) = meta.map(|m| (m.len(), m.modified().ok())).unwrap_or((0, None));
-        (path, len, modified)
-    }).collect()
+pub fn stamp(root: &Path) -> Vec<(PathBuf, Option<crate::stamps::Stamp>)> {
+    crate::stamps::file_stamps(files(root))
 }
 
 /// The header: the comment lines at the top of a file, without their `//`.
@@ -471,7 +465,7 @@ pub fn write_defaults(root: &Path, had: impl Fn(&str) -> bool) -> Result<Vec<&'s
             if let Some(dir) = file.parent() {
                 std::fs::create_dir_all(dir).map_err(err)?;
             }
-            std::fs::write(&file, text).map_err(err)?;
+            std::fs::write(&file, lf(text)).map_err(err)?;
         }
         written.push(path);
     }
@@ -480,7 +474,13 @@ pub fn write_defaults(root: &Path, had: impl Fn(&str) -> bool) -> Result<Vec<&'s
 
 /// The same text, whatever its line endings (a checkout or an editor on Windows).
 fn same_text(a: &str, b: &str) -> bool {
-    a.replace("\r\n", "\n") == b.replace("\r\n", "\n")
+    lf(a) == lf(b)
+}
+
+/// `text` with LF line endings. A default is written into the Vault like this, so every Device
+/// writes the same bytes whatever line endings its build was checked out with.
+fn lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
 }
 
 /// Puts one default (`path` in `styles/`) back as this app version ships it: the file there, if
@@ -496,7 +496,7 @@ fn put_back(root: &Path, trash: &Path, path: &str, text: &str) -> Result<bool, S
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(err)?;
     }
-    std::fs::write(&file, text).map_err(err)?;
+    std::fs::write(&file, lf(text)).map_err(err)?;
     Ok(true)
 }
 
@@ -567,8 +567,8 @@ pub struct Line {
 /// by line.
 pub fn compare_default(root: &Path, path: &str) -> Result<Vec<Line>, String> {
     let (_, _, text) = default_at(path).ok_or_else(|| format!("{path} isn't one of the app's defaults."))?;
-    let mine = std::fs::read_to_string(file(root, path)?).map_err(err)?.replace("\r\n", "\n");
-    let newer = text.replace("\r\n", "\n");
+    let mine = lf(&std::fs::read_to_string(file(root, path)?).map_err(err)?);
+    let newer = lf(text);
     let diff = similar::TextDiff::from_lines(&mine, &newer);
     Ok(diff.iter_all_changes().map(|c| Line {
         kind: match c.tag() {
@@ -649,6 +649,16 @@ mod tests {
     }
 
     #[test]
+    fn defaults_are_written_with_lf_line_endings() {
+        let dir = tempfile::tempdir().unwrap();
+        write_defaults(dir.path(), |_| false).unwrap();
+        for (path, _, _) in DEFAULTS {
+            let bytes = std::fs::read(dir.path().join(FOLDER).join(path)).unwrap();
+            assert!(!bytes.contains(&b'\r'), "{path} was written with CR");
+        }
+    }
+
+    #[test]
     fn defaults_are_written_once_and_never_over_the_authors_files() {
         let dir = tempfile::tempdir().unwrap();
         let mine = dir.path().join("styles/Book text.typ");
@@ -673,13 +683,13 @@ mod tests {
         std::fs::remove_file(styles.join("elements/epigraph.typ")).unwrap();
         std::fs::write(styles.join("Mine.typ"), "// Style: Mine\n").unwrap();
         // Only line endings differ: the same.
-        let crlf = DEFAULTS.iter().find(|(p, _, _)| *p == "A4 page.typ").unwrap().2.replace('\n', "\r\n");
+        let crlf = lf(DEFAULTS.iter().find(|(p, _, _)| *p == "A4 page.typ").unwrap().2).replace('\n', "\r\n");
         std::fs::write(styles.join("A4 page.typ"), &crlf).unwrap();
 
         let restored = restore_defaults(dir.path(), &trash).unwrap();
         assert_eq!(restored, ["Book text.typ", "elements/epigraph.typ"]);
         for (path, _, text) in DEFAULTS.iter().filter(|(p, _, _)| *p != "A4 page.typ") {
-            assert_eq!(&std::fs::read_to_string(styles.join(path)).unwrap(), text, "{path}");
+            assert_eq!(std::fs::read_to_string(styles.join(path)).unwrap(), lf(text), "{path}");
         }
         assert_eq!(std::fs::read_to_string(trash.join("styles/Book text.typ")).unwrap(), "// Style: Book text\n// Mine.\n");
         assert!(!trash.join("styles/elements/epigraph.typ").exists(), "nothing to keep of a missing one");

@@ -22,7 +22,7 @@ use wrtier::text_file::{inclusion_block, parse_version, version_text};
 use crate::library::Kind;
 use crate::preamble::{self, Preamble, Shelf, Version};
 use crate::work::{CommentHighlight, Op, OpenWork};
-use super::{err, file_stamp, walk_works, Vault};
+use super::{err, file_stamp, Vault};
 use super::annotations::{annotations_of, on_note, printed, Ann, NoteShown};
 
 /// A Work's version: the highest Change counter it holds from each Device.
@@ -84,9 +84,68 @@ pub struct Located {
 /// Every Work in the Vault and its trash, by ID.
 pub type Index = HashMap<String, Located>;
 
+/// A `.db`'s stamp, if it has one.
+type Stamp = Option<crate::stamps::Stamp>;
+
 /// Included Works read from disk: `.db` and version ("" for the latest) → the file as it was
-/// read (to see when it changes) and the Work.
-pub type DocCache = HashMap<(PathBuf, String), (Option<(std::time::SystemTime, u64)>, Arc<Doc>)>;
+/// read (to see when it changes) and the Work. Each entry is a whole Work, and every newer
+/// version an including Work records adds one, so an entry nothing used for a while is let go
+/// (`sweep`, from the timer). An open tab works its Inclusions out every few seconds, which
+/// keeps what it shows.
+#[derive(Default)]
+pub struct DocCache {
+    entries: HashMap<(PathBuf, String), (Stamp, Arc<Doc>, std::time::Instant)>,
+}
+
+/// How long an entry nothing uses is kept.
+const KEEP_UNUSED: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl DocCache {
+    /// An entry, if there is one (which counts as using it).
+    pub fn get(&mut self, key: &(PathBuf, String)) -> Option<(Stamp, Arc<Doc>)> {
+        let (stamp, doc, used) = self.entries.get_mut(key)?;
+        *used = std::time::Instant::now();
+        Some((*stamp, doc.clone()))
+    }
+
+    /// An entry's stamp, without counting as a use.
+    pub fn stamp_of(&self, key: &(PathBuf, String)) -> Option<Stamp> {
+        self.entries.get(key).map(|(stamp, _, _)| *stamp)
+    }
+
+    pub fn insert(&mut self, key: (PathBuf, String), stamp: Stamp, doc: Arc<Doc>) {
+        self.entries.insert(key, (stamp, doc, std::time::Instant::now()));
+    }
+
+    /// Lets go of what nothing used for a while.
+    pub fn sweep(&mut self) {
+        self.entries.retain(|_, (_, _, used)| used.elapsed() < KEEP_UNUSED);
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+#[cfg(test)]
+mod doc_cache_tests {
+    use super::*;
+
+    #[test]
+    fn an_entry_nothing_used_for_a_while_is_let_go() {
+        let mut cache = DocCache::default();
+        let doc = Arc::new(Doc::new(DeviceId(1)));
+        let (latest, old) = ((PathBuf::from("Rain.db"), String::new()), (PathBuf::from("Rain.db"), "00000001:3".to_string()));
+        cache.insert(latest.clone(), None, doc.clone());
+        cache.insert(old.clone(), None, doc);
+        let Some(long_ago) = std::time::Instant::now().checked_sub(KEEP_UNUSED * 2) else { return };
+        cache.entries.get_mut(&old).unwrap().2 = long_ago;
+        cache.sweep();
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get(&latest).is_some(), "the one used lately stays");
+    }
+}
 
 /// One Inclusion, worked out.
 #[derive(Clone, Debug)]
@@ -178,8 +237,8 @@ impl<'a> Ctx<'a> {
         let stamp = file_stamp(&located.db);
         if let Some((seen, doc)) = self.cache.get(&key) {
             // A version never changes once the file has all of it; the latest does.
-            if version.is_some() || *seen == stamp {
-                return Ok(DocRef::Read(doc.clone()));
+            if version.is_some() || seen == stamp {
+                return Ok(DocRef::Read(doc));
             }
         }
         let doc = match version {
@@ -199,7 +258,7 @@ impl<'a> Ctx<'a> {
             }
         };
         let doc = Arc::new(doc);
-        self.cache.insert(key, (stamp, doc.clone()));
+        self.cache.insert(key, stamp, doc.clone());
         Ok(DocRef::Read(doc))
     }
 }
@@ -711,31 +770,6 @@ pub fn views(text: &str, shown: &[Shown]) -> Vec<InclusionView> {
 }
 
 impl Vault {
-    /// Every Work in the Vault and its trash, by ID. Each `.db`'s ID is read once and kept.
-    pub(super) fn work_index(&mut self) -> Index {
-        let trash = self.trash_root();
-        let mut index: Index = HashMap::new();
-        let mut seen = std::collections::HashSet::new();
-        for (db, trashed) in walk_works(&self.root).dbs.into_iter().map(|d| (d, false))
-            .chain(walk_works(&trash).dbs.into_iter().map(|d| (d, true)))
-        {
-            seen.insert(db.clone());
-            let Some(identity) = self.identity_of(&db) else { continue };
-            let id = if trashed { relative_id(&trash, &db) } else { self.id_of(&db) };
-            match index.get_mut(&identity) {
-                // The Vault's own copy wins over one in the trash; two in the Vault are a problem.
-                Some(found) if found.trashed && !trashed => *found = Located { db, id, trashed, duplicate: false },
-                Some(found) if found.trashed == trashed => found.duplicate = true,
-                Some(_) => {}
-                None => {
-                    index.insert(identity, Located { db, id, trashed, duplicate: false });
-                }
-            }
-        }
-        self.identities.retain(|db, _| seen.contains(db));
-        index
-    }
-
     /// A `.db`'s Work ID (`storage::identity`), read once and kept while the file is unchanged.
     /// A different Work can come to have the same path (one renamed away, another made or moved
     /// there), and an empty one gets its ID with its first Change: either way the file's time
@@ -796,7 +830,7 @@ impl Vault {
             return Ok(Vec::new());
         }
         let index = self.work_index();
-        let shelf = Shelf::read(&self.root);
+        let shelf = self.shelf();
         let work = &self.works[&id];
         let mut ctx = Ctx { works: &self.works, index: &index, cache: &mut self.included_docs, shelf: &shelf, device: self.device, recorded };
         let mut stack = work.identity().map(|i| vec![i.to_string()]).unwrap_or_default();
@@ -815,7 +849,7 @@ impl Vault {
             return Vec::new();
         }
         let index = self.work_index();
-        let shelf = Shelf::read(&self.root);
+        let shelf = self.shelf();
         let identity = doc.field(storage::WORK_RECORD, storage::WORK_ID_FIELD).map(str::to_string);
         let mut ctx = Ctx { works: &self.works, index: &index, cache: &mut self.included_docs, shelf: &shelf, device: self.device, recorded };
         expand(&mut ctx, doc, &mut identity.into_iter().collect())
@@ -938,7 +972,7 @@ impl Vault {
         // The heading after the Chapter now, in the included Work as it is now.
         let index = self.work_index();
         let located = index.get(&target.work).cloned().ok_or("The Work it includes can't be found.")?;
-        let shelf = Shelf::read(&self.root);
+        let shelf = self.shelf();
         let next = {
             let mut ctx = Ctx { works: &self.works, index: &index, cache: &mut self.included_docs, shelf: &shelf, device: self.device, recorded: false };
             let doc = ctx.doc(&located, None)?;
@@ -969,7 +1003,7 @@ impl Vault {
         let text = self.works.get(&key).ok_or_else(|| format!("{id} isn't open."))?.text();
         let found = inclusion_at(&text, at, &shown).ok_or("That Inclusion isn't there any more.")?;
         let record = inclusion_record(found.at);
-        let shelf = Shelf::read(&self.root);
+        let shelf = self.shelf();
         let generation = self.library_generation;
         self.with_work(id, now_ms, |w, _| {
             w.close_burst(now_ms);
@@ -1137,7 +1171,7 @@ impl Vault {
 }
 
 /// A Work's ID under `base` (the trash): its path from there, without the extension.
-fn relative_id(base: &Path, db: &Path) -> String {
+pub(super) fn relative_id(base: &Path, db: &Path) -> String {
     let relative = db.strip_prefix(base).unwrap_or(db);
     let joined = relative.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
     joined.strip_suffix(".db").map(str::to_string).unwrap_or(joined)
@@ -1242,6 +1276,62 @@ mod tests {
         let (body, header, blocks) = v.typeset_input("Collected", None, 12_000).unwrap();
         assert!(body.contains("The rain had stopped.") && body.contains("lang: \"da\"") && body.contains("\"Rain at Night\""), "{body}");
         assert!(compiles(&header, body, blocks) >= 2, "the Collection's own page, then the story's");
+    }
+
+    #[test]
+    fn asking_for_the_inclusions_again_reads_neither_the_library_nor_the_vault_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        v.inclusions("Collected").unwrap();
+        let (reads, index) = (v.shelves.reads(), v.work_index());
+        v.inclusions("Collected").unwrap();
+        v.inclusions("Collected").unwrap();
+        assert_eq!(v.shelves.reads(), reads, "the Style library isn't read again");
+        assert!(Arc::ptr_eq(&index, &v.work_index()), "nor is the Vault walked again");
+
+        // Once the library changes, it's read again (once).
+        std::fs::write(dir.path().join("styles/Mine.typ"), "// Style: Mine\n").unwrap();
+        assert!(v.library_changed());
+        v.inclusions("Collected").unwrap();
+        v.inclusions("Collected").unwrap();
+        assert_eq!(v.shelves.reads(), reads + 1);
+    }
+
+    #[test]
+    fn the_timer_and_other_commands_on_other_threads_keep_the_typing_in_order() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Mutex;
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Arc::new(Mutex::new(collected(dir.path())));
+        let clock = Arc::new(AtomicU64::new(20_000));
+        let stop = Arc::new(AtomicBool::new(false));
+        let run = |f: fn(&mut Vault, u64)| {
+            let (vault, clock, stop) = (vault.clone(), clock.clone(), stop.clone());
+            std::thread::spawn(move || while !stop.load(Ordering::Relaxed) {
+                let now = clock.fetch_add(10, Ordering::Relaxed);
+                f(&mut vault.lock().unwrap(), now);
+            })
+        };
+        let others = [
+            run(|v, now| { v.tick(now); }),
+            run(|v, _| { v.inclusions("Collected").unwrap(); }),
+            run(|v, now| { v.list(now); }),
+        ];
+        for _ in 0..40 {
+            let now = clock.fetch_add(10, Ordering::Relaxed);
+            vault.lock().unwrap().edit("Collected", vec![typing(0, "a")], now).unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        for thread in others {
+            thread.join().expect("no thread panicked");
+        }
+        let mut v = Arc::try_unwrap(vault).ok().unwrap().into_inner().unwrap();
+        let (text, _) = v.work_text("Collected", clock.load(Ordering::Relaxed)).unwrap();
+        assert!(text.starts_with(&format!("{}My introduction.", "a".repeat(40))), "{text}");
+        // And it's all saved: reopened, it's the same.
+        v.close_work("Collected", clock.load(Ordering::Relaxed));
+        let mut again = open(dir.path());
+        assert_eq!(again.open_work("Collected", clock.load(Ordering::Relaxed)).unwrap().text, text);
     }
 
     #[test]

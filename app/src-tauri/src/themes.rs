@@ -112,15 +112,8 @@ pub fn read(root: &Path, file: &str) -> Result<String, String> {
 }
 
 /// What the theme files are now, cheaply: if it changes, a theme was added, changed or removed.
-pub fn stamp(root: &Path) -> Vec<(PathBuf, u64, Option<std::time::SystemTime>)> {
-    files(root)
-        .into_iter()
-        .map(|path| {
-            let meta = std::fs::metadata(&path).ok();
-            let (len, modified) = meta.map(|m| (m.len(), m.modified().ok())).unwrap_or((0, None));
-            (path, len, modified)
-        })
-        .collect()
+pub fn stamp(root: &Path) -> Vec<(PathBuf, Option<crate::stamps::Stamp>)> {
+    crate::stamps::file_stamps(files(root))
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]

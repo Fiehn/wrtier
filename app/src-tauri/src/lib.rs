@@ -11,6 +11,7 @@ pub mod preamble;
 pub mod positions;
 pub mod recovery;
 pub mod spelling;
+pub mod stamps;
 pub mod syncthing;
 pub mod themes;
 pub mod typeset;
@@ -55,12 +56,7 @@ fn vault_root(handle: &AppHandle) -> Result<PathBuf, String> {
 
 fn with_spelling<T>(handle: &AppHandle, f: impl FnOnce(&mut spelling::Spelling, &std::path::Path) -> Result<T, String>) -> Result<T, String> {
     let root = vault_root(handle)?;
-    let state = handle.state::<SpellState>();
-    let mut spelling = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    match catch_unwind(AssertUnwindSafe(|| f(&mut spelling, &root))) {
-        Ok(result) => result,
-        Err(panic) => Err(format!("Something went wrong: {}", vault::panic_message(panic.as_ref()))),
-    }
+    guarded(&handle.state::<SpellState>().0, |spelling| f(spelling, &root))
 }
 
 /// Which of `words` the Dictionary for `language` doesn't know (ADR 0019); None if there's no
@@ -119,15 +115,41 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-/// Runs a command on the app's state. A panic that gets this far becomes an error message
-/// instead of closing the app; the Vault code already catches panics around each Work, so its
-/// state in memory is never left half-updated.
-fn with_app<T>(state: &AppState, f: impl FnOnce(&mut App) -> Result<T, String>) -> Result<T, String> {
-    let mut app = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    match catch_unwind(AssertUnwindSafe(|| f(&mut app))) {
+/// An error, as the interface shows it.
+pub(crate) fn err(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
+
+/// Runs `f` on what `lock` holds. A panic that gets this far becomes an error message instead
+/// of closing the app, and one that poisoned the lock earlier doesn't stop it: the code inside
+/// catches panics where its state could be left half-updated (the Vault, around each Work).
+fn guarded<S, T>(lock: &Mutex<S>, f: impl FnOnce(&mut S) -> Result<T, String>) -> Result<T, String> {
+    let mut held = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match catch_unwind(AssertUnwindSafe(|| f(&mut held))) {
         Ok(result) => result,
         Err(panic) => Err(format!("Something went wrong: {}", vault::panic_message(panic.as_ref()))),
     }
+}
+
+/// Runs a command on the app's state (see `guarded`).
+fn with_app<T>(state: &AppState, f: impl FnOnce(&mut App) -> Result<T, String>) -> Result<T, String> {
+    guarded(&state.0, f)
+}
+
+/// Runs `f` on the typesetter (see `guarded`).
+fn with_typesetter<T>(handle: &AppHandle, f: impl FnOnce(&mut typeset::Typesetter) -> Result<T, String>) -> Result<T, String> {
+    guarded(&handle.state::<TypesetState>().0, f)
+}
+
+/// `with_app` on a worker thread instead of the main one: while a command runs on the main
+/// thread, the window can't repaint or take input. For commands that read whole files or walk
+/// the Vault. (Typing's `edit` stays on the main thread: it's quick, and its order with the
+/// other editing commands matters. `WorkSync` sends one batch at a time per Work, so moving
+/// other commands off it doesn't reorder typing.)
+async fn off_main<T: Send + 'static>(handle: AppHandle, f: impl FnOnce(&mut App) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || with_app(&handle.state::<AppState>(), f))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn open_vault_of(app: &mut App) -> Result<&mut Vault, String> {
@@ -211,13 +233,13 @@ fn set_device_name(state: State<AppState>, name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn list_works(state: State<AppState>) -> Result<Listing, String> {
-    with_app(&state, |app| Ok(open_vault_of(app)?.list(now_ms())))
+async fn list_works(handle: AppHandle) -> Result<Listing, String> {
+    off_main(handle, move |app| Ok(open_vault_of(app)?.list(now_ms()))).await
 }
 
 #[tauri::command]
-fn open_work(state: State<AppState>, id: String) -> Result<OpenedWork, String> {
-    with_app(&state, |app| open_vault_of(app)?.open_work(&id, now_ms()))
+async fn open_work(handle: AppHandle, id: String) -> Result<OpenedWork, String> {
+    off_main(handle, move |app| open_vault_of(app)?.open_work(&id, now_ms())).await
 }
 
 /// A Work's own text, for Find in Vault, unless it still has the stamp `known`. It runs off the
@@ -364,8 +386,8 @@ fn check_inclusion(state: State<AppState>, id: String, work: String) -> Result<(
 /// "New Collection from selected Works…": makes a Work `id` holding Inclusions of `works`, in
 /// that order, and opens it.
 #[tauri::command]
-fn create_collection(state: State<AppState>, id: String, works: Vec<String>) -> Result<OpenedWork, String> {
-    with_app(&state, |app| open_vault_of(app)?.create_collection(&id, &works, now_ms()))
+async fn create_collection(handle: AppHandle, id: String, works: Vec<String>) -> Result<OpenedWork, String> {
+    off_main(handle, move |app| open_vault_of(app)?.create_collection(&id, &works, now_ms())).await
 }
 
 /// The Chapters of a Work (open or not), to pick one to include.
@@ -376,8 +398,8 @@ fn chapters_of(state: State<AppState>, work: String) -> Result<Vec<vault::Chapte
 
 /// An open Work's Inclusions (ADR 0015), with the included text as it is now, for the editor.
 #[tauri::command]
-fn get_inclusions(state: State<AppState>, id: String) -> Result<Vec<vault::InclusionView>, String> {
-    with_app(&state, |app| open_vault_of(app)?.inclusions(&id))
+async fn get_inclusions(handle: AppHandle, id: String) -> Result<Vec<vault::InclusionView>, String> {
+    off_main(handle, move |app| open_vault_of(app)?.inclusions(&id)).await
 }
 
 /// Typesets a Work's text as it is now, the open burst included, for the Page preview. It runs
@@ -400,9 +422,7 @@ async fn compile_preview(handle: AppHandle, id: String, look: Option<String>, mi
             Some(m) => format!("{id}@{m}"),
             None => id,
         };
-        let state = handle.state::<TypesetState>();
-        let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(typesetter.compile_body(&key, &fonts_dir, &header, text, blocks))
+        with_typesetter(&handle, |typesetter| Ok(typesetter.compile_body(&key, &fonts_dir, &header, text, blocks)))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -412,9 +432,7 @@ async fn compile_preview(handle: AppHandle, id: String, look: Option<String>, mi
 #[tauri::command]
 async fn preview_page(handle: AppHandle, id: String, page: usize, known: Option<String>) -> Result<typeset::PagePicture, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let state = handle.state::<TypesetState>();
-        let typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        typesetter.page(&id, page, known.as_deref())
+        with_typesetter(&handle, |typesetter| typesetter.page(&id, page, known.as_deref()))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -446,11 +464,7 @@ async fn export_pdf(handle: AppHandle, id: String, look: Option<String>, milesto
             };
             Ok((input, vault.root.join("fonts")))
         })?;
-        let pdf = {
-            let state = handle.state::<TypesetState>();
-            let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            typesetter.export_pdf(&fonts_dir, &input.header, input.text, input.date_ms, &input.ident)?
-        };
+        let pdf = with_typesetter(&handle, |typesetter| typesetter.export_pdf(&fonts_dir, &input.header, input.text, input.date_ms, &input.ident))?;
         let name = id.rsplit('/').next().unwrap_or(&id);
         let file_name = match &look {
             Some(look) => format!("{name} ({look}).pdf"),
@@ -497,11 +511,7 @@ async fn export_docx(handle: AppHandle, id: String, look: Option<String>, plain:
         })?;
         let name = id.rsplit('/').next().unwrap_or(&id).to_string();
         let (header, options) = docx::prepare(&input, &name, plain, embed_fonts);
-        let made = {
-            let state = handle.state::<TypesetState>();
-            let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            typesetter.export_docx(&fonts_dir, &header, input.text, &input.inclusions, &options)?
-        };
+        let made = with_typesetter(&handle, |typesetter| typesetter.export_docx(&fonts_dir, &header, input.text, &input.inclusions, &options))?;
         let file_name = match (&look, plain) {
             (_, true) => format!("{name} (prose only).docx"),
             (Some(look), false) => format!("{name} ({look}).docx"),
@@ -535,38 +545,38 @@ fn make_milestone(state: State<AppState>, id: String, name: String) -> Result<Op
 
 /// The History tab: an open Work's newest `limit` Sessions and all its Milestones.
 #[tauri::command]
-fn get_history(state: State<AppState>, id: String, limit: usize, filtered: bool) -> Result<vault::HistoryView, String> {
-    with_app(&state, |app| open_vault_of(app)?.history(&id, limit, filtered, now_ms()))
+async fn get_history(handle: AppHandle, id: String, limit: usize, filtered: bool) -> Result<vault::HistoryView, String> {
+    off_main(handle, move |app| open_vault_of(app)?.history(&id, limit, filtered, now_ms())).await
 }
 
 /// What some of an open Work's Changes did (a Session's), as snippets.
 #[tauri::command]
-fn get_snippets(state: State<AppState>, id: String, changes: Vec<String>, filtered: bool) -> Result<vault::SnippetsView, String> {
-    with_app(&state, |app| open_vault_of(app)?.snippets(&id, &changes, filtered, now_ms()))
+async fn get_snippets(handle: AppHandle, id: String, changes: Vec<String>, filtered: bool) -> Result<vault::SnippetsView, String> {
+    off_main(handle, move |app| open_vault_of(app)?.snippets(&id, &changes, filtered, now_ms())).await
 }
 
 /// What changed in an open Work from one version to another: a Milestone's ID, or none for now.
 #[tauri::command]
-fn compare_versions(state: State<AppState>, id: String, from: Option<String>, to: Option<String>) -> Result<vault::ComparisonView, String> {
-    with_app(&state, |app| open_vault_of(app)?.compare_versions(&id, from.as_deref(), to.as_deref(), now_ms()))
+async fn compare_versions(handle: AppHandle, id: String, from: Option<String>, to: Option<String>) -> Result<vault::ComparisonView, String> {
+    off_main(handle, move |app| open_vault_of(app)?.compare_versions(&id, from.as_deref(), to.as_deref(), now_ms())).await
 }
 
 /// What reverting some of an open Work's Changes would do (the Revert itself is an op in its queue).
 #[tauri::command]
-fn preview_revert(state: State<AppState>, id: String, changes: Vec<String>) -> Result<vault::RevertPreview, String> {
-    with_app(&state, |app| open_vault_of(app)?.preview_revert(&id, &changes, now_ms()))
+async fn preview_revert(handle: AppHandle, id: String, changes: Vec<String>) -> Result<vault::RevertPreview, String> {
+    off_main(handle, move |app| open_vault_of(app)?.preview_revert(&id, &changes, now_ms())).await
 }
 
 /// What restoring some of an open Work's Changes would bring back.
 #[tauri::command]
-fn preview_restore(state: State<AppState>, id: String, changes: Vec<String>) -> Result<vault::RestorePreview, String> {
-    with_app(&state, |app| open_vault_of(app)?.preview_restore(&id, &changes, now_ms()))
+async fn preview_restore(handle: AppHandle, id: String, changes: Vec<String>) -> Result<vault::RestorePreview, String> {
+    off_main(handle, move |app| open_vault_of(app)?.preview_restore(&id, &changes, now_ms())).await
 }
 
 /// What returning an open Work to a Milestone would do.
 #[tauri::command]
-fn preview_return(state: State<AppState>, id: String, milestone: String) -> Result<vault::ReturnPreview, String> {
-    with_app(&state, |app| open_vault_of(app)?.preview_return(&id, &milestone, now_ms()))
+async fn preview_return(handle: AppHandle, id: String, milestone: String) -> Result<vault::ReturnPreview, String> {
+    off_main(handle, move |app| open_vault_of(app)?.preview_return(&id, &milestone, now_ms())).await
 }
 
 /// Gives a Milestone of an open Work a new name. Returns the Work's state.
@@ -601,8 +611,8 @@ fn set_preamble(state: State<AppState>, id: String, preamble: preamble::Preamble
 
 /// The Style library: its Styles, Looks and Story elements, and Conflict copies to resolve.
 #[tauri::command]
-fn get_library(state: State<AppState>) -> Result<library::Library, String> {
-    with_app(&state, |app| Ok(open_vault_of(app)?.library()))
+async fn get_library(handle: AppHandle) -> Result<library::Library, String> {
+    off_main(handle, move |app| Ok(open_vault_of(app)?.library())).await
 }
 
 /// A library file's text, for its tab.
@@ -717,47 +727,52 @@ async fn share_vault_with_syncthing(state: State<'_, AppState>) -> Result<(), St
         .map_err(|e| e.to_string())?
 }
 
+/// Changes the Style library (`f` gets the Vault's folder): what the Vault keeps of it is read
+/// again when next needed, whether or not that worked (it may have changed some files).
+fn writing_library<T>(state: &AppState, f: impl FnOnce(&std::path::Path) -> Result<T, String>) -> Result<T, String> {
+    with_app(state, |app| {
+        let vault = open_vault_of(app)?;
+        let result = f(&vault.root);
+        vault.library_written();
+        result
+    })
+}
+
 /// Saves a library file from its tab.
 #[tauri::command]
 fn write_library(state: State<AppState>, path: String, text: String) -> Result<(), String> {
-    with_app(&state, |app| library::write(&open_vault_of(app)?.root, &path, &text))
+    writing_library(&state, |root| library::write(root, &path, &text))
 }
 
 /// Makes a new Style, Look or Story element. Returns its path.
 #[tauri::command]
 fn create_library(state: State<AppState>, kind: library::Kind, name: String, element: Option<library::NewElement>) -> Result<String, String> {
-    with_app(&state, |app| library::create(&open_vault_of(app)?.root, kind, &name, element))
+    writing_library(&state, |root| library::create(root, kind, &name, element))
 }
 
 /// Gives a library file a new title (the name shown); its file name, which Works use, stays.
 #[tauri::command]
 fn retitle_library(state: State<AppState>, path: String, title: String) -> Result<(), String> {
-    with_app(&state, |app| library::retitle(&open_vault_of(app)?.root, &path, &title))
+    writing_library(&state, |root| library::retitle(root, &path, &title))
 }
 
 /// Moves a library file to the Vault's trash folder.
 #[tauri::command]
 fn trash_library(state: State<AppState>, path: String) -> Result<(), String> {
-    with_app(&state, |app| {
-        let root = &open_vault_of(app)?.root;
-        library::trash(root, &root.join(vault::TRASH), &path)
-    })
+    writing_library(&state, |root| library::trash(root, &root.join(vault::TRASH), &path))
 }
 
 /// Puts the library's defaults back as this app version ships them; changed ones go to the
 /// Vault's trash folder first. Returns the paths (inside `styles/`) it wrote.
 #[tauri::command]
 fn restore_library_defaults(state: State<AppState>) -> Result<Vec<&'static str>, String> {
-    with_app(&state, |app| {
-        let root = &open_vault_of(app)?.root;
-        library::restore_defaults(root, &root.join(vault::TRASH))
-    })
+    writing_library(&state, |root| library::restore_defaults(root, &root.join(vault::TRASH)))
 }
 
 /// The defaults this app has a newer version of than the Vault was given (ADR 0012).
 #[tauri::command]
-fn default_offers(state: State<AppState>) -> Result<Vec<library::Offer>, String> {
-    with_app(&state, |app| open_vault_of(app)?.default_offers(now_ms()))
+async fn default_offers(handle: AppHandle) -> Result<Vec<library::Offer>, String> {
+    off_main(handle, move |app| open_vault_of(app)?.default_offers(now_ms())).await
 }
 
 /// The Vault's copy of a default against the newer one, line by line.
@@ -781,7 +796,7 @@ fn keep_default(state: State<AppState>, path: String) -> Result<(), String> {
 /// Keeps one version of a library file that has a Conflict copy.
 #[tauri::command]
 fn resolve_library(state: State<AppState>, copy: String, keep: library::Keep) -> Result<(), String> {
-    with_app(&state, |app| library::resolve(&open_vault_of(app)?.root, &copy, keep))
+    writing_library(&state, |root| library::resolve(root, &copy, keep))
 }
 
 /// What can go at a place in a Work's text (UTF-16), after a `#`: its Story elements and
@@ -794,9 +809,7 @@ async fn complete_at(handle: AppHandle, id: String, at: usize, explicit: bool, l
             let (text, header, blocks) = vault.typeset_input(&id, look.as_deref(), now_ms())?;
             Ok((text, header, blocks, vault.root.join("fonts")))
         })?;
-        let state = handle.state::<TypesetState>();
-        let mut typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(typesetter.complete(&id, &fonts_dir, &header, &text, &blocks, at, explicit))
+        with_typesetter(&handle, |typesetter| Ok(typesetter.complete(&id, &fonts_dir, &header, &text, &blocks, at, explicit)))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -805,31 +818,26 @@ async fn complete_at(handle: AppHandle, id: String, at: usize, explicit: bool, l
 /// Where a click on a page of the Page preview leads (points from the page's top left).
 #[tauri::command]
 async fn preview_jump(handle: AppHandle, id: String, page: usize, x: f64, y: f64) -> Result<Option<typeset::JumpTo>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = handle.state::<TypesetState>();
-        let typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        typesetter.jump(&id, page, x, y)
-    })
-    .await
-    .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || with_typesetter(&handle, |typesetter| Ok(typesetter.jump(&id, page, x, y))))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Where a place in a Work's text (UTF-16) is on its pages, for keeping the cursor in view.
 #[tauri::command]
 async fn preview_locate(handle: AppHandle, id: String, at: usize) -> Result<Option<typeset::Spot>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = handle.state::<TypesetState>();
-        let typesetter = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        typesetter.locate(&id, at)
-    })
-    .await
-    .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || with_typesetter(&handle, |typesetter| Ok(typesetter.locate(&id, at))))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// A Work's tab closed, or the preview was: its pages aren't needed any more.
 #[tauri::command]
-fn forget_preview(state: State<TypesetState>, id: String) {
-    state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).forget(&id);
+fn forget_preview(handle: AppHandle, id: String) {
+    let _ = with_typesetter(&handle, |typesetter| {
+        typesetter.forget(&id);
+        Ok(())
+    });
 }
 
 /// What the timer did to a Work, for the editor.
@@ -845,16 +853,24 @@ fn start_timer(handle: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
         let state = handle.state::<AppState>();
-        let changed = with_app(&state, |app| Ok(app.vault.as_mut().map(|v| v.tick(now_ms())).unwrap_or_default()));
-        for (id, state) in changed.unwrap_or_default() {
+        let ticked = with_app(&state, |app| Ok(app.vault.as_mut().map(|v| (v.tick(now_ms()), v.root.clone()))));
+        let Ok(Some((changed, root))) = ticked else { continue };
+        for (id, state) in changed {
             let _ = handle.emit("work-status", WorkStatus { id, state });
         }
+        // The Style library's and the themes' files are looked at without the app's lock (that
+        // walks their folders), and compared with what was seen last under it.
+        let (library, themes) = (library::stamp(&root), themes::stamp(&root));
+        let (library_changed, themes_changed) = with_app(&state, |app| Ok(match app.vault.as_mut() {
+            Some(vault) if vault.root == root => (vault.library_changed_to(library), vault.themes_changed_to(themes)),
+            _ => (false, false), // another Vault was opened meanwhile: next time
+        })).unwrap_or((false, false));
         // The Style library changed (in the app, in another editor, or from another Device).
-        if with_app(&state, |app| Ok(app.vault.as_mut().is_some_and(|v| v.library_changed()))).unwrap_or(false) {
+        if library_changed {
             let _ = handle.emit("library-changed", ());
         }
         // A theme in `themes/` was added, changed or removed.
-        if with_app(&state, |app| Ok(app.vault.as_mut().is_some_and(|v| v.themes_changed()))).unwrap_or(false) {
+        if themes_changed {
             let _ = handle.emit("themes-changed", ());
         }
     });
@@ -874,31 +890,31 @@ fn delete_leftover(state: State<AppState>, id: String) -> Result<(), String> {
 
 /// Renames a Work; an open one keeps its tab. Returns its new ID.
 #[tauri::command]
-fn rename_work(state: State<AppState>, id: String, name: String) -> Result<String, String> {
-    with_app(&state, |app| open_vault_of(app)?.rename_work(&id, &name))
+async fn rename_work(handle: AppHandle, id: String, name: String) -> Result<String, String> {
+    off_main(handle, move |app| open_vault_of(app)?.rename_work(&id, &name)).await
 }
 
 /// Moves a Work to the Vault's trash.
 #[tauri::command]
-fn trash_work(state: State<AppState>, id: String) -> Result<(), String> {
-    with_app(&state, |app| open_vault_of(app)?.trash_work(&id, now_ms()))
+async fn trash_work(handle: AppHandle, id: String) -> Result<(), String> {
+    off_main(handle, move |app| open_vault_of(app)?.trash_work(&id, now_ms())).await
 }
 
 #[tauri::command]
-fn list_trash(state: State<AppState>) -> Result<Vec<vault::TrashedWork>, String> {
-    with_app(&state, |app| Ok(open_vault_of(app)?.list_trash()))
+async fn list_trash(handle: AppHandle) -> Result<Vec<vault::TrashedWork>, String> {
+    off_main(handle, move |app| Ok(open_vault_of(app)?.list_trash())).await
 }
 
 /// Puts a Work back from the trash. Returns the ID it has now.
 #[tauri::command]
-fn restore_work(state: State<AppState>, id: String) -> Result<String, String> {
-    with_app(&state, |app| open_vault_of(app)?.restore_work(&id))
+async fn restore_work(handle: AppHandle, id: String) -> Result<String, String> {
+    off_main(handle, move |app| open_vault_of(app)?.restore_work(&id)).await
 }
 
 /// Restores the Work of an open tab that went to the trash on another Device.
 #[tauri::command]
-fn restore_open(state: State<AppState>, id: String) -> Result<String, String> {
-    with_app(&state, |app| open_vault_of(app)?.restore_open(&id))
+async fn restore_open(handle: AppHandle, id: String) -> Result<String, String> {
+    off_main(handle, move |app| open_vault_of(app)?.restore_open(&id)).await
 }
 
 /// Makes a new, empty folder for Works. Returns its path.
@@ -909,8 +925,8 @@ fn create_folder(state: State<AppState>, path: String) -> Result<String, String>
 
 /// Renames (or moves) a folder. Returns the old and new ID of each Work open in it.
 #[tauri::command]
-fn rename_folder(state: State<AppState>, path: String, name: String) -> Result<Vec<(String, String)>, String> {
-    with_app(&state, |app| open_vault_of(app)?.rename_folder(&path, &name, now_ms()))
+async fn rename_folder(handle: AppHandle, path: String, name: String) -> Result<Vec<(String, String)>, String> {
+    off_main(handle, move |app| open_vault_of(app)?.rename_folder(&path, &name, now_ms())).await
 }
 
 /// Adds a Vault Mod (such as Colours) to the whole Vault, or removes it.
@@ -945,13 +961,13 @@ fn set_hidden_folders_here(state: State<AppState>, here: bool) -> Result<vault::
 
 /// Moves a folder, with everything in it, to the Vault's trash.
 #[tauri::command]
-fn trash_folder(state: State<AppState>, path: String) -> Result<(), String> {
-    with_app(&state, |app| open_vault_of(app)?.trash_folder(&path, now_ms()))
+async fn trash_folder(handle: AppHandle, path: String) -> Result<(), String> {
+    off_main(handle, move |app| open_vault_of(app)?.trash_folder(&path, now_ms())).await
 }
 
 #[tauri::command]
-fn empty_trash(state: State<AppState>) -> Result<(), String> {
-    with_app(&state, |app| open_vault_of(app)?.empty_trash())
+async fn empty_trash(handle: AppHandle) -> Result<(), String> {
+    off_main(handle, move |app| open_vault_of(app)?.empty_trash()).await
 }
 
 /// Closes a tab whose Work is gone from the Vault, dropping what was typed since.
@@ -965,8 +981,8 @@ fn discard_work(state: State<AppState>, id: String) -> Result<(), String> {
 
 /// Saves the text of a tab whose Work is gone as a new Work.
 #[tauri::command]
-fn save_as_new(state: State<AppState>, id: String, name: String) -> Result<OpenedWork, String> {
-    with_app(&state, |app| open_vault_of(app)?.save_as_new(&id, &name, now_ms()))
+async fn save_as_new(handle: AppHandle, id: String, name: String) -> Result<OpenedWork, String> {
+    off_main(handle, move |app| open_vault_of(app)?.save_as_new(&id, &name, now_ms())).await
 }
 
 /// The Mods of a Work (if `id` is given), the Mods for new Works, and those hidden on this Device.

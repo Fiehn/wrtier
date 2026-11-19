@@ -17,6 +17,21 @@ pub struct CharRange {
     pub len: u32,
 }
 
+impl CharRange {
+    /// `chars` (in order) as ranges of consecutive characters of one Change: a run continues
+    /// while each character follows on from the last in the same Change.
+    pub fn runs(chars: impl IntoIterator<Item = CharId>) -> Vec<CharRange> {
+        let mut ranges: Vec<CharRange> = Vec::new();
+        for id in chars {
+            match ranges.last_mut() {
+                Some(last) if last.first.change == id.change && last.first.offset + last.len == id.offset => last.len += 1,
+                _ => ranges.push(CharRange { first: id, len: 1 }),
+            }
+        }
+        ranges
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChangeKind {
     Insert(InsertRun),

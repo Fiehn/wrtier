@@ -23,6 +23,7 @@ use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World, WorldExt};
 use typst_kit::fonts::{FontPath, FontStore};
+use crate::positions::byte_at_utf16;
 use crate::preamble::Header;
 use typst_layout::PagedDocument;
 
@@ -212,10 +213,6 @@ impl Block {
     }
 }
 
-/// The byte index in `text` of UTF-16 position `utf16` (or the end).
-fn byte_at_utf16(text: &str, utf16: usize) -> usize {
-    crate::positions::byte_at_utf16(text, utf16)
-}
 
 impl Preview {
     /// A place in the Work's text (UTF-16), as a byte offset in the compiled source.

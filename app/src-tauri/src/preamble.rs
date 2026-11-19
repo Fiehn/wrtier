@@ -148,10 +148,15 @@ pub struct Shelf {
 
 impl Shelf {
     pub fn read(root: &Path) -> Shelf {
+        Shelf::of(root, &library::list(root))
+    }
+
+    /// The files `library` (the listing of `root`'s library) lists.
+    fn of(root: &Path, library: &library::Library) -> Shelf {
         let mut files = HashMap::new();
-        for item in library::list(root).items {
+        for item in &library.items {
             if let Ok(text) = std::fs::read_to_string(root.join(&item.path)) {
-                files.insert((item.kind as u8, item.name), (item.path, text));
+                files.insert((item.kind as u8, item.name.clone()), (item.path.clone(), text));
             }
         }
         Shelf { files }
@@ -171,6 +176,52 @@ impl Shelf {
         let mut names: Vec<String> = self.files.keys().filter(|(k, _)| *k == Kind::StoryElement as u8).map(|(_, n)| n.clone()).collect();
         names.sort();
         names
+    }
+}
+
+/// A Vault's Style library, listed and read once and kept until it changes: the Vault and its
+/// open Works share one (a clone is the same cache). The Vault calls `forget` when the library
+/// changed, whether the timer noticed it or the app wrote to it.
+#[derive(Clone, Default)]
+pub struct ShelfCache {
+    root: std::path::PathBuf,
+    kept: std::sync::Arc<std::sync::Mutex<Option<(std::sync::Arc<library::Library>, std::sync::Arc<Shelf>)>>>,
+    /// How many times the library was read, for tests that check it isn't read again for nothing.
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ShelfCache {
+    pub fn new(root: &Path) -> ShelfCache {
+        ShelfCache { root: root.to_path_buf(), ..ShelfCache::default() }
+    }
+
+    fn get(&self) -> (std::sync::Arc<library::Library>, std::sync::Arc<Shelf>) {
+        let mut kept = self.kept.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        kept.get_or_insert_with(|| {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let library = library::list(&self.root);
+            let shelf = Shelf::of(&self.root, &library);
+            (std::sync::Arc::new(library), std::sync::Arc::new(shelf))
+        }).clone()
+    }
+
+    /// The library's files.
+    pub fn shelf(&self) -> std::sync::Arc<Shelf> {
+        self.get().1
+    }
+
+    /// The library's listing (as `library::list` gives it).
+    pub fn library(&self) -> std::sync::Arc<library::Library> {
+        self.get().0
+    }
+
+    /// The library changed: it's read again when next asked for.
+    pub fn forget(&self) {
+        *self.kept.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    pub fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

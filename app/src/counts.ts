@@ -2,8 +2,21 @@
 // names, brackets, emphasis marks, heading marks, escapes) and comments aren't counted, and
 // neither are line breaks. Used by the word and character count Mod and the Chapter list.
 
-/** A word: letters, digits and apostrophes, as the History engine counts them. */
-const WORD = /[\p{L}\p{N}'’]+/gu;
+/**
+ * A run of word characters: letters, digits and apostrophes, exactly as the History engine
+ * counts them (history.rs `is_word_char`: Rust's `is_alphanumeric` is Unicode's Alphabetic, which
+ * takes in combining vowel signs \p{L} leaves out, or Numeric). It's a word only if it has a
+ * letter or digit (`WORD_CHAR`): a closing quote on its own isn't one.
+ */
+const WORD = /[\p{Alphabetic}\p{N}'’]+/gu;
+const WORD_CHAR = /[\p{Alphabetic}\p{N}]/u;
+
+/** The words in some text with its markup taken out. */
+function wordsOfProse(prose: string): number {
+  let count = 0;
+  for (const m of prose.matchAll(WORD)) if (WORD_CHAR.test(m[0])) count++;
+  return count;
+}
 
 /** The text with its markup and comments taken out (line breaks kept, so lines stay apart). */
 export function proseOf(text: string): string {
@@ -19,9 +32,7 @@ export function proseOf(text: string): string {
 
 /** The words in some Typst text. */
 export function wordsIn(text: string): number {
-  let count = 0;
-  for (const m of proseOf(text).matchAll(WORD)) if (/[\p{L}\p{N}]/u.test(m[0])) count++;
-  return count;
+  return wordsOfProse(proseOf(text));
 }
 
 export type Counts = { words: number; characters: number; charactersNoSpaces: number };
@@ -29,8 +40,7 @@ export type Counts = { words: number; characters: number; charactersNoSpaces: nu
 /** Words and characters (with and without spaces; never line breaks) in some Typst text. */
 export function countsOf(text: string): Counts {
   const prose = proseOf(text);
-  let words = 0;
-  for (const m of prose.matchAll(WORD)) if (/[\p{L}\p{N}]/u.test(m[0])) words++;
+  const words = wordsOfProse(prose);
   let characters = 0;
   let spaces = 0;
   for (const c of prose) {
