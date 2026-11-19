@@ -134,6 +134,19 @@ pub fn included_record(work: &str) -> String {
 /// lost can be copied back. Other fields (names, settings) just take the later value quietly.
 pub fn is_free_text(record: &str, field: &str) -> bool {
     (record == PREAMBLE_RECORD && field == "raw") || (record.starts_with("comment/") && field == "body")
+        || (record.starts_with(ANNOTATION_PREFIX) && field == ANNOTATION_FIELD)
+}
+
+/// The records holding a Work's Annotations (ADR 0020): notes it prints on the text of a Work
+/// it includes. Each is `annotation/<its ID>`, with everything about it in one field, `note`
+/// (what it covers, its quote and its text), so making, changing and deleting one (an empty
+/// value) are each one Change, which undo, a Revert or returning to a Milestone takes back. It
+/// is the Work's content, like its text.
+pub const ANNOTATION_PREFIX: &str = "annotation/";
+pub const ANNOTATION_FIELD: &str = "note";
+
+pub fn annotation_record(id: &str) -> String {
+    format!("{ANNOTATION_PREFIX}{id}")
 }
 
 /// Names a Merge notice the same way on every Device, by the Moves involved.
@@ -171,6 +184,18 @@ pub struct Span {
     pub from: Option<CharId>,
 }
 
+impl Span {
+    /// As text, for a record's field (an Annotation's): "first..last".
+    pub fn to_text(&self) -> String {
+        format!("{}..{}", self.first, self.last)
+    }
+
+    /// From `to_text`; None if it isn't one.
+    pub fn parse(text: &str) -> Option<Span> {
+        let (first, last) = text.split_once("..")?;
+        Some(Span { first: first.parse().ok()?, last: last.parse().ok()?, from: None })
+    }
+}
 
 impl Change {
     pub fn order_key(&self) -> (Hlc, DeviceId) {

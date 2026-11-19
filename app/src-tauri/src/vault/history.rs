@@ -347,10 +347,18 @@ fn short_quote(text: &str) -> String {
 }
 
 fn notice_view(n: MergeNotice, doc: &Doc, name: &Namer) -> NoticeView {
+    // An Annotation changed on two Devices (ADR 0020): the notice quotes the version that lost.
+    let annotation = doc.concurrent_field(n.key)
+        .filter(|(record, _, _)| record.starts_with(wrtier::change::ANNOTATION_PREFIX))
+        .map(|(_, _, lost)| match serde_json::from_str::<super::annotations::Note>(&lost) {
+            Ok(note) => note.body,
+            Err(_) => "(deleted)".to_string(),
+        });
     let (kind, about, other) = match n.key {
         NoticeKey::Overlap { later, earlier } => ("overlap", later, Some(earlier)),
         NoticeKey::Loop { skipped } => ("loop", skipped, None),
         NoticeKey::UnknownTextFile { session } => ("externalEdit", session, None),
+        NoticeKey::ConcurrentField { later, earlier } if annotation.is_some() => ("annotation", later, Some(earlier)),
         NoticeKey::ConcurrentField { later, earlier } => ("preamble", later, Some(earlier)),
     };
     NoticeView {
@@ -359,7 +367,7 @@ fn notice_view(n: MergeNotice, doc: &Doc, name: &Namer) -> NoticeView {
         device: name(doc, about.device),
         time_ms: doc.made_at(about).map_or(0, |h| h.0),
         other_device: other.map(|o| name(doc, o.device)),
-        quote: short_quote(&n.text),
+        quote: annotation.unwrap_or_else(|| short_quote(&n.text)),
         places: n.places.iter().map(|(first, last)| FindView { first: first.to_string(), last: Some(last.to_string()) }).collect(),
     }
 }
@@ -640,7 +648,7 @@ mod tests {
             crate::work::ReplaceOpEdit { from: 4, to: 8, text: "snow".into() },
             crate::work::ReplaceOpEdit { from: 22, to: 26, text: "Snow".into() },
         ];
-        vault.edit("Rain", vec![Op::Replace { edits, find: "rain".into(), with: "snow".into(), count: 2 }], 4000).unwrap();
+        vault.edit("Rain", vec![Op::Replace { edits, find: "rain".into(), with: "snow".into(), count: 2, annotations: Vec::new() }], 4000).unwrap();
         let session = vault.history("Rain", 50, false, 5000).unwrap().sessions.remove(0);
         let shown = vault.snippets("Rain", &session.changes, false, 5000).unwrap();
         assert_eq!(shown.replacements.len(), 1);

@@ -2,7 +2,8 @@
 // Formatted view it matches the text as it reads, with hidden markup (`*`, `_`, backticks, `\`
 // escapes, heading marks, Story element brackets) skipped and `--`, `---` and `...` read as the
 // dashes and ellipsis they show; in the Raw view, every character as typed. No match runs across
-// a Story element's chip or brackets, or an Inclusion. Included text is searched too, as its
+// a Story element's chip or brackets, a Footnote's edges, or an Inclusion; a Footnote's own text
+// is searched like any other. Included text is searched too, as its
 // block shows it (the Raw view: its `#inclusion(…)` line), but never changed here.
 //
 // Case is ignored unless asked; straight and curly quotes and apostrophes always match each
@@ -12,9 +13,10 @@
 
 import { EditorState, StateEffect, StateField, type Extension, type Text } from "@codemirror/state";
 import { Decoration, EditorView } from "@codemirror/view";
-import { markupSpans, pairsIn, readingFields } from "./formatted";
+import { keepOpen, markupSpans, pairsIn, readingFields } from "./formatted";
 import { callAt, elementsFacet, type ElementInfo } from "./elements";
 import { INCLUSION, inclusionsOf, includedFinds, rawLine, type IncludedFind, type InclusionView } from "./inclusions";
+import type { AnnotationShown } from "./footnotes";
 
 export type Query = { text: string; matchCase: boolean; wholeWords: boolean };
 
@@ -173,6 +175,11 @@ export function readingOfState(state: EditorState): Reading {
         case "glyph":
           marks.glyph(span.from, span.to, span.glyph);
           break;
+        case "footnote":
+          // Its text is searched; a match never runs across its edges.
+          marks.set(span.open[0], span.open[1], STOP);
+          marks.set(span.close[0], span.close[1], STOP);
+          break;
         case "code": {
           // A Story element shows as a chip: a match stops there.
           const call = callAt(state.doc, span.from, span.to, elements);
@@ -242,7 +249,26 @@ export type FindMatch = {
   to: number;
   read: [number, number] | null;
   included: { at: number; from: number; to: number; label: string; work: string | null; starts: number } | null;
+  /**
+   * In the text of one of the Work's own Annotations (ADR 0020), shown in the Inclusion at `at`:
+   * where in its text as it reads (`read`), and its text as typed (`body`). `from` is the
+   * Inclusion's character.
+   */
+  annotation?: { at: number; id: string; body: string; read: [number, number] } | null;
 };
+
+/** The Work's own Annotations shown in an Inclusion (those on Annotations too). */
+function ownAnnotations(v: InclusionView): AnnotationShown[] {
+  const out: AnnotationShown[] = [];
+  const walk = (list: AnnotationShown[]) => {
+    for (const n of list) {
+      if (n.mine) out.push(n);
+      walk(n.notes);
+    }
+  };
+  walk(v.annotations ?? []);
+  return out;
+}
 
 /** What an Inclusion's block is searched as: its text as the block shows it, or its Raw view line. */
 function includedHaystack(v: InclusionView, raw: boolean): Reading {
@@ -259,6 +285,8 @@ export function findAll(state: EditorState, reading: Reading, query: Query, scop
     if (inScope(from, to)) out.push({ from, to, read: [a, b], included: null });
   }
   const raw = markupSpans(state) === null;
+  /** Where each match is inside its Inclusion, to put them in order there: in its text, or at an Annotation's number. */
+  const inner = new Map<FindMatch, number>();
   for (const v of inclusionsOf(state)) {
     if (v.missing && !raw) continue;
     if (!inScope(v.at, v.at + 1)) continue;
@@ -266,8 +294,18 @@ export function findAll(state: EditorState, reading: Reading, query: Query, scop
     for (const [a, b] of matchesIn(hay.text, query)) {
       out.push({ from: v.at, to: v.at + 1, read: null, included: { at: v.at, from: startOf(hay, a), to: endOf(hay, b), label: v.label.split(": ")[0] || v.label, work: v.work, starts: v.starts } });
     }
+    // The Work's own Annotations on the included text: their text, as it reads.
+    for (const n of raw ? [] : ownAnnotations(v)) {
+      const reading = annotationReading(n.body);
+      for (const [a, b] of matchesIn(reading.text, query)) {
+        const m: FindMatch = { from: v.at, to: v.at + 1, read: null, included: null, annotation: { at: v.at, id: n.id, body: n.body, read: [a, b] } };
+        inner.set(m, n.at);
+        out.push(m);
+      }
+    }
   }
-  return out.sort((x, y) => x.from - y.from || (x.included?.from ?? 0) - (y.included?.from ?? 0));
+  const within = (m: FindMatch) => m.included?.from ?? inner.get(m) ?? 0;
+  return out.sort((x, y) => x.from - y.from || within(x) - within(y));
 }
 
 // ---- Replacing ----
@@ -332,6 +370,41 @@ export function wordEdits(old: string, next: string): { from: number; to: number
   }
   flush();
   return edits;
+}
+
+/** An Annotation's text as it reads (its markup seen through), remembered by text. */
+const annotationReadings = new Map<string, Reading>();
+export function annotationReading(body: string): Reading {
+  let r = annotationReadings.get(body);
+  if (!r) {
+    r = readingOfText(body, []);
+    if (annotationReadings.size > 500) annotationReadings.clear();
+    annotationReadings.set(body, r);
+  }
+  return r;
+}
+
+/**
+ * The new text of each Annotation some matches are in, with each match replaced as in the
+ * Work's text (only the words that differ, markup kept).
+ */
+export function replacedAnnotations(matches: FindMatch[], replacement: string, matchCase: boolean): { id: string; body: string }[] {
+  const byId = new Map<string, { body: string; reads: [number, number][] }>();
+  for (const m of matches) {
+    if (!m.annotation) continue;
+    const entry = byId.get(m.annotation.id) ?? { body: m.annotation.body, reads: [] };
+    entry.reads.push(m.annotation.read);
+    byId.set(m.annotation.id, entry);
+  }
+  const out: { id: string; body: string }[] = [];
+  for (const [id, { body, reads }] of byId) {
+    const reading = annotationReading(body);
+    const edits = reads.flatMap((read) => replacementChanges(reading, { from: 0, to: 0, read, included: null }, replacement, matchCase));
+    let next = body;
+    for (const e of edits.sort((a, b) => b.from - a.from)) next = next.slice(0, e.from) + e.insert + next.slice(e.to);
+    if (next !== body) out.push({ id, body: next });
+  }
+  return out;
 }
 
 /** The changes to the editor's text that replace one own-text match, as a reader would expect. */
@@ -415,17 +488,32 @@ export const findField = StateField.define<FindState>({
 /** The matches in the editor's own text, highlighted (the current one more). */
 const highlights = EditorView.decorations.compute([findField], (state) => {
   const { matches, current } = state.field(findField);
-  const ranges = matches.flatMap((m, i) => (m.included || m.to <= m.from ? [] : [(i === current ? currentMark : matchMark).range(m.from, m.to)]));
+  const ranges = matches.flatMap((m, i) => (m.included || m.annotation || m.to <= m.from ? [] : [(i === current ? currentMark : matchMark).range(m.from, m.to)]));
   return Decoration.set(ranges, true);
 });
 const matchMark = Decoration.mark({ class: "cm-find-match" });
 const currentMark = Decoration.mark({ class: "cm-find-match cm-find-current" });
+
+/** The current match, if it's in a folded Footnote, opens it. */
+const openCurrent = keepOpen.compute([findField], (state) => {
+  const { matches, current } = state.field(findField);
+  const m = matches[current];
+  return m && !m.included ? [[m.from, m.to]] : [];
+});
 
 /** The matches inside each Inclusion, for its block to highlight. */
 const inIncluded = includedFinds.compute([findField], (state) => {
   const { matches, current } = state.field(findField);
   const out = new Map<number, IncludedFind>();
   matches.forEach((m, i) => {
+    if (m.annotation) {
+      // In an Annotation: its number is marked.
+      const entry = out.get(m.annotation.at) ?? { ranges: [], current: null };
+      entry.notes = [...new Set([...(entry.notes ?? []), m.annotation.id])];
+      if (i === current) entry.currentNote = m.annotation.id;
+      out.set(m.annotation.at, entry);
+      return;
+    }
     if (!m.included) return;
     const entry = out.get(m.included.at) ?? { ranges: [], current: null };
     entry.ranges.push([m.included.from, m.included.to]);
@@ -448,6 +536,7 @@ export function findExtension(): Extension {
     findField,
     highlights,
     inIncluded,
+    openCurrent,
     EditorView.updateListener.of((update) => {
       if (update.startState.field(findField) !== update.state.field(findField)) for (const l of listeners) l(update.view);
     }),

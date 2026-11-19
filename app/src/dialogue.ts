@@ -12,7 +12,7 @@
 // to it ("she said", "said the man"); a subject with any other verb after a closing quote is an
 // Action beat.
 
-import { BREAK, paragraphsOf, readPara, type Para } from "./prose";
+import { BREAK, passagesOf, readPara, type Para } from "./prose";
 
 /** How sure a Mark is (CONTEXT.md): a Mistake (red), a Rule break (yellow) or a Query (blue). */
 export type Level = "mistake" | "rule" | "query";
@@ -353,8 +353,15 @@ export class DialogueChecker {
 
   /** Every finding in the Work's text as it is now. */
   check(source: string): Finding[] {
-    const ranges = paragraphsOf(source);
+    // Paragraphs, and each Footnote's text as a paragraph of its own (prose.ts).
+    const ranges = passagesOf(source);
     const texts = ranges.map((r) => source.slice(r.start, r.end));
+    /** The paragraph after passage `i`: the next one that isn't a Footnote; a Footnote has none. */
+    const after = (i: number) => {
+      if (ranges[i].note) return -1;
+      for (let j = i + 1; j < ranges.length; j++) if (!ranges[j].note) return j;
+      return -1;
+    };
     this.readCount = 0;
     this.checkCount = 0;
 
@@ -378,8 +385,9 @@ export class DialogueChecker {
     const out: Finding[] = [];
     ranges.forEach((r, i) => {
       const text = texts[i];
-      const nextAt = i + 1 < ranges.length ? ranges[i + 1].start - r.start : -1;
-      const nextKey = nextAt === -1 ? "" : `${nextAt}\u0001${texts[i + 1]}`;
+      const n = after(i);
+      const nextAt = n !== -1 ? ranges[n].start - r.start : -1;
+      const nextKey = nextAt === -1 ? "" : `${nextAt}\u0001${texts[n]}`;
       let done = checks.get(text) ?? this.checks.get(text);
       const fresh = done && (done.next === null || done.next === nextKey)
         && [...done.asked].every(([w, was]) => names.has(w) === was);
@@ -389,7 +397,7 @@ export class DialogueChecker {
         let next: string | null = null;
         const nextPara = () => {
           next = nextKey;
-          return nextAt === -1 ? null : shiftPara(read(texts[i + 1]).para, nextAt);
+          return nextAt === -1 ? null : shiftPara(read(texts[n]).para, nextAt);
         };
         this.checkCount++;
         const findings: Finding[] = [];

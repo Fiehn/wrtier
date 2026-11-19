@@ -10,6 +10,7 @@
 // runs to the next entry, so text written after it goes with it when it's moved.
 
 import { wordsIn } from "./counts";
+import { withoutFootnotes } from "./footnotes";
 
 export type Item = {
   kind: "chapter" | "part";
@@ -34,9 +35,9 @@ export type MoveOp = { from: number; to: number; at: number };
 
 const PART = /^#part\s*[[(]/;
 
-/** A heading's title as shown in the list: its markup taken off. */
+/** A heading's title as shown in the list: its markup and any Footnote in it taken off. */
 function plainTitle(raw: string): string {
-  return raw.replace(/[*_`]/g, "").replace(/\\(.)/g, "$1").trim();
+  return withoutFootnotes(raw).replace(/[*_`]/g, "").replace(/\\(.)/g, "$1").trim();
 }
 
 /** A Part's title: what's in its brackets on that line, or "Part". */

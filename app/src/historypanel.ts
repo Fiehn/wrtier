@@ -38,7 +38,7 @@ export type SessionRow = {
 export type MilestoneRow = { id: string; name: string; timeMs: number; deleted: boolean; device: string };
 export type NoticeView = {
   key: string;
-  kind: "overlap" | "loop" | "externalEdit" | "preamble";
+  kind: "overlap" | "loop" | "externalEdit" | "preamble" | "annotation";
   device: string;
   timeMs: number;
   otherDevice: string | null;
@@ -240,6 +240,10 @@ export function noticeLine(n: NoticeView): string {
     case "preamble": {
       const who = n.otherDevice === null || n.otherDevice === n.device ? `twice on ${n.device}` : `on ${n.otherDevice} and on ${n.device}`;
       return `The Preamble's raw Typst was edited ${who} without either seeing the other's edit. ${n.device}'s, the later one, is used; the other version is in the Preamble dialog, and saving the dialog settles it.`;
+    }
+    case "annotation": {
+      const who = n.otherDevice === null || n.otherDevice === n.device ? `twice on ${n.device}` : `on ${n.otherDevice} and on ${n.device}`;
+      return `An Annotation was changed ${who} without either seeing the other's change. ${n.device}'s, the later one, is used. The other version read: “${n.quote}”`;
     }
   }
 }

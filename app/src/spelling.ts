@@ -10,7 +10,7 @@
 // markup inside it included, so a Suggestion edits the real source and leaves the markup be.
 
 import type { Text } from "@codemirror/state";
-import { BREAK, paragraphsOf, readPara, type Para, type Reading } from "./prose";
+import { BREAK, notesOf, passagesOf, readPara, splitAtSeams, type Para, type Reading } from "./prose";
 
 const READING: Reading = { headings: true, elements: true };
 
@@ -41,23 +41,24 @@ function sentenceStartsAt(text: string, at: number): boolean {
 function wordsOfPara(p: Para, out: SpellWord[]) {
   WORD.lastIndex = 0;
   for (let m = WORD.exec(p.text); m; m = WORD.exec(p.text)) {
-    const text = m[0];
-    if (DIGIT.test(text)) continue;
-    const at = m.index;
-    const end = at + text.length;
-    out.push({
-      from: p.from[at],
-      to: p.to[end - 1],
-      word: plain(text),
-      midSentence: isUpper(text[0]) && !sentenceStartsAt(p.text, at),
-    });
+    // A word never runs across a Footnote (prose.ts): `word#footnote[…]s` is two.
+    for (const [at, end] of splitAtSeams(p, m.index, m.index + m[0].length)) {
+      const text = p.text.slice(at, end);
+      if (DIGIT.test(text) || !/[\p{L}\p{M}\p{N}]/u.test(text)) continue;
+      out.push({
+        from: p.from[at],
+        to: p.to[end - 1],
+        word: plain(text),
+        midSentence: isUpper(text[0]) && !sentenceStartsAt(p.text, at),
+      });
+    }
   }
 }
 
-/** The words of a Work's text to check, in reading order. */
+/** The words of a Work's text to check, in reading order (each Footnote's after its paragraph's). */
 export function wordsOf(source: string): SpellWord[] {
   const out: SpellWord[] = [];
-  for (const r of paragraphsOf(source)) wordsOfPara(readPara(source, r.start, r.end, READING), out);
+  for (const r of passagesOf(source)) wordsOfPara(readPara(source, r.start, r.end, READING), out);
   return out;
 }
 
@@ -161,6 +162,9 @@ function paraAt(doc: Text, pos: number): Para {
   let last = doc.lineAt(pos);
   while (last.number < doc.lines && doc.line(last.number + 1).text.trim() !== "") last = doc.line(last.number + 1);
   const source = doc.sliceString(0, last.to);
+  // In a Footnote: its text, read apart (the innermost one holding `pos`).
+  const note = notesOf(source, first.from, last.to).filter((n) => n.start <= pos && pos <= n.end).pop();
+  if (note) return readPara(source, note.start, note.end, READING);
   return readPara(source, first.from, last.to, READING);
 }
 

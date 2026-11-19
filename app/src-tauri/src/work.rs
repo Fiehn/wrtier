@@ -65,6 +65,9 @@ pub enum Op {
     Comment { from: usize, to: usize, sender: String, body: String, #[serde(skip)] sender_name: Option<String> },
     /// A new Work comment: on the Work as a whole, not on any of its text.
     WorkComment { sender: String, body: String, #[serde(skip)] sender_name: Option<String> },
+    /// A new Comment on one of the Work's Annotations as a whole (ADR 0020); `quote`: what of
+    /// its text it's about.
+    AnnotationComment { annotation: String, quote: String, sender: String, body: String, #[serde(skip)] sender_name: Option<String> },
     Reply { comment: String, sender: String, body: String, #[serde(skip)] sender_name: Option<String> },
     /// A new body for a Comment or Reply.
     EditComment { id: String, body: String },
@@ -102,7 +105,16 @@ pub enum Op {
     /// (`edits`, in the text as it was before any of them, not overlapping), as one action that
     /// Ctrl+Z takes back whole. `find`, `with` and `count` say what it was, for the History view.
     /// The open burst closes first.
-    Replace { edits: Vec<ReplaceOpEdit>, find: String, with: String, count: usize },
+    /// `annotations`: matches replaced in the Work's Annotations (ADR 0020), each one's new text,
+    /// in the same action.
+    Replace { edits: Vec<ReplaceOpEdit>, find: String, with: String, count: usize, #[serde(default)] annotations: Vec<AnnotationEdit> },
+}
+
+/// An Annotation's new text, from an `Op::Replace`.
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AnnotationEdit {
+    pub id: String,
+    pub body: String,
 }
 
 /// One word-level edit of an `Op::Replace`: `from..to` (UTF-16) becomes `text`.
@@ -117,7 +129,7 @@ impl Op {
     /// The Reviewer a Comment op names, for the Vault to fill in their name.
     pub fn sender_mut(&mut self) -> Option<(&str, &mut Option<String>)> {
         match self {
-            Op::Comment { sender, sender_name, .. } | Op::WorkComment { sender, sender_name, .. } | Op::Reply { sender, sender_name, .. }
+            Op::Comment { sender, sender_name, .. } | Op::WorkComment { sender, sender_name, .. } | Op::AnnotationComment { sender, sender_name, .. } | Op::Reply { sender, sender_name, .. }
             | Op::SetCommentSender { sender, sender_name, .. } => {
                 Some((sender.as_str(), sender_name))
             }
@@ -169,6 +181,10 @@ pub struct CommentHighlight {
     pub ranges: Vec<(usize, usize)>,
     /// A Work comment: on the Work as a whole, with no text and no quote.
     pub on_work: bool,
+    /// On one of the Work's Annotations as a whole (its ID), with no text; `annotation_gone`:
+    /// that Annotation is deleted, so it's a Detached comment until it's back.
+    pub on_annotation: Option<String>,
+    pub annotation_gone: bool,
     /// `author` or `reviewer/<id>`.
     pub sender: String,
     /// Who sent it, as the app shows them, and their colour slot (or "author", or "unknown").
@@ -193,6 +209,8 @@ pub fn highlight(c: wrtier::doc::CommentView, ranges: Vec<(usize, usize)>) -> Co
         id: c.id.to_string(),
         ranges,
         on_work: c.on_work,
+        on_annotation: c.on_annotation.clone(),
+        annotation_gone: false,
         sender: c.sender,
         name: String::new(),
         colour: String::new(),
@@ -528,6 +546,10 @@ impl OpenWork {
         comments.into_iter().map(|c| {
             let ranges = c.ranges.iter().map(|&(from, to)| (self.positions.to_utf16(from), self.positions.to_utf16(to))).collect();
             let mut highlight = highlight(c, ranges);
+            if let Some(annotation) = &highlight.on_annotation {
+                let record = wrtier::change::annotation_record(annotation);
+                highlight.annotation_gone = self.doc.field(&record, wrtier::change::ANNOTATION_FIELD).is_none_or(str::is_empty);
+            }
             highlight.other_body = other.get(&highlight.id).cloned();
             for reply in &mut highlight.replies {
                 reply.other_body = other.get(&reply.id).cloned();
@@ -580,6 +602,17 @@ impl OpenWork {
             Op::WorkComment { sender, body, sender_name } => {
                 self.record_sender(&sender, sender_name.as_deref(), now_ms);
                 self.doc.work_comment_local(&sender, &body, now_ms)
+            }
+            Op::AnnotationComment { annotation, quote, sender, body, sender_name } => {
+                let record = wrtier::change::annotation_record(&annotation);
+                if self.doc.field(&record, wrtier::change::ANNOTATION_FIELD).is_none_or(str::is_empty) {
+                    return Err("That Annotation isn't there any more.".into());
+                }
+                self.record_sender(&sender, sender_name.as_deref(), now_ms);
+                let mut changes = self.doc.annotation_comment_local(&annotation, &quote, &sender, &body, now_ms);
+                let last = changes.pop().expect("a Comment and what it's on");
+                self.unsaved.extend(changes);
+                last
             }
             Op::Reply { comment, sender, body, sender_name } => {
                 let comment = self.comment_id(&comment, false)?;
@@ -734,6 +767,16 @@ impl OpenWork {
             self.unsaved.push(change);
         }
         true
+    }
+
+    /// Sets an Annotation's note (ADR 0020; empty: deleted): the Author's edit, one Change,
+    /// which undo takes back like typing. The open burst closes first.
+    pub fn set_annotation(&mut self, record: &str, field: &str, value: &str, now_ms: u64) {
+        self.close_burst(now_ms);
+        let change = self.doc.set_field_local(record, field, value, now_ms);
+        self.sitting.push(change.id);
+        self.unsaved.push(change);
+        self.authored();
     }
 
     /// Records the library files it uses that changed (or were never recorded) now, whether or
@@ -1060,7 +1103,7 @@ impl OpenWork {
                 }
                 self.stretch_answer = Some(answer);
             }
-            Op::Replace { edits, find, with, count } => {
+            Op::Replace { edits, find, with, count, annotations } => {
                 self.authored();
                 self.close_burst(now_ms);
                 let mut chars = Vec::with_capacity(edits.len());
@@ -1073,7 +1116,20 @@ impl OpenWork {
                 if sorted.windows(2).any(|w| w[0].index + w[0].len > w[1].index) {
                     return Err("a replacement whose parts overlap".into());
                 }
-                let changes = self.doc.replace_matches_local(&chars, &find, &with, count, now_ms);
+                // Annotations whose text changed too: their notes with the new text.
+                let fields: Vec<(String, String, String)> = annotations.iter().filter_map(|a| {
+                    let record = wrtier::change::annotation_record(&a.id);
+                    let value = self.doc.field(&record, wrtier::change::ANNOTATION_FIELD)?;
+                    let note = crate::vault::note_with_body(value, &a.body)?;
+                    Some((record, wrtier::change::ANNOTATION_FIELD.to_string(), note))
+                }).collect();
+                let changes = self.doc.replace_and_set_local(&chars, &fields, &find, &with, count, now_ms);
+                // Undo goes back through the Annotations' Changes too (a Replace only in them).
+                for change in &changes {
+                    if matches!(&change.kind, ChangeKind::SetField { record, .. } if record.starts_with(wrtier::change::ANNOTATION_PREFIX)) {
+                        self.sitting.push(change.id);
+                    }
+                }
                 self.recorded(changes);
                 // Last first, so each one's place still holds.
                 for e in sorted.iter().rev() {
@@ -1090,7 +1146,7 @@ impl OpenWork {
                 let changes = target.record(&mut self.doc, *id, now_ms);
                 self.unsaved.extend(changes);
             }
-            op @ (Op::Comment { .. } | Op::WorkComment { .. } | Op::Reply { .. } | Op::EditComment { .. } | Op::SetCommentSender { .. }
+            op @ (Op::Comment { .. } | Op::WorkComment { .. } | Op::AnnotationComment { .. } | Op::Reply { .. } | Op::EditComment { .. } | Op::SetCommentSender { .. }
                 | Op::Resolve { .. } | Op::DeleteComment { .. }) => self.apply_comment_op(op, now_ms)?,
             op @ (Op::Revert { .. } | Op::Restore { .. } | Op::ReturnTo { .. }) => self.apply_history_op(op, now_ms)?,
         }
@@ -1653,7 +1709,7 @@ mod tests {
 
     fn replace_op(edits: &[(usize, usize, &str)], find: &str, with: &str, count: usize) -> Op {
         let edits = edits.iter().map(|&(from, to, text)| ReplaceOpEdit { from, to, text: text.into() }).collect();
-        Op::Replace { edits, find: find.into(), with: with.into(), count }
+        Op::Replace { edits, find: find.into(), with: with.into(), count, annotations: Vec::new() }
     }
 
     #[test]

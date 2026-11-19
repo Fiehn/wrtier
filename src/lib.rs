@@ -6,5 +6,6 @@ pub mod storage;
 pub mod layout;
 pub mod text_file;
 pub mod conflicts;
+pub mod footnotes;
 #[doc(hidden)]
 pub mod reference; // the slow, simple version the fast one is tested against

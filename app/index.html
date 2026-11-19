@@ -121,6 +121,7 @@
           <button type="button" data-command="redo" aria-label="Redo" title="Redo">↷</button>
           <button type="button" data-command="strong" aria-label="Bold" title="Bold"><b>B</b></button>
           <button type="button" data-command="emph" aria-label="Italic" title="Italic"><i>I</i></button>
+          <button type="button" data-command="footnote" title="Insert a footnote">Note</button>
           <button type="button" data-command="addComment" title="Add a Comment on the selection">Comment</button>
           <button type="button" data-command="textHistory" title="History of the selection, or the paragraph">History</button>
           <button type="button" id="toolbar-view" title="Formatted or Raw view">Raw</button>
@@ -147,14 +148,15 @@
         <div id="reading-card" class="reading-card" role="dialog" aria-label="Comments" hidden></div>
       </aside>
 
-      <!-- The panel beside the editor: the Page preview, the Comments and the History, one tab
-           at a time. Shown and hidden as a whole. -->
+      <!-- The panel beside the editor: the Page preview, the Comments, the Footnotes (only while
+           the Work has any) and the History, one tab at a time. Shown and hidden as a whole. -->
       <div id="panel-resizer" class="resizer" role="separator" aria-orientation="vertical" aria-controls="side-panel" aria-label="Width of the side panel" tabindex="0" title="Drag to change the width, or drag all the way to hide. Double-click for the default width." hidden></div>
       <aside id="side-panel" hidden>
         <header class="panel-tabs">
           <div role="tablist" aria-label="Panel">
             <button id="panel-tab-pages" type="button" role="tab" aria-controls="preview" data-tab="pages">Pages</button>
             <button id="panel-tab-comments" type="button" role="tab" aria-controls="comments-pane" data-tab="comments">Comments</button>
+            <button id="panel-tab-footnotes" type="button" role="tab" aria-controls="footnotes-pane" data-tab="footnotes" hidden>Footnotes</button>
             <button id="panel-tab-history" type="button" role="tab" aria-controls="history-pane" data-tab="history">History</button>
           </div>
           <button id="panel-close" type="button" class="link" title="Hide the panel (Ctrl+Shift+P)">Hide</button>
@@ -176,6 +178,9 @@
           <div id="comments-new" hidden></div>
           <div id="comments-list"></div>
         </section>
+        <section id="footnotes-pane" role="tabpanel" aria-labelledby="panel-tab-footnotes" hidden>
+          <div id="footnotes-list"></div>
+        </section>
         <section id="history-pane" role="tabpanel" aria-labelledby="panel-tab-history" hidden>
           <header class="history-header">
             <label class="check" title="Tint the text the last 5 Sessions wrote, the newest strongest (only on this Device)"><input type="checkbox" id="history-tint" /> Colour text by Session</label>
@@ -193,6 +198,7 @@
         <button type="button" data-screen="read" id="phone-read" hidden>Read</button>
         <button type="button" data-screen="pages">Pages</button>
         <button type="button" data-screen="comments">Comments</button>
+        <button type="button" data-screen="footnotes" id="phone-footnotes" hidden>Footnotes</button>
         <button type="button" data-screen="history">History</button>
       </nav>
     </div>

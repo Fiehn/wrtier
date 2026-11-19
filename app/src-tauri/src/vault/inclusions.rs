@@ -23,6 +23,7 @@ use crate::library::Kind;
 use crate::preamble::{self, Preamble, Shelf, Version};
 use crate::work::{CommentHighlight, Op, OpenWork};
 use super::{err, file_stamp, walk_works, Vault};
+use super::annotations::{annotations_of, on_note, printed, Ann, NoteShown};
 
 /// A Work's version: the highest Change counter it holds from each Device.
 pub type VersionOf = Vec<(DeviceId, u32)>;
@@ -128,6 +129,12 @@ pub struct Shown {
     pub author: String,
     /// A new Chapter found right after the included one (see `Target::next`), if one.
     pub split: Option<SplitNote>,
+    /// Where each Work's own text is in `plain`, at any depth of Inclusions: runs of (start in
+    /// `plain`, start in that Work's `committed_text`, length) in characters, and that Work's ID.
+    pub all_runs: Vec<(usize, usize, usize, String)>,
+    /// The Annotations printed in the included text (ADR 0020), by the Works around it, places
+    /// in `plain` (UTF-16), in the order they print.
+    pub notes: Vec<NoteShown>,
 }
 
 /// What working out Inclusions reads from.
@@ -200,13 +207,27 @@ impl<'a> Ctx<'a> {
 /// The Inclusions in `doc`, worked out, in reading order. `stack`: the IDs of the Works being
 /// worked out around it (itself last), so a Work that would include itself shows a placeholder.
 pub(super) fn expand(ctx: &mut Ctx, doc: &Doc, stack: &mut Vec<String>) -> Vec<Shown> {
-    doc.inclusions().into_iter().map(|(at, index)| shown(ctx, doc, at, index, stack)).collect()
+    expand_with(ctx, doc, stack, &[])
 }
 
-fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut Vec<String>) -> Shown {
+/// `expand`, with the Annotations of the Works around `doc` (`around`), which print on the text
+/// of the Works it includes too.
+fn expand_with(ctx: &mut Ctx, doc: &Doc, stack: &mut Vec<String>, around: &[Ann]) -> Vec<Shown> {
+    let inclusions = doc.inclusions();
+    if inclusions.is_empty() {
+        return Vec::new();
+    }
+    let owner = stack.last().cloned().unwrap_or_default();
+    let mut notes = around.to_vec();
+    notes.extend(annotations_of(doc, &owner));
+    inclusions.into_iter().map(|(at, index)| shown(ctx, doc, at, index, stack, &notes)).collect()
+}
+
+fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut Vec<String>, notes: &[Ann]) -> Shown {
     let mut s = Shown {
         at, index, target: Target::of(including, at), name: None, label: "An Inclusion".into(), chapter: None,
         missing: None, plain: String::new(), typst: String::new(), version: None, language: String::new(), elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), in_typst: Vec::new(), author: String::new(), split: None,
+        all_runs: Vec::new(), notes: Vec::new(),
     };
     let result = (|| {
         let target = s.target.clone().ok_or("This Inclusion has lost what it includes.")?;
@@ -261,8 +282,22 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
             }
         };
         stack.push(target.work.clone());
-        let all_nested = expand(ctx, &doc, stack);
+        let all_nested = expand_with(ctx, &doc, stack, notes);
         stack.pop();
+        // The Annotations on this Work's text here: each printed after the last of its
+        // characters shown (ADR 0020), by where it ends; those on Annotations go in theirs.
+        let mut ends: HashMap<usize, Vec<(&Ann, Vec<usize>)>> = HashMap::new();
+        for ann in notes.iter().filter(|a| a.note.work == target.work && !a.spans.is_empty()) {
+            let covered: Vec<usize> = doc.covered(&ann.spans).into_iter()
+                .filter(|&i| i >= from && i < to && chars[i] != INCLUSION)
+                .collect();
+            if let Some(&last) = covered.last() {
+                ends.entry(last).or_default().push((ann, covered));
+            }
+        }
+        // Where each of this Work's characters is in `plain` (UTF-16), to say what they cover.
+        let mut placed_at: HashMap<usize, (usize, usize)> = HashMap::new();
+        let mut placed: Vec<(&Ann, Vec<usize>, usize)> = Vec::new();
         let nested: Vec<&Shown> = all_nested.iter().filter(|n| n.index >= from && n.index < to).collect();
         let (mut plain, mut typst) = (String::new(), String::new());
         let mut plain_len = 0; // in characters
@@ -277,6 +312,10 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
                         Some(why) => format!("[{}: {why}]", n.label),
                         None => n.plain.clone(),
                     };
+                    if n.missing.is_none() {
+                        s.all_runs.extend(n.all_runs.iter().map(|(p, b, len, w)| (p + plain_len, *b, *len, w.clone())));
+                        s.notes.extend(n.notes.iter().map(|note| shifted(note, plain_u16)));
+                    }
                     plain_len += inner.chars().count();
                     plain_u16 += inner.encode_utf16().count();
                     plain.push_str(&inner);
@@ -295,14 +334,41 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
                         Some((p, t, len)) if *p + *len == plain_u16 && *t + *len == typst_u16 => *len += c.len_utf16(),
                         _ => in_typst.push((plain_u16, typst_u16, c.len_utf16())),
                     }
+                    placed_at.insert(i, (plain_u16, plain_u16 + c.len_utf16()));
                     plain_u16 += c.len_utf16();
                     typst_u16 += c.len_utf16();
                     plain.push(c);
                     typst.push(c);
+                    // Annotations ending here: their footnotes, right after it.
+                    if let Some(here) = ends.remove(&i) {
+                        for (ann, covered) in here {
+                            let footnote = format!("#footnote[{}]", printed(ann, notes, 0));
+                            typst_u16 += footnote.encode_utf16().count();
+                            typst.push_str(&footnote);
+                            placed.push((ann, covered, plain_u16));
+                        }
+                    }
                 }
             }
         }
         s.comments = comments_in(&doc, &plain, &runs);
+        s.all_runs.extend(runs.iter().map(|&(p, b, len)| (p, b, len, target.work.clone())));
+        s.all_runs.sort_by_key(|r| r.0);
+        for (ann, covered, at) in placed {
+            let mut ranges: Vec<(usize, usize)> = Vec::new();
+            for (a, b) in covered.iter().filter_map(|i| placed_at.get(i).copied()) {
+                match ranges.last_mut() {
+                    Some((_, end)) if *end == a => *end = b,
+                    _ => ranges.push((a, b)),
+                }
+            }
+            s.notes.push(NoteShown {
+                id: ann.id.clone(), owner: ann.owner.clone(), owner_label: String::new(), mine: false, at, ranges,
+                body: ann.note.body.clone(), quote: ann.note.quote.clone(), notes: on_note(ann, notes, at, 0),
+            });
+        }
+        // In the order they print: by place (a stable sort keeps the order they were placed in).
+        s.notes.sort_by_key(|n| n.at);
         s.runs = runs;
         s.author = preamble.author.clone();
         let mode = if ctx.recorded { Version::Recorded } else { Version::Library };
@@ -391,7 +457,7 @@ pub(super) fn comments_in(doc: &Doc, plain: &str, runs: &[(usize, usize, usize)]
         }
         let id = c.id.to_string();
         Some(crate::work::CommentHighlight {
-            id, ranges, on_work: false, sender: c.sender, name: String::new(), colour: String::new(), body: c.body,
+            id, ranges, on_work: false, on_annotation: None, annotation_gone: false, sender: c.sender, name: String::new(), colour: String::new(), body: c.body,
             resolved: c.resolved, quote: c.quote, time_ms: c.hlc.0, other_body: None,
             replies: c.replies.into_iter().map(|r| crate::work::CommentReply {
                 id: r.id.to_string(), sender: r.sender, name: String::new(), colour: String::new(),
@@ -495,7 +561,7 @@ pub fn typst_body(text: &str, shown: &[Shown]) -> (String, Vec<(usize, usize)>) 
 
 /// The Inclusion whose character is at `at` (UTF-16) in `text` (the editor's text, which may
 /// hold the open burst), matched in order to `shown`.
-fn inclusion_at<'a>(text: &str, at: usize, shown: &'a [Shown]) -> Option<&'a Shown> {
+pub(super) fn inclusion_at<'a>(text: &str, at: usize, shown: &'a [Shown]) -> Option<&'a Shown> {
     let mut utf16 = 0;
     let mut k = 0;
     for c in text.chars() {
@@ -508,6 +574,16 @@ fn inclusion_at<'a>(text: &str, at: usize, shown: &'a [Shown]) -> Option<&'a Sho
         utf16 += c.len_utf16();
     }
     None
+}
+
+/// An Annotation shown in an Inclusion inside this one, with its places moved by `by` (UTF-16).
+fn shifted(note: &NoteShown, by: usize) -> NoteShown {
+    NoteShown {
+        at: note.at + by,
+        ranges: note.ranges.iter().map(|&(a, b)| (a + by, b + by)).collect(),
+        notes: note.notes.iter().map(|n| shifted(n, by)).collect(),
+        ..note.clone()
+    }
 }
 
 /// What the Text file writes out for each Inclusion.
@@ -584,6 +660,9 @@ pub struct InclusionView {
     pub split: Option<SplitNote>,
     /// Styles given to this Inclusion only.
     pub styles: Vec<String>,
+    /// The Annotations printed in the included text (by this Work, and by the Works it
+    /// includes), places in `text` (UTF-16), in the order they print.
+    pub annotations: Vec<NoteShown>,
 }
 
 /// A new Chapter right after an included one, not included: the included Chapter was split, or
@@ -622,6 +701,7 @@ pub fn views(text: &str, shown: &[Shown]) -> Vec<InclusionView> {
                     comments: s.comments.clone(),
                     split: s.split.clone(),
                     styles: s.target.as_ref().map(|t| t.styles.clone()).unwrap_or_default(),
+                    annotations: s.notes.clone(),
                 });
             }
         }
@@ -801,6 +881,10 @@ impl Vault {
                 }
             }
         }
+        let me = self.works.get(&self.current_id(id)).and_then(|w| w.identity()).unwrap_or_default().to_string();
+        for s in &mut shown {
+            self.name_owners(&mut s.notes, &me);
+        }
         let work = self.works.get(&self.current_id(id)).ok_or_else(|| format!("{id} isn't open."))?;
         Ok(views(&work.text(), &shown))
     }
@@ -945,7 +1029,7 @@ impl Vault {
         let mut at = 0;
         for line in text.split_inclusive('\n') {
             if let Some(title) = line.strip_prefix("= ") {
-                let title = title.trim().replace(['*', '_', '`'], "");
+                let title = wrtier::footnotes::without_footnotes(title).trim().replace(['*', '_', '`'], "");
                 found.push(ChapterChoice { title: if title.is_empty() { "Untitled".into() } else { title }, at });
             }
             at += line.encode_utf16().count();
@@ -1285,6 +1369,192 @@ mod tests {
         assert_eq!(views[0].comments[1].ranges, vec![(went, went + 4)]);
     }
 
+    #[test]
+    fn an_annotation_prints_as_a_footnote_on_included_text_and_lives_in_the_including_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        let from = RAIN.find("rain had").unwrap();
+        let ann = v.annotate("Collected", 18, from, from + 8, "Truant on _this_.", 12_000).unwrap();
+        // Shown on the Inclusion, after what it covers, as this Work's own.
+        let views = v.inclusions("Collected").unwrap();
+        let note = &views[0].annotations[0];
+        assert_eq!((note.id.as_str(), note.at, note.ranges.clone(), note.mine), (ann.as_str(), from + 8, vec![(from, from + 8)], true));
+        assert_eq!((note.quote.as_str(), note.body.as_str(), note.owner_label.as_str()), ("rain had", "Truant on _this_.", "Collected"));
+        // Printed right there, and it compiles.
+        let (body, header, blocks) = v.typeset_input("Collected", None, 12_100).unwrap();
+        assert!(body.contains("The rain had#footnote[Truant on _this_.] stopped."), "{body}");
+        compiles(&header, body, blocks);
+        // Kept in "Collected", not in "Rain".
+        let rain = storage::load(&dir.path().join("Rain.db"), crate::vault::tests_support::ME).unwrap().1;
+        assert!(rain.records("annotation/").is_empty());
+        // Changed, then undone: it reads as before; undone again, it's gone.
+        v.set_annotation_body("Collected", &ann, "Changed.", 13_000).unwrap();
+        assert_eq!(v.inclusions("Collected").unwrap()[0].annotations[0].body, "Changed.");
+        v.edit("Collected", vec![Op::Undo], 13_100).unwrap();
+        assert_eq!(v.inclusions("Collected").unwrap()[0].annotations[0].body, "Truant on _this_.");
+        v.edit("Collected", vec![Op::Undo], 13_200).unwrap();
+        assert!(v.inclusions("Collected").unwrap()[0].annotations.is_empty());
+        // And redone.
+        v.edit("Collected", vec![Op::Redo], 13_300).unwrap();
+        assert_eq!(v.inclusions("Collected").unwrap()[0].annotations.len(), 1);
+        // Brackets that don't pair up are refused.
+        assert!(v.set_annotation_body("Collected", &ann, "a ] b", 13_400).is_err());
+        // Deleted: gone, and not detached.
+        v.delete_annotation("Collected", &ann, 13_500).unwrap();
+        assert!(v.inclusions("Collected").unwrap()[0].annotations.is_empty());
+        assert!(v.detached_annotations("Collected").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_annotation_follows_its_text_and_detaches_while_it_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        let went = RAIN.find("went home").unwrap();
+        let ann = v.annotate("Collected", 18, went, went + 9, "Where?", 12_000).unwrap();
+        // Text typed before it in "Rain" moves it along.
+        v.open_work("Rain", 13_000).unwrap();
+        v.edit("Rain", vec![typing(0, "Prologue. ")], 13_100).unwrap();
+        v.tick(30_000);
+        assert_eq!(v.inclusions("Collected").unwrap()[0].annotations[0].at, went + 9 + 10);
+        // All of its text deleted in "Rain": detached, not printed, listed with its quote.
+        let at = 10 + went;
+        v.edit("Rain", vec![Op::Delete { from: at, to: at + 9, origin: Origin::Input }], 31_000).unwrap();
+        v.tick(60_000);
+        assert!(v.inclusions("Collected").unwrap()[0].annotations.is_empty());
+        let (body, _, _) = v.typeset_input("Collected", None, 61_000).unwrap();
+        assert!(!body.contains("Where?"));
+        let detached = v.detached_annotations("Collected").unwrap();
+        assert_eq!(detached.len(), 1);
+        assert_eq!((detached[0].id.as_str(), detached[0].quote.as_str(), detached[0].label.as_str()), (ann.as_str(), "went home", "Rain"));
+        // The deletion undone in "Rain": attached again.
+        v.edit("Rain", vec![Op::Undo], 62_000).unwrap();
+        assert_eq!(v.inclusions("Collected").unwrap()[0].annotations.len(), 1);
+        assert!(v.detached_annotations("Collected").unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_an_inclusion_detaches_its_annotations_and_including_again_reattaches_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        let from = RAIN.find("rain").unwrap();
+        v.annotate("Collected", 18, from, from + 4, "Rain, of course.", 12_000).unwrap();
+        v.edit("Collected", vec![Op::Delete { from: 18, to: 19, origin: Origin::Input }], 13_000).unwrap();
+        v.tick(30_000);
+        assert_eq!(v.detached_annotations("Collected").unwrap().len(), 1);
+        include(&mut v, "Collected", 18, "Rain", None, 31_000);
+        assert!(v.detached_annotations("Collected").unwrap().is_empty());
+        assert_eq!(v.inclusions("Collected").unwrap()[0].annotations[0].body, "Rain, of course.");
+    }
+
+    #[test]
+    fn annotations_print_where_their_work_is_included_and_can_be_annotated_from_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        let from = RAIN.find("stopped").unwrap();
+        let truant = v.annotate("Collected", 18, from, from + 7, "Truant on Zampano.", 12_000).unwrap();
+        v.tick(30_000);
+        v.close_work("Collected", 31_000);
+        // "Book" includes "Collected", which includes "Rain".
+        v.create_work("Book", 32_000).unwrap();
+        v.edit("Book", vec![typing(0, "Editors.\n\n")], 32_100).unwrap();
+        v.tick(50_000);
+        include(&mut v, "Book", 10, "Collected", None, 51_000);
+        let views = v.inclusions("Book").unwrap();
+        let shown = &views[0];
+        let note = &shown.annotations[0];
+        assert_eq!((note.body.as_str(), note.mine, note.owner_label.as_str()), ("Truant on Zampano.", false, "Collected"));
+        assert_eq!(&shown.text[note.ranges[0].0..note.ranges[0].1], "stopped");
+        // The Editors on Zampano's words, two Inclusions down.
+        let went = shown.text.find("went").unwrap();
+        v.annotate("Book", 10, went, went + 4, "Editors on Zampano.", 52_000).unwrap();
+        // And on Truant's note itself, printed at the end of its footnote.
+        let owner = note.owner.clone();
+        v.annotate_annotation("Book", &owner, &truant, "Editors on Truant.", 53_000).unwrap();
+        let views = v.inclusions("Book").unwrap();
+        let notes = &views[0].annotations;
+        assert_eq!(notes.iter().map(|n| n.body.as_str()).collect::<Vec<_>>(), vec!["Truant on Zampano.", "Editors on Zampano."]);
+        assert_eq!(notes[0].notes[0].body, "Editors on Truant.");
+        assert!(notes[1].mine && notes[0].notes[0].owner != owner && notes[0].notes[0].mine);
+        let (body, header, blocks) = v.typeset_input("Book", None, 54_000).unwrap();
+        assert!(body.contains("stopped#footnote[Truant on Zampano.#footnote[Editors on Truant.]]."), "{body}");
+        assert!(body.contains("went#footnote[Editors on Zampano.] home"), "{body}");
+        compiles(&header, body, blocks);
+        // Neither of the Editors' notes is in "Collected".
+        v.open_work("Collected", 55_000).unwrap();
+        let theirs = v.inclusions("Collected").unwrap();
+        assert_eq!(theirs[0].annotations.len(), 1);
+        assert!(theirs[0].annotations[0].notes.is_empty());
+    }
+
+    #[test]
+    fn a_replace_all_in_the_text_and_annotations_is_one_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        let from = RAIN.find("rain").unwrap();
+        let ann = v.annotate("Collected", 18, from, from + 4, "The rain again.", 12_000).unwrap();
+        // "My introduction." → "My preface." in the text, and in the Annotation.
+        let replace = Op::Replace {
+            edits: vec![crate::work::ReplaceOpEdit { from: 3, to: 15, text: "preface".into() }],
+            find: "introduction".into(), with: "preface".into(), count: 2,
+            annotations: vec![crate::work::AnnotationEdit { id: ann.clone(), body: "The preface again.".into() }],
+        };
+        v.edit("Collected", vec![replace], 13_000).unwrap();
+        assert!(v.works["Collected"].text().starts_with("My preface."));
+        assert_eq!(v.inclusions("Collected").unwrap()[0].annotations[0].body, "The preface again.");
+        v.edit("Collected", vec![Op::Undo], 14_000).unwrap();
+        assert!(v.works["Collected"].text().starts_with("My introduction."));
+        assert_eq!(v.inclusions("Collected").unwrap()[0].annotations[0].body, "The rain again.", "one undo takes both back");
+        // Only in an Annotation: still one action, which undo takes back.
+        let only = Op::Replace {
+            edits: Vec::new(), find: "rain".into(), with: "snow".into(), count: 1,
+            annotations: vec![crate::work::AnnotationEdit { id: ann.clone(), body: "The snow again.".into() }],
+        };
+        v.edit("Collected", vec![only], 15_000).unwrap();
+        assert_eq!(v.inclusions("Collected").unwrap()[0].annotations[0].body, "The snow again.");
+        v.edit("Collected", vec![Op::Undo], 16_000).unwrap();
+        assert_eq!(v.inclusions("Collected").unwrap()[0].annotations[0].body, "The rain again.");
+    }
+
+    #[test]
+    fn a_comment_on_an_annotation_belongs_to_its_work_and_detaches_while_it_is_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        let from = RAIN.find("rain").unwrap();
+        let ann = v.annotate("Collected", 18, from, from + 4, "A note.", 12_000).unwrap();
+        let op = Op::AnnotationComment { annotation: ann.clone(), quote: "A note.".into(), sender: "author".into(), body: "Cut it?".into(), sender_name: None };
+        let state = v.edit("Collected", vec![op, Op::Highlights], 13_000).unwrap();
+        let comment = state.highlights.unwrap().remove(0);
+        assert_eq!((comment.on_annotation.as_deref(), comment.on_work, comment.annotation_gone), (Some(ann.as_str()), false, false));
+        v.delete_annotation("Collected", &ann, 14_000).unwrap();
+        let state = v.edit("Collected", vec![Op::Highlights], 15_000).unwrap();
+        assert!(state.highlights.unwrap()[0].annotation_gone, "detached while the Annotation is deleted");
+        // A Comment on an Annotation that isn't there is refused.
+        let gone = Op::AnnotationComment { annotation: ann.clone(), quote: String::new(), sender: "author".into(), body: "?".into(), sender_name: None };
+        assert!(v.edit("Collected", vec![gone], 16_000).is_err());
+    }
+
+    #[test]
+    fn a_milestone_prints_exactly_the_annotations_it_had() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = collected(dir.path());
+        let from = RAIN.find("rain").unwrap();
+        let ann = v.annotate("Collected", 18, from, from + 4, "Before.", 12_000).unwrap();
+        v.make_milestone("Collected", "Sent", 13_000).unwrap();
+        let sent = v.milestones("Collected", 13_100).unwrap()[0].id.clone();
+        v.set_annotation_body("Collected", &ann, "After.", 14_000).unwrap();
+        let went = RAIN.find("went").unwrap();
+        v.annotate("Collected", 18, went, went + 4, "New.", 14_100).unwrap();
+        let (then, header, blocks) = v.typeset_input_at("Collected", &sent, None, 15_000).unwrap();
+        assert!(then.contains("#footnote[Before.]") && !then.contains("After.") && !then.contains("New."), "{then}");
+        compiles(&header, then, blocks);
+        // The Text file prints them too, and still compiles on its own.
+        v.close_work("Collected", 16_000);
+        let file = std::fs::read_to_string(dir.path().join("Collected.typ")).unwrap();
+        assert!(file.contains("rain#footnote[After.]") && file.contains("went#footnote[New.]"), "{file}");
+        let mut t = crate::typeset::Typesetter::new(false);
+        assert!(t.compile("file", Path::new("none"), file).errors.is_empty());
+    }
+
     /// The text each Word comment in a `.docx` covers, by its comment's text.
     fn commented(docx: &[u8]) -> Vec<(String, String)> {
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(docx)).unwrap();
@@ -1584,6 +1854,7 @@ mod tests {
             at, index: 2, target: None, name: None, label: "Rain".into(), chapter: None, missing: None,
             plain: "Rain.".into(), typst: "#[\nRain.\n]".into(), version: None, language: String::new(),
             elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), in_typst: Vec::new(), author: String::new(), split: None,
+            all_runs: Vec::new(), notes: Vec::new(),
         };
         let (body, blocks) = typst_body(&format!("A\n{INCLUSION}\nB"), &[s]);
         assert!(body.starts_with("A\n// ---- Included by wrtier") && body.ends_with("\nB"), "{body}");

@@ -8,6 +8,7 @@ import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemir
 import { countsOf } from "./counts";
 import type { CommentHighlight } from "./sync";
 import { isCommand } from "./keys";
+import { footnotesInText, includedNoteCount, includedNotes, type AnnotationShown, type IncludedNote } from "./footnotes";
 
 /** The character that stands for an Inclusion (change.rs `INCLUSION`). */
 export const INCLUSION = "￼";
@@ -36,6 +37,8 @@ export type InclusionView = {
   split?: { title: string; at: number } | null;
   /** Styles given to this Inclusion only. */
   styles?: string[];
+  /** The Annotations printed in its text (ADR 0020), by this Work and the Works it includes. */
+  annotations?: AnnotationShown[];
 };
 
 /** A Chapter that can be included (vault/inclusions.rs `ChapterChoice`). */
@@ -49,7 +52,13 @@ const toggleFold = StateEffect.define<number>();
 export const unfoldInclusion = StateEffect.define<number>();
 
 /** Find and replace's matches in one Inclusion's text (UTF-16, in its text or its Raw view line). */
-export type IncludedFind = { ranges: [number, number][]; current: [number, number] | null };
+export type IncludedFind = {
+  ranges: [number, number][];
+  current: [number, number] | null;
+  /** Annotations (their IDs) with matches in their text, and the one with the current match. */
+  notes?: string[];
+  currentNote?: string | null;
+};
 
 /** Find and replace's matches in each Inclusion, by its character (find.ts provides them). */
 export const includedFinds = Facet.define<Map<number, IncludedFind>, Map<number, IncludedFind>>({
@@ -89,15 +98,17 @@ const shownField = StateField.define<Shown>({
 });
 
 class IncludedText extends WidgetType {
-  constructor(readonly v: InclusionView, readonly folded: boolean, readonly finds: IncludedFind | null) {
+  /** `base`: how many notes print before this Inclusion's (its first is numbered `base + 1`). */
+  constructor(readonly v: InclusionView, readonly folded: boolean, readonly finds: IncludedFind | null, readonly base: number) {
     super();
   }
 
   eq(other: IncludedText) {
     const a = this.v;
     const b = other.v;
-    return this.folded === other.folded && JSON.stringify(this.finds) === JSON.stringify(other.finds) && a.label === b.label && a.text === b.text && a.missing === b.missing && a.work === b.work && a.at === b.at
-      && JSON.stringify(a.comments) === JSON.stringify(b.comments) && JSON.stringify(a.split) === JSON.stringify(b.split) && JSON.stringify(a.styles) === JSON.stringify(b.styles);
+    return this.folded === other.folded && this.base === other.base && JSON.stringify(this.finds) === JSON.stringify(other.finds) && a.label === b.label && a.text === b.text && a.missing === b.missing && a.work === b.work && a.at === b.at
+      && JSON.stringify(a.comments) === JSON.stringify(b.comments) && JSON.stringify(a.split) === JSON.stringify(b.split) && JSON.stringify(a.styles) === JSON.stringify(b.styles)
+      && JSON.stringify(a.annotations) === JSON.stringify(b.annotations);
   }
 
   toDOM(view: EditorView) {
@@ -113,9 +124,11 @@ class IncludedText extends WidgetType {
     box.tabIndex = -1;
     // The editor's keys don't reach here (it isn't focused): Add Comment's does, on the selection.
     box.addEventListener("keydown", (e) => {
-      if (!isCommand(e, "addComment")) return;
+      // Insert footnote's key, on included text: an Annotation (ADR 0020).
+      const name = isCommand(e, "addComment") ? "wrtier-add-comment" : isCommand(e, "footnote") ? "wrtier-annotate" : null;
+      if (!name) return;
       e.preventDefault();
-      box.dispatchEvent(new CustomEvent("wrtier-add-comment", { bubbles: true }));
+      box.dispatchEvent(new CustomEvent(name, { bubbles: true }));
     });
     const bar = document.createElement("div");
     bar.className = "cm-inclusion-bar";
@@ -172,9 +185,15 @@ class IncludedText extends WidgetType {
       const text = document.createElement("div");
       text.className = "cm-inclusion-text";
       if (v.language) text.lang = v.language;
-      text.append(...readable(v.text, v.comments, this.finds));
-      // A highlight clicked: its Comments, in the Comments panel.
+      text.append(...readable(v.text, v.comments, this.finds, { base: this.base, notes: includedNotes(v.text, v.annotations) }));
+      // A highlight clicked: its Comments, in the Comments panel. An Annotation's number: it, to
+      // change (this Work's own) or read.
       text.addEventListener("click", (e) => {
+        const mark = (e.target as Element).closest<HTMLElement>("[data-annotation]");
+        if (mark) {
+          box.dispatchEvent(new CustomEvent("wrtier-annotation", { bubbles: true, detail: { at: v.at, id: mark.dataset.annotation, owner: mark.dataset.owner } }));
+          return;
+        }
         const ids: string[] = [];
         for (let el = e.target as Element | null; el && el !== text; el = el.parentElement) {
           if (el instanceof HTMLElement && el.dataset.comment) ids.push(el.dataset.comment);
@@ -260,8 +279,51 @@ class RawInclusion extends WidgetType {
 /** The Raw view is on: each Inclusion shows as its one `#inclusion(…)` line instead of the block. */
 export const rawInclusions = Facet.define<boolean, boolean>({ combine: (values) => values.some(Boolean) });
 
-/** A highlight in included text: where (UTF-16, in the included text), and a Comment's (whose) or a Find match. */
-type Highlight = { from: number; to: number } & ({ id: string; colour: string; resolved: boolean } | { find: "match" | "current" });
+/** A highlight in included text: where (UTF-16, in the included text), and a Comment's (whose), a Find match, or what an Annotation covers. */
+type Highlight = { from: number; to: number } & ({ id: string; colour: string; resolved: boolean } | { find: "match" | "current" } | { annotation: string; mine: boolean });
+
+/**
+ * A note's number in included text: put in at `from` (an Annotation's, after what it covers),
+ * or over `from..to` (a Footnote written there, whose text is kept, hidden, so places in the
+ * text still count right).
+ */
+type NoteMark = { from: number; to: number; node: () => HTMLElement };
+
+/** The notes printed in some included text, numbered from `base + 1`, as marks and highlights. */
+function noteMarks(notes: { base: number; notes: IncludedNote[] }, finds: IncludedFind | null = null): { marks: NoteMark[]; highlights: Highlight[] } {
+  const marks: NoteMark[] = [];
+  const highlights: Highlight[] = [];
+  let outer = -1; // the end of the last Footnote marked: those inside it are under its mark
+  notes.notes.forEach((n, i) => {
+    const number = notes.base + i + 1;
+    if (n.kind === "footnote") {
+      if (n.span.from < outer) return;
+      outer = n.span.to;
+      marks.push({ from: n.span.from, to: n.span.to, node: () => {
+        const el = document.createElement("span");
+        el.className = "cm-incl-note";
+        el.dataset.n = String(number);
+        el.title = `${number}. ${n.text}`;
+        return el;
+      } });
+      return;
+    }
+    const a = n.note;
+    if (!n.on) for (const [from, to] of a.ranges) highlights.push({ from, to, annotation: a.id, mine: a.mine });
+    marks.push({ from: a.at, to: a.at, node: () => {
+      const el = document.createElement("span");
+      const found = finds?.notes?.includes(a.id) ? (finds.currentNote === a.id ? " cm-find-match cm-find-current" : " cm-find-match") : "";
+      el.className = `cm-incl-note cm-incl-annotation${a.mine ? " mine" : ""}${found}`;
+      el.dataset.n = String(number);
+      el.dataset.annotation = a.id;
+      el.dataset.owner = a.owner;
+      const whose = a.mine ? "This Work's Annotation" : `${a.ownerLabel || "Another Work"}'s Annotation`;
+      el.title = `${number}. ${whose}${n.on ? " on another" : ""}: ${a.body}`;
+      return el;
+    } });
+  });
+  return { marks, highlights };
+}
 
 /** Find and replace's matches as highlights. */
 function findHighlights(finds: IncludedFind | null): Highlight[] {
@@ -270,8 +332,8 @@ function findHighlights(finds: IncludedFind | null): Highlight[] {
   return finds.ranges.map(([from, to]) => ({ from, to, find: current && current[0] === from && current[1] === to ? "current" as const : "match" as const }));
 }
 
-/** `text` (which starts at `start` in the included text) with the highlights over it. */
-function marked(text: string, start: number, highlights: Highlight[]): (Node | string)[] {
+/** `text` (which starts at `start` in the included text) with the highlights over it, and the notes' numbers. */
+function marked(text: string, start: number, highlights: Highlight[], marks: NoteMark[] = []): (Node | string)[] {
   const end = start + text.length;
   const cuts = new Set([start, end]);
   for (const h of highlights) {
@@ -280,11 +342,29 @@ function marked(text: string, start: number, highlights: Highlight[]): (Node | s
       cuts.add(Math.min(h.to, end));
     }
   }
+  const here = marks.filter((m) => (m.from === m.to ? m.from >= start && m.from <= end : m.to > start && m.from < end));
+  for (const m of here) {
+    cuts.add(Math.max(m.from, start));
+    cuts.add(Math.min(m.to, end));
+  }
   const points = [...cuts].sort((a, b) => a - b);
   const out: (Node | string)[] = [];
+  // Numbers put in at a place come before the text from there.
+  const putIn = (at: number) => {
+    for (const m of here) if (m.from === at && (m.to === m.from || at === Math.max(m.from, start))) out.push(m.node());
+  };
   for (let i = 0; i + 1 < points.length; i++) {
     const [a, b] = [points[i], points[i + 1]];
+    putIn(a);
     const piece = text.slice(a - start, b - start);
+    // Inside a Footnote shown as its number: kept, hidden.
+    if (here.some((m) => m.to > m.from && m.from <= a && m.to >= b)) {
+      const hidden = document.createElement("span");
+      hidden.className = "cm-incl-hidden";
+      hidden.textContent = piece;
+      out.push(hidden);
+      continue;
+    }
     const over = highlights.filter((h) => h.from <= a && h.to >= b);
     if (over.length === 0) {
       out.push(piece);
@@ -296,6 +376,8 @@ function marked(text: string, start: number, highlights: Highlight[]): (Node | s
       const span = document.createElement("span");
       if ("find" in h) {
         span.className = h.find === "current" ? "cm-find-match cm-find-current" : "cm-find-match";
+      } else if ("annotation" in h) {
+        span.className = h.mine ? "cm-annotated mine" : "cm-annotated";
       } else {
         span.className = `cm-comment cm-comment-${h.colour}${h.resolved ? " cm-comment-resolved" : ""}`;
         span.dataset.comment = h.id;
@@ -305,6 +387,7 @@ function marked(text: string, start: number, highlights: Highlight[]): (Node | s
     }
     out.push(node);
   }
+  for (const m of here) if (m.from === m.to && m.from === end && end !== start) out.push(m.node());
   return out;
 }
 
@@ -314,8 +397,10 @@ function marked(text: string, start: number, highlights: Highlight[]): (Node | s
  * between blank lines. Each block says where its text starts in `text` (`data-from`), so a
  * selection in it can be traced back.
  */
-export function readable(text: string, comments: CommentHighlight[] = [], finds: IncludedFind | null = null): HTMLElement[] {
+export function readable(text: string, comments: CommentHighlight[] = [], finds: IncludedFind | null = null, notes: { base: number; notes: IncludedNote[] } = { base: 0, notes: [] }): HTMLElement[] {
+  const { marks, highlights: annotated } = noteMarks(notes, finds);
   const highlights: Highlight[] = [
+    ...annotated,
     ...comments.flatMap((m) => m.ranges.map(([from, to]) => ({ from, to, id: m.id, colour: m.colour, resolved: m.resolved }))),
     ...findHighlights(finds),
   ];
@@ -325,7 +410,7 @@ export function readable(text: string, comments: CommentHighlight[] = [], finds:
     if (!paragraph) return;
     const p = document.createElement("p");
     p.dataset.from = String(paragraph.from);
-    p.append(...marked(paragraph.lines.join("\n"), paragraph.from, highlights));
+    p.append(...marked(paragraph.lines.join("\n"), paragraph.from, highlights, marks));
     out.push(p);
     paragraph = null;
   };
@@ -338,7 +423,7 @@ export function readable(text: string, comments: CommentHighlight[] = [], finds:
       h.className = `cm-inclusion-heading level-${Math.min(heading[1].trim().length, 3)}`;
       const from = at + heading[1].length;
       h.dataset.from = String(from);
-      h.append(...marked(heading[2], from, highlights));
+      h.append(...marked(heading[2], from, highlights, marks));
       out.push(h);
     } else if (line.trim() === "") {
       flush();
@@ -382,13 +467,19 @@ function decorations(state: EditorState): DecorationSet {
   const doc = state.doc;
   const raw = state.facet(rawInclusions);
   const finds = state.facet(includedFinds);
-  const ranges = [...views].sort((a, b) => a.at - b.at).map((v) => {
+  // The notes' numbers run on through the Work: its own Footnotes and earlier Inclusions' notes.
+  const sorted = [...views].sort((a, b) => a.at - b.at);
+  const own = !raw && sorted.length ? footnotesInText(doc.toString()).map((f) => f.from) : [];
+  let before = 0;
+  const ranges = sorted.map((v) => {
     if (raw) return Decoration.replace({ widget: new RawInclusion(v, finds.get(v.at) ?? null) }).range(v.at, v.at + 1);
+    const base = before + own.filter((f) => f < v.at).length;
+    before += includedNoteCount(v);
     const line = doc.lineAt(v.at);
     // On a line of its own (as Rust puts it): a block. Anywhere else (typed oddly in another
     // editor): inline, so the rest of the line still shows.
     const alone = line.from === v.at && line.to === v.at + 1;
-    return Decoration.replace({ widget: new IncludedText(v, folded.includes(v.at), finds.get(v.at) ?? null), block: alone }).range(v.at, v.at + 1);
+    return Decoration.replace({ widget: new IncludedText(v, folded.includes(v.at), finds.get(v.at) ?? null, base), block: alone }).range(v.at, v.at + 1);
   });
   return Decoration.set(ranges);
 }
@@ -477,7 +568,9 @@ export function inclusionsOf(state: EditorState): InclusionView[] {
 
 /**
  * Some of the editor's text with each Inclusion's character replaced by its text, as a reader
- * sees it (for counting words), and the included part's text on its own.
+ * sees it (for counting words), and the included part's text on its own. The Annotations printed
+ * on it are in it too, as the Footnotes they print as: the Work's own count as its own words,
+ * another Work's as included ones.
  */
 export function readerText(state: EditorState, from = 0, to = state.doc.length): { text: string; included: string } {
   const views = inclusionsOf(state).filter((v) => v.at >= from && v.at < to && !v.missing).sort((a, b) => a.at - b.at);
@@ -487,6 +580,15 @@ export function readerText(state: EditorState, from = 0, to = state.doc.length):
   for (const v of views) {
     text += state.doc.sliceString(at, v.at) + v.text;
     included += v.text + "\n";
+    const walk = (list: AnnotationShown[]) => {
+      for (const n of list) {
+        const printed = `\n#footnote[${n.body}]`;
+        text += printed;
+        if (!n.mine) included += printed + "\n";
+        walk(n.notes);
+      }
+    };
+    walk(v.annotations ?? []);
     at = v.at + 1;
   }
   text += state.doc.sliceString(at, to);

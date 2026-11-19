@@ -3,12 +3,15 @@
 // while the cursor is on its line. Only how the text looks changes: the text, its positions and
 // everything sent to the History stay exactly as in the Raw view.
 
-import { type ChangeSpec, EditorState, type Extension, MapMode, type Text, StateEffect, StateField, Transaction } from "@codemirror/state";
+import { type ChangeSpec, EditorState, type Extension, Facet, MapMode, type Text, StateEffect, StateField, Transaction } from "@codemirror/state";
 import { fromHistory } from "./sync";
-import { Decoration, type DecorationSet, EditorView, hoverTooltip, ViewPlugin, type ViewUpdate, WidgetType } from "@codemirror/view";
+import { Decoration, type DecorationSet, EditorView, hoverTooltip, keymap, ViewPlugin, type ViewUpdate, WidgetType } from "@codemirror/view";
+import { Prec, RangeSet } from "@codemirror/state";
 import { parseMarkup, type Span } from "./markup";
 import { callAt, ElementChip, elementsFacet } from "./elements";
 import { withKey } from "./keys";
+import { footnoteSpans, footnoteText, includedNoteCount, numberFootnotes } from "./footnotes";
+import { inclusionsOf } from "./inclusions";
 
 /** Where the paragraph around `from`..`to` starts and ends (blank lines separate paragraphs). */
 export function paragraphAround(doc: Text, from: number, to: number): [number, number] {
@@ -85,9 +88,14 @@ function recognized(state: EditorState): Pair[] {
   // (A state without the Formatted view, such as the Raw view's just before switching back:
   // there's no markup to read in it.)
   const spans = state.field(spansField, false);
-  if (elements.length === 0 || !spans) return [];
+  if (!spans) return [];
   const pairs: Pair[] = [];
   for (const span of spans) {
+    // A Footnote's brackets are kept the same way (formatted.ts shows them itself).
+    if (span.kind === "footnote") {
+      pairs.push({ hash: span.open[0], open: span.open[1] - 1, close: span.close[0] });
+      continue;
+    }
     if (span.kind !== "code") continue;
     const call = callAt(state.doc, span.from, span.to, elements);
     if (call?.close) pairs.push({ hash: call.from, open: call.head[1] - 1, close: call.close[0] });
@@ -188,6 +196,53 @@ class Glyph extends WidgetType {
   }
 }
 
+/**
+ * A Footnote's marker: the whole Footnote folded into its number, or, while the cursor is in it,
+ * the number before its text. The number is the editor's (footnotes.ts), not the printed one.
+ */
+class FootnoteMark extends WidgetType {
+  constructor(readonly number: number, readonly folded: boolean) {
+    super();
+  }
+  eq(other: FootnoteMark) {
+    return other.number === this.number && other.folded === this.folded;
+  }
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = this.folded ? "cm-tp-footnote-mark" : "cm-tp-footnote-mark cm-tp-footnote-open";
+    el.textContent = String(this.number);
+    el.setAttribute("aria-label", `Footnote ${this.number}`);
+    return el;
+  }
+  ignoreEvent() {
+    return false;
+  }
+}
+
+/** Where an open Footnote's text ends (its `]`, never shown). */
+class FootnoteEnd extends WidgetType {
+  eq() {
+    return true;
+  }
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = "cm-tp-footnote-end";
+    el.setAttribute("aria-hidden", "true");
+    return el;
+  }
+}
+const footnoteEnd = Decoration.replace({ widget: new FootnoteEnd() });
+const footnoteBody = Decoration.mark({ class: "cm-tp-footnote" });
+
+/** Stretches of text to show even inside a folded Footnote (Find's current match): the Footnote opens. */
+export const keepOpen = Facet.define<[number, number][], [number, number][]>({ combine: (values) => values.flat() });
+
+/** The editor's number for each of the Work's Footnotes (by where it starts), counting its Inclusions'. */
+function footnoteNumbers(state: EditorState, spans: Span[]): Map<number, number> {
+  const others = inclusionsOf(state).map((v) => ({ at: v.at, count: includedNoteCount(v) }));
+  return numberFootnotes(footnoteSpans(spans), others);
+}
+
 const hide = Decoration.replace({});
 const mark = (cls: string) => Decoration.mark({ class: cls });
 const styles = {
@@ -207,26 +262,61 @@ const headingLines = [1, 2, 3, 4, 5, 6].map((level) => Decoration.line({ class: 
 /** A line inside a block Story element (an epigraph, a letter). */
 const blockLine = Decoration.line({ class: "cm-tp-block" });
 
-/** The decorations for what's on screen, given where the cursor and selections are. */
-function decorate(view: EditorView): DecorationSet {
+/**
+ * The decorations for what's on screen, given where the cursor and selections are; and the
+ * Footnotes' markers, which the cursor steps over whole (`atomic`).
+ */
+function decorate(view: EditorView): { decorations: DecorationSet; atomic: DecorationSet } {
   const state = view.state;
   const spans = state.field(spansField);
   const elements = state.facet(elementsFacet);
-  // Every Story element's `[` and `]`: never shown in the Formatted view.
-  const pairs = pairsIn(state);
-  const brackets = new Set(pairs.flatMap((p) => [p.open, p.close]));
   const ranges = state.selection.ranges;
   const touched = (from: number, to: number) => ranges.some((r) => r.from <= to && r.to >= from);
   const onLine = (pos: number) => {
     const line = state.doc.lineAt(pos);
     return ranges.some((r) => r.from <= line.to && r.to >= line.from);
   };
+  const kept = state.facet(keepOpen);
+  // Footnotes: folded into their number unless the cursor is in (or right next to) one. Nothing
+  // inside a folded one is decorated: it's all under its marker.
+  const footnotes = footnoteSpans(spans);
+  const numbers = footnotes.length ? footnoteNumbers(state, spans) : new Map<number, number>();
+  const folded: [number, number][] = [];
+  for (const f of footnotes) {
+    if (folded.some(([a, b]) => f.from >= a && f.to <= b)) continue;
+    if (!touched(f.from, f.to) && !kept.some(([a, b]) => a > f.open[0] && b < f.to)) folded.push([f.from, f.to]);
+  }
+  const underFold = (from: number, to: number) => folded.some(([a, b]) => from >= a && to <= b && !(from === a && to === b));
+  // Every Story element's `[` and `]`: never shown in the Formatted view. (A Footnote's are shown
+  // its own way, below.)
+  const notes = new Set(footnotes.map((f) => f.open[1] - 1));
+  const pairs = pairsIn(state).filter((p) => !notes.has(p.open));
+  const brackets = new Set(pairs.flatMap((p) => [p.open, p.close]));
   const decos = [];
+  const atomic: ReturnType<typeof footnoteEnd.range>[] = [];
   for (const { from: top, to: bottom } of view.visibleRanges) {
     for (const span of spans) {
       if (span.to < top || span.from > bottom) continue;
+      if (underFold(span.from, span.to)) continue;
       const near = touched(span.from, span.to);
       switch (span.kind) {
+        case "footnote": {
+          const number = numbers.get(span.from) ?? 0;
+          if (folded.some(([a, b]) => a === span.from && b === span.to)) {
+            const mark = Decoration.replace({ widget: new FootnoteMark(number, true) }).range(span.from, span.to);
+            decos.push(mark);
+            atomic.push(mark);
+            break;
+          }
+          const head = Decoration.replace({ widget: new FootnoteMark(number, false) }).range(span.open[0], span.open[1]);
+          decos.push(head);
+          atomic.push(head);
+          if (span.close[0] > span.open[1]) decos.push(footnoteBody.range(span.open[1], span.close[0]));
+          const end = footnoteEnd.range(span.close[0], span.close[1]);
+          decos.push(end);
+          atomic.push(end);
+          break;
+        }
         case "heading": {
           decos.push(headingLines[Math.min(span.level, 6) - 1].range(state.doc.lineAt(span.from).from));
           if (span.mark[1] > span.mark[0]) {
@@ -278,11 +368,31 @@ function decorate(view: EditorView): DecorationSet {
       }
     }
     for (const b of brackets) {
-      if (b >= top && b <= bottom) decos.push(hide.range(b, b + 1));
+      if (b >= top && b <= bottom && !underFold(b, b + 1)) decos.push(hide.range(b, b + 1));
     }
   }
-  return Decoration.set(decos, true);
+  return { decorations: Decoration.set(decos, true), atomic: Decoration.set(atomic, true) };
 }
+
+/**
+ * Backspace right after a Footnote, or Delete right before one, selects it whole first; the
+ * next press deletes it. (Its brackets are never taken on their own, see `keepBrackets`.)
+ */
+function selectFootnote(forward: boolean) {
+  return (view: EditorView) => {
+    const sel = view.state.selection.main;
+    const spans = view.state.field(spansField, false);
+    if (!sel.empty || !spans) return false;
+    const f = footnoteSpans(spans).filter((s) => (forward ? s.from === sel.head : s.to === sel.head)).pop();
+    if (!f) return false;
+    view.dispatch({ selection: { anchor: f.from, head: f.to }, scrollIntoView: true });
+    return true;
+  };
+}
+const footnoteKeys = Prec.high(keymap.of([
+  { key: "Backspace", run: selectFootnote(false) },
+  { key: "Delete", run: selectFootnote(true) },
+]));
 
 /** Asks for the decorations to be worked out again (when the pointer is let go). */
 const refresh = StateEffect.define<null>();
@@ -290,6 +400,8 @@ const refresh = StateEffect.define<null>();
 const formatting = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet;
+    /** The Footnotes' markers: the cursor steps over each whole. */
+    atomic: DecorationSet = RangeSet.empty;
     /**
      * Is a mouse button (or a finger) down in the text? Then what's shown and hidden stays as
      * it is: markers appearing next to a selection that's being dragged would move the text
@@ -306,7 +418,7 @@ const formatting = ViewPlugin.fromClass(
     };
 
     constructor(private readonly view: EditorView) {
-      this.decorations = decorate(view);
+      ({ decorations: this.decorations, atomic: this.atomic } = decorate(view));
       view.contentDOM.addEventListener("pointerdown", this.down);
       window.addEventListener("pointerup", this.up);
       window.addEventListener("pointercancel", this.up);
@@ -315,8 +427,11 @@ const formatting = ViewPlugin.fromClass(
     update(update: ViewUpdate) {
       const refreshed = update.transactions.some((tr) => tr.effects.some((e) => e.is(refresh)));
       const elementsChanged = update.startState.facet(elementsFacet) !== update.state.facet(elementsFacet);
-      if (update.docChanged || update.viewportChanged || refreshed || elementsChanged || (update.selectionSet && !this.pressed)) {
-        this.decorations = decorate(update.view);
+      // An Inclusion's Footnotes count in the numbering.
+      const included = inclusionsOf(update.startState) !== inclusionsOf(update.state)
+        || update.startState.facet(keepOpen) !== update.state.facet(keepOpen);
+      if (update.docChanged || update.viewportChanged || refreshed || elementsChanged || included || (update.selectionSet && !this.pressed)) {
+        ({ decorations: this.decorations, atomic: this.atomic } = decorate(update.view));
       }
     }
 
@@ -326,7 +441,10 @@ const formatting = ViewPlugin.fromClass(
       window.removeEventListener("pointercancel", this.up);
     }
   },
-  { decorations: (plugin) => plugin.decorations },
+  {
+    decorations: (plugin) => plugin.decorations,
+    provide: (plugin) => EditorView.atomicRanges.of((view) => view.plugin(plugin)?.atomic ?? RangeSet.empty),
+  },
 );
 
 const explained: Partial<Record<Span["kind"], string>> = {
@@ -338,14 +456,31 @@ const explained: Partial<Record<Span["kind"], string>> = {
   glyph: "Typed as -- (en dash), --- (em dash) or ... (ellipsis).",
   linebreak: "A line break: a backslash at the end of a line.",
   code: "Typst code, used as typed.",
+  footnote: "A Footnote: written as #footnote[its text]. The number is the editor's; the Page preview shows the printed one.",
   label: "A label or a reference to one.",
   math: "Math, written between $dollar signs$.",
 };
 
-/** On desktop, hovering over formatting says how it's written. */
+/** On desktop, hovering over formatting says how it's written; over a folded Footnote, what it says. */
 const tooltips = hoverTooltip((view, pos) => {
   const spans = view.state.field(spansField);
-  const span = [...spans].reverse().find((s) => s.from <= pos && pos <= s.to && explained[s.kind]);
+  const note = footnoteSpans(spans).filter((f) => f.from <= pos && pos <= f.to).pop();
+  if (note && !view.state.selection.ranges.some((r) => r.from <= note.to && r.to >= note.from)) {
+    return {
+      pos: note.from,
+      end: note.to,
+      above: true,
+      create: () => {
+        const dom = document.createElement("div");
+        dom.className = "cm-tp-tooltip cm-tp-footnote-tooltip";
+        const number = footnoteNumbers(view.state, spans).get(note.from) ?? 0;
+        const text = footnoteText(view.state.doc.toString(), note);
+        dom.textContent = `${number}. ${text || "(an empty Footnote)"}`;
+        return { dom };
+      },
+    };
+  }
+  const span = [...spans].reverse().find((s) => s.from <= pos && pos <= s.to && explained[s.kind] && (s.kind !== "footnote" || pos <= s.open[1]));
   if (!span) return null;
   return {
     pos: span.from,
@@ -365,7 +500,7 @@ const tooltips = hoverTooltip((view, pos) => {
 /** The Formatted view, as an editor extension (the Raw view is simply without it). */
 export function formattedView(): Extension {
   const desktop = window.matchMedia("(hover: hover)").matches;
-  return [spansField, pairsField, keepBrackets, formatting, desktop ? tooltips : []];
+  return [spansField, pairsField, keepBrackets, formatting, footnoteKeys, desktop ? tooltips : []];
 }
 
 /** The markup in a state's text, if it's in the Formatted view (null in the Raw view). */

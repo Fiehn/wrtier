@@ -303,6 +303,37 @@ fn comment_on_inclusion(state: State<AppState>, id: String, at: usize, from: usi
     with_app(&state, |app| open_vault_of(app)?.comment_on_inclusion(&id, at, from, to, &sender, &body, now_ms()))
 }
 
+/// A new Annotation (ADR 0020) by the Work `id` on included text (`from..to`, UTF-16, in the
+/// text of the Inclusion whose character is at `at`). Returns its ID.
+#[tauri::command]
+fn annotate(state: State<AppState>, id: String, at: usize, from: usize, to: usize, body: String) -> Result<String, String> {
+    with_app(&state, |app| open_vault_of(app)?.annotate(&id, at, from, to, &body, now_ms()))
+}
+
+/// A new Annotation by the Work `id` on a whole Annotation that `owner` (a Work's ID) made.
+#[tauri::command]
+fn annotate_annotation(state: State<AppState>, id: String, owner: String, on: String, body: String) -> Result<String, String> {
+    with_app(&state, |app| open_vault_of(app)?.annotate_annotation(&id, &owner, &on, &body, now_ms()))
+}
+
+/// New text for one of the Work's Annotations.
+#[tauri::command]
+fn set_annotation(state: State<AppState>, id: String, annotation: String, body: String) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.set_annotation_body(&id, &annotation, &body, now_ms()))
+}
+
+/// Deletes one of the Work's Annotations.
+#[tauri::command]
+fn delete_annotation(state: State<AppState>, id: String, annotation: String) -> Result<(), String> {
+    with_app(&state, |app| open_vault_of(app)?.delete_annotation(&id, &annotation, now_ms()))
+}
+
+/// The Work's Detached annotations.
+#[tauri::command]
+fn detached_annotations(state: State<AppState>, id: String) -> Result<Vec<vault::DetachedView>, String> {
+    with_app(&state, |app| open_vault_of(app)?.detached_annotations(&id))
+}
+
 /// A Comment's Replies and settings changed in a Work that may not be open (from the Comments
 /// panel of a Work that includes it).
 #[tauri::command]
@@ -1310,6 +1341,11 @@ pub fn run() {
             create_collection,
             missing_inclusions,
             comment_on_inclusion,
+            annotate,
+            annotate_annotation,
+            set_annotation,
+            delete_annotation,
+            detached_annotations,
             comment_in,
             settle_split,
             set_inclusion_styles,

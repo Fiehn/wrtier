@@ -29,7 +29,7 @@ type Op =
   | { op: "locate"; first: string; last: string | null }
   | { op: "stretch"; from: number; to: number }
   | { op: "include"; at: number; work: string; chapter: number | null }
-  | { op: "replace"; edits: { from: number; to: number; text: string }[]; find: string; with: string; count: number }
+  | { op: "replace"; edits: { from: number; to: number; text: string }[]; find: string; with: string; count: number; annotations?: { id: string; body: string }[] }
   | CommentOp
   | HistoryOp;
 
@@ -44,6 +44,8 @@ export type HistoryOp =
 export type CommentOp =
   | { op: "comment"; from: number; to: number; sender: string; body: string }
   | { op: "workComment"; sender: string; body: string }
+  /** On one of the Work's Annotations as a whole (ADR 0020); `quote`: what of its text it's about. */
+  | { op: "annotationComment"; annotation: string; quote: string; sender: string; body: string }
   | { op: "reply"; comment: string; sender: string; body: string }
   | { op: "editComment"; id: string; body: string }
   | { op: "setCommentSender"; id: string; sender: string }
@@ -71,6 +73,9 @@ export type CommentHighlight = {
   ranges: [number, number][];
   /** A Work comment: on the Work as a whole, with no text and no quote. */
   onWork: boolean;
+  /** On one of the Work's Annotations as a whole (its ID), with no text; while that's deleted, `annotationGone`. */
+  onAnnotation?: string | null;
+  annotationGone?: boolean;
   sender: string;
   name: string;
   /** A colour slot, "author" or "unknown". */
@@ -139,8 +144,11 @@ export type Whereabouts = { kind: "renamed"; to: string } | { kind: "trashed" } 
 /** Labels the editor's own changes from Rust, so they aren't sent back. */
 export const fromHistory = Annotation.define<boolean>();
 
-/** What a Find and replace action was: its edits go to Rust as one `replace`, which undo takes back whole. */
-export type ReplaceInfo = { find: string; with: string; count: number };
+/**
+ * What a Find and replace action was: its edits go to Rust as one `replace`, which undo takes
+ * back whole. `annotations`: the Work's Annotations it changed too (their new text).
+ */
+export type ReplaceInfo = { find: string; with: string; count: number; annotations?: { id: string; body: string }[] };
 /** Labels the edits of a Find and replace action (find.ts). */
 export const replacing = Annotation.define<ReplaceInfo>();
 
@@ -271,7 +279,8 @@ export class WorkSync {
   /** Every transaction in the editor comes through here. */
   track(tr: Transaction) {
     if (tr.annotation(fromHistory)) return;
-    if (tr.docChanged) {
+    // (A replacement only in Annotations changes no text, but is an edit all the same.)
+    if (tr.docChanged || tr.annotation(replacing)?.annotations?.length) {
       const event = EVENTS.find((e) => tr.isUserEvent(e)) ?? "edit";
       const origin: Origin = tr.isUserEvent("undo") ? "undo" : tr.isUserEvent("redo") ? "redo" : "input";
       this.queue.push({ kind: "edit", changes: tr.changes, event, origin, replace: tr.annotation(replacing) });

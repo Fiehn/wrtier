@@ -6,7 +6,7 @@
 // match selected. The search stays for the session and is run again in another tab or view.
 
 import { EditorView } from "@codemirror/view";
-import { findState, onFindChange, replacementChanges, setCurrent, setFind, type FindMatch, type Query } from "./find";
+import { findState, onFindChange, replacedAnnotations, replacementChanges, setCurrent, setFind, type FindMatch, type Query } from "./find";
 import { unfoldInclusion } from "./inclusions";
 import { replacing } from "./sync";
 import { keyLabel } from "./keys";
@@ -294,6 +294,16 @@ export class FindBar {
     const { matches, current, reading } = findState(view.state);
     const match = matches[current];
     if (!match || match.included || !reading) return;
+    // In one of the Work's Annotations: its new text, as an edit of its own.
+    if (match.annotation) {
+      const annotations = replacedAnnotations([match], this.replaceInput.value, query.matchCase);
+      if (annotations.length > 0) {
+        view.dispatch({ userEvent: "replace", annotations: replacing.of({ find: query.text, with: this.replaceInput.value, count: 1, annotations }) });
+      }
+      view.dispatch({ effects: setCurrent.of(current + 1) });
+      this.reveal();
+      return;
+    }
     const changes = replacementChanges(reading, match, this.replaceInput.value, query.matchCase);
     if (changes.length > 0) {
       const tr = view.state.update({
@@ -320,18 +330,20 @@ export class FindBar {
     const { matches, reading } = findState(view.state);
     const own = matches.filter((m) => !m.included);
     if (!reading || own.length === 0) return;
-    const changes = own.flatMap((m) => replacementChanges(reading, m, this.replaceInput.value, query.matchCase));
-    if (changes.length > 0) {
+    // The Work's text, and its own Annotations' text, in one action.
+    const changes = own.filter((m) => !m.annotation).flatMap((m) => replacementChanges(reading, m, this.replaceInput.value, query.matchCase));
+    const annotations = replacedAnnotations(own, this.replaceInput.value, query.matchCase);
+    if (changes.length > 0 || annotations.length > 0) {
       view.dispatch({
         changes,
         userEvent: "replace",
-        annotations: replacing.of({ find: query.text, with: this.replaceInput.value, count: own.length }),
+        annotations: replacing.of({ find: query.text, with: this.replaceInput.value, count: own.length, ...(annotations.length ? { annotations } : {}) }),
       });
     }
     const left = new Map<string, number>();
     for (const m of matches) if (m.included) left.set(m.included.label, (left.get(m.included.label) ?? 0) + 1);
     const leftCount = [...left.values()].reduce((a, b) => a + b, 0);
-    this.said = changes.length === 0 ? "They already read like that: nothing changed." : `Replaced ${own.length.toLocaleString()}.`;
+    this.said = changes.length === 0 && annotations.length === 0 ? "They already read like that: nothing changed." : `Replaced ${own.length.toLocaleString()}.`;
     if (leftCount > 0) this.said += ` Left ${leftCount.toLocaleString()} in included text alone (${[...left].map(([label, n]) => `${label} ${n}`).join(", ")}).`;
     this.show();
     // The button pressed is now off (nothing left to replace): keep the focus in the bar.

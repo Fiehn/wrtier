@@ -21,6 +21,8 @@ export type CommentsHooks = {
   addIncluded(work: string, target: IncludedTarget, sender: string, body: string): Promise<void>;
   /** Selects part `part` of a Comment's text; returns how many parts there are. */
   show(work: string, comment: string, part: number): number;
+  /** Opens one of the Work's Annotations (a Comment on it was clicked). */
+  showAnnotation?(work: string, annotation: string): void;
   setPending(work: string, range: { from: number; to: number } | null): void;
   pendingRange(work: string): { from: number; to: number } | null;
   reviewers(): Promise<Reviewer[]>;
@@ -274,6 +276,29 @@ export class CommentsPanel {
     this.newArea.hidden = false;
   }
 
+  /** Starts a new Comment on one of the Work's Annotations as a whole (ADR 0020). */
+  async startAddingAnnotation(work: string, annotation: string, quote: string) {
+    this.cancelAdding();
+    const picker = await this.senderPicker(work, lastSender());
+    const element = this.textForm({
+      initial: "",
+      placeholder: "Write the Comment…",
+      saveLabel: "Save",
+      picker,
+      save: (body, sender) => {
+        rememberSender(sender!);
+        this.unfold("annotations");
+        this.hooks.act(work, { op: "annotationComment", annotation, quote, sender: sender!, body });
+        this.cancelAdding();
+      },
+      cancel: () => this.cancelAdding(),
+    });
+    element.prepend(el("p", "comment-new-heading", `New Comment on the Annotation “${shorten(quote, 60)}”`));
+    this.adding = { work, element };
+    this.newArea.replaceChildren(element);
+    this.newArea.hidden = false;
+  }
+
   /**
    * Starts a new Comment on text selected in one of the Work's Inclusions. It's kept in the
    * Work the Inclusion shows (ADR 0015), so the form says which.
@@ -365,7 +390,9 @@ export class CommentsPanel {
     const shown = highlights.filter((m) => this.hooks.showResolved() || !m.resolved);
     const onWork = shown.filter((m) => m.onWork);
     const attached = shown.filter((m) => !m.onWork && m.ranges.length > 0);
-    const detached = shown.filter((m) => !m.onWork && m.ranges.length === 0);
+    // On an Annotation as a whole: listed together, Detached while it's deleted.
+    const onAnnotation = shown.filter((m) => m.onAnnotation && !m.annotationGone);
+    const detached = shown.filter((m) => !m.onWork && m.ranges.length === 0 && !(m.onAnnotation && !m.annotationGone));
     const children: HTMLElement[] = [];
     // Comments on included text belong to the Work it comes from; acting on one acts there.
     const includedShown = included
@@ -394,6 +421,9 @@ export class CommentsPanel {
       }
       if (attached.length > 0) {
         children.push(...this.section("text", "On the text", "comments-on-text-heading", attached.map((m) => this.card(work, m)), attached.length));
+      }
+      if (onAnnotation.length > 0) {
+        children.push(...this.section("annotations", "On Annotations", "comments-on-annotations-heading", onAnnotation.map((m) => this.card(work, m)), onAnnotation.length));
       }
       for (const group of includedShown) {
         children.push(...this.section(`included:${group.work}`, `In ${group.label}`, "comments-included-heading", [
@@ -460,6 +490,7 @@ export class CommentsPanel {
     card.addEventListener("click", (e) => {
       if ((e.target as Element).closest("button, input, textarea, select, a, form")) return;
       if (highlight.ranges.length > 0) this.hooks.show(work, highlight.id, 0);
+      else if (highlight.onAnnotation && !highlight.annotationGone) this.hooks.showAnnotation?.(work, highlight.onAnnotation);
     });
     return card;
   }

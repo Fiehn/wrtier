@@ -409,7 +409,7 @@ impl WhereFrom {
             if i == text.len() || text[i] == '\n' {
                 let line: String = text[line_start..i].iter().collect();
                 if let Some(title) = line.strip_prefix("= ") {
-                    chapters.push((line_start, title.trim().to_string()));
+                    chapters.push((line_start, crate::footnotes::without_footnotes(title).trim().to_string()));
                 }
                 line_start = i + 1;
             }

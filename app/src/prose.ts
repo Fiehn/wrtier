@@ -7,6 +7,11 @@
 // elements whole, text and all, since neither is dialogue. The Spellchecker reads both (CONTEXT.md):
 // a heading without its `=`s, and a Story element's text without its `#name(…)[` and `]`, which
 // are code; a word never runs across either edge.
+//
+// A Footnote (CONTEXT.md) is a passage of its own: the sentence it sits in reads as if it weren't
+// there (so `"Wait,"#footnote[…] she said.` is still a Dialogue tag), and its own text is read as
+// a paragraph by itself (`passagesOf`). A word never runs across its edge: where one was, the
+// paragraph has a seam.
 
 import { parseMarkup } from "./markup";
 
@@ -25,6 +30,8 @@ export type Para = {
   /** Where the paragraph is in the source. */
   start: number;
   end: number;
+  /** Where a Footnote was taken out (indexes into `text`): no word runs across one. */
+  seams: number[];
 };
 
 /** What's read besides the prose: headings (without their `=`s), and the text inside Story elements. */
@@ -44,8 +51,12 @@ export function readPara(source: string, start: number, end: number, reading: Re
   /** Open content blocks: whether each is read through. */
   const blocks: boolean[] = [];
   let stopFrom = -1;
+  const notes: { from: number; to: number }[] = [];
   for (const span of parseMarkup(src, start)) {
     switch (span.kind) {
+      case "footnote":
+        notes.push(span);
+        break;
       case "heading":
         if (reading.headings) set(span.mark[0], span.mark[1], HIDE);
         else set(span.from, span.to, STOP);
@@ -89,10 +100,17 @@ export function readPara(source: string, start: number, end: number, reading: Re
   }
   if (stopFrom !== -1) set(stopFrom, end, STOP);
   for (let i = src.indexOf(INCLUSION); i !== -1; i = src.indexOf(INCLUSION, i + 1)) kind[i] = STOP;
+  // Footnotes, whatever is inside them: read apart, as if they weren't here.
+  const noteAt = new Set<number>();
+  for (const f of notes) {
+    set(f.from, f.to, HIDE);
+    noteAt.add(f.from - start);
+  }
 
   let text = "";
   const from: number[] = [];
   const to: number[] = [];
+  const seams: number[] = [];
   for (let i = 0; i < n;) {
     const k = kind[i];
     if (k === PLAIN) {
@@ -110,6 +128,9 @@ export function readPara(source: string, start: number, end: number, reading: Re
     } else {
       let j = i + 1;
       while (j < n && kind[j] === k) j++;
+      if (k === HIDE && noteAt.size) {
+        for (let x = i; x < j; x++) if (noteAt.has(x)) { seams.push(text.length); break; }
+      }
       if (k === STOP) {
         text += BREAK;
         from.push(start + i);
@@ -118,7 +139,43 @@ export function readPara(source: string, start: number, end: number, reading: Re
       i = j;
     }
   }
-  return { text, from, to, start, end };
+  return { text, from, to, start, end, seams };
+}
+
+/** A stretch of a Work's text read as a paragraph: a paragraph, or the text of a Footnote (`note`). */
+export type Passage = { start: number; end: number; note: boolean };
+
+/** The Footnotes' texts in a stretch of source (nested ones too), as passages, in order. */
+export function notesOf(source: string, start: number, end: number): Passage[] {
+  if (!source.slice(start, end).includes("#footnote[")) return [];
+  return parseMarkup(source.slice(start, end), start)
+    .filter((s): s is Extract<typeof s, { kind: "footnote" }> => s.kind === "footnote")
+    .sort((a, b) => a.from - b.from)
+    .map((f) => ({ start: f.open[1], end: f.close[0], note: true }));
+}
+
+/** Every passage of a Work's text: each paragraph, followed by the text of each Footnote in it. */
+export function passagesOf(source: string): Passage[] {
+  const out: Passage[] = [];
+  for (const p of paragraphsOf(source)) {
+    out.push({ ...p, note: false });
+    out.push(...notesOf(source, p.start, p.end));
+  }
+  return out;
+}
+
+/** Splits a word (`at`..`end` in a paragraph's text) where a Footnote was taken out. */
+export function splitAtSeams(p: Para, at: number, end: number): [number, number][] {
+  const cuts = p.seams.filter((s) => s > at && s < end);
+  if (cuts.length === 0) return [[at, end]];
+  const out: [number, number][] = [];
+  let from = at;
+  for (const c of cuts) {
+    out.push([from, c]);
+    from = c;
+  }
+  out.push([from, end]);
+  return out;
 }
 
 /** The paragraphs of a Work's text: split at blank lines, as the markup is. */

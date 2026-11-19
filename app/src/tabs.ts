@@ -59,6 +59,10 @@ export type TabEvents = {
   highlights(id: string, highlights: CommentHighlight[]): void;
   /** Its key (Ctrl+Shift+M at first), or "Add Comment" in the menu: a new Comment on the selection or the word at the cursor. */
   addComment(id: string): void;
+  /** Its key (Ctrl+Alt+F at first), or "Insert footnote" in the menu. */
+  footnote(id: string): void;
+  /** An Annotation's number clicked in an Inclusion (at `at`): its own Work's (`owner`) Annotation `annotation`. */
+  annotation(id: string, at: number, annotation: string, owner: string): void;
   /** Right-click inside a selection: the app's own menu, at (x, y). */
   selectionMenu(id: string, x: number, y: number): void;
   /** A Work's History grew (typing recorded, something taken in, a Revert...). */
@@ -372,6 +376,12 @@ class Tab {
     });
     this.pane.addEventListener("wrtier-open-comments", (e) => tabs.events.openComments(this.id, (e as CustomEvent<string[]>).detail));
     this.pane.addEventListener("wrtier-add-comment", () => tabs.events.addComment(this.id));
+    // Insert footnote's key on included text: an Annotation on it.
+    this.pane.addEventListener("wrtier-annotate", () => tabs.events.footnote(this.id));
+    this.pane.addEventListener("wrtier-annotation", (e) => {
+      const { at, id, owner } = (e as CustomEvent<{ at: number; id: string; owner: string }>).detail;
+      tabs.events.annotation(this.id, at, id, owner);
+    });
     this.pane.addEventListener("wrtier-inclusion-styles", (e) => {
       const { at, styles, x, y } = (e as CustomEvent<{ at: number; styles: string[]; x: number; y: number }>).detail;
       tabs.events.inclusionStyles(this.id, at, styles, x, y);
@@ -419,6 +429,10 @@ class Tab {
       emph: () => toggleMarkup("emph")(this.view),
       addComment: () => {
         tabs.events.addComment(this.id);
+        return true;
+      },
+      footnote: () => {
+        tabs.events.footnote(this.id);
         return true;
       },
       textHistory: () => {

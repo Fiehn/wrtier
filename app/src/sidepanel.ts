@@ -1,9 +1,13 @@
-// The panel beside the editor: the Page preview, the Comments and the History, one tab at a
-// time. It's shown and hidden as a whole (Ctrl+Shift+P). Which tab is open and
+// The panel beside the editor: the Page preview, the Comments, the Footnotes and the History,
+// one tab at a time. It's shown and hidden as a whole (Ctrl+Shift+P). Which tab is open and
 // whether the panel shows are Device state, kept in this Device's local storage.
+//
+// The Footnotes tab is offered only while the Work in front has a Footnote or an Annotation
+// (CONTEXT.md). Open when its last one goes, it stays until another tab is picked, so writing a
+// Footnote and deleting it again doesn't make it come and go.
 
-export type PanelTab = "pages" | "comments" | "history";
-const TABS: PanelTab[] = ["pages", "comments", "history"];
+export type PanelTab = "pages" | "comments" | "footnotes" | "history";
+const TABS: PanelTab[] = ["pages", "comments", "footnotes", "history"];
 
 export type PanelState = { shown: boolean; tab: PanelTab };
 
@@ -20,6 +24,8 @@ export function readPanelState(get: (key: string) => string | null): PanelState 
 export class SidePanel {
   shown = false;
   tab: PanelTab = "pages";
+  /** Tabs not offered just now (the Footnotes tab, in a Work without any). */
+  private unavailable = new Set<PanelTab>(["footnotes"]);
 
   /**
    * `changed` runs after every change, with whether the Page preview is in view (it only
@@ -38,8 +44,9 @@ export class SidePanel {
       button.addEventListener("keydown", (e) => {
         if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
         e.preventDefault();
-        const i = TABS.indexOf(this.tab);
-        const next = TABS[(i + (e.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length];
+        const offered = this.offered();
+        const i = offered.indexOf(this.tab);
+        const next = offered[(i + (e.key === "ArrowRight" ? 1 : offered.length - 1)) % offered.length];
         this.setTab(next);
         this.tabs.find((t) => t.dataset.tab === next)?.focus();
       });
@@ -53,6 +60,32 @@ export class SidePanel {
     this.shown = remembered.shown;
     this.tab = remembered.tab;
     this.apply();
+  }
+
+  /** The tabs offered now, in order (the open one always among them). */
+  offered(): PanelTab[] {
+    return TABS.filter((t) => t === this.tab || !this.unavailable.has(t));
+  }
+
+  /**
+   * Offers a tab, or stops offering it. A tab that's open stays while it's in view, unless
+   * `now` (another Work came to the front): then the panel goes to its Pages.
+   */
+  setAvailable(tab: PanelTab, available: boolean, now = false) {
+    const was = this.unavailable.has(tab);
+    if (available) this.unavailable.delete(tab);
+    else this.unavailable.add(tab);
+    if (!available && this.tab === tab && (now || !this.shown)) {
+      this.tab = "pages";
+      this.apply();
+      return;
+    }
+    if (was !== !available) this.showTabs();
+  }
+
+  /** Is this tab offered now? */
+  isAvailable(tab: PanelTab): boolean {
+    return !this.unavailable.has(tab);
   }
 
   /** The Page preview is in view: the panel is shown with its Pages tab. */
@@ -76,13 +109,19 @@ export class SidePanel {
     this.apply();
   }
 
-  private apply() {
-    this.root.hidden = !this.shown;
+  private showTabs() {
     for (const button of this.tabs) {
-      const selected = button.dataset.tab === this.tab;
+      const tab = button.dataset.tab as PanelTab;
+      const selected = tab === this.tab;
       button.setAttribute("aria-selected", String(selected));
       button.tabIndex = selected ? 0 : -1;
+      button.hidden = !selected && this.unavailable.has(tab);
     }
+  }
+
+  private apply() {
+    this.root.hidden = !this.shown;
+    this.showTabs();
     for (const tab of TABS) this.panes[tab].hidden = tab !== this.tab;
     this.toggleButton.textContent = this.shown ? "Hide panel" : "Show panel";
     try {

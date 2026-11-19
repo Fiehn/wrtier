@@ -170,6 +170,8 @@ pub struct CommentView {
     pub quote: String,
     /// A Work comment: on the Work as a whole, not on any of its text (ADR 0017).
     pub on_work: bool,
+    /// On one of the Work's Annotations as a whole (its ID, ADR 0020), not on any text.
+    pub on_annotation: Option<String>,
     /// Where its visible characters are in the text the Author sees (`text()`): start..end in
     /// characters, in reading order. Several when a Move split its text or text was Moved into
     /// it; empty when it's a Detached comment or a Work comment.
@@ -182,7 +184,7 @@ impl CommentView {
     /// None of its text is visible: it's listed apart, with its quote, until some comes back.
     /// A Work comment has no text, so it's never one.
     pub fn is_detached(&self) -> bool {
-        !self.on_work && self.ranges.is_empty()
+        !self.on_work && self.on_annotation.is_none() && self.ranges.is_empty()
     }
 }
 
@@ -1177,6 +1179,46 @@ impl Doc {
         Some(self.commit_local(ChangeKind::Revert { targets }, now_ms))
     }
 
+    // ---- Anchoring from another Work (Annotations) ----
+
+    /// The `len` characters at `index` of the History's text (without the open burst's draft),
+    /// as a Comment's pieces would hold them: for another Work to cover them (an Annotation, which
+    /// lives in the Work that includes this one). Empty if there's nothing there.
+    pub fn pieces_at(&self, index: usize, len: usize) -> Vec<Span> {
+        let end = (index + len).min(self.visible.len());
+        if index >= end {
+            return Vec::new();
+        }
+        self.comment_pieces(&self.visible[index..end])
+    }
+
+    /// Where the visible characters the `pieces` cover are in the History's text (without the
+    /// open burst's draft), in order: every node in each piece's range in the tree's fixed order,
+    /// so text later typed inside is covered too. Pieces naming characters this History doesn't
+    /// have (yet) cover nothing.
+    pub fn covered(&self, pieces: &[Span]) -> Vec<usize> {
+        if pieces.is_empty() {
+            return Vec::new();
+        }
+        let order = self.tree.order();
+        let pos = positions(&order, self.tree.len());
+        let mut index_of = vec![u32::MAX; self.tree.len()];
+        for (i, &node) in self.visible.iter().enumerate() {
+            index_of[node as usize] = i as u32;
+        }
+        let mut at: Vec<usize> = Vec::new();
+        for span in pieces {
+            let (Some(first), Some(last)) = (self.tree.index_of(span.first), self.tree.index_of(span.last)) else { continue };
+            let (lo, hi) = (pos[first as usize] as usize, pos[last as usize] as usize);
+            if lo <= hi {
+                at.extend(order[lo..=hi].iter().map(|&n| index_of[n as usize]).filter(|&i| i != u32::MAX).map(|i| i as usize));
+            }
+        }
+        at.sort_unstable();
+        at.dedup();
+        at
+    }
+
     // ---- Comments ----
 
     /// Adds a Comment on the `len` characters at `index` of the text (no burst may be open; the
@@ -1196,6 +1238,16 @@ impl Doc {
     pub fn work_comment_local(&mut self, sender: &str, body: &str, now_ms: u64) -> Change {
         self.assert_no_burst();
         self.commit_local(ChangeKind::Comment { pieces: Vec::new(), quote: String::new(), sender: sender.to_string(), body: body.to_string() }, now_ms)
+    }
+
+    /// Adds a Comment on one of the Work's Annotations as a whole (its ID, ADR 0020): a Comment
+    /// with no pieces, like a Work comment, whose record names the Annotation. `quote`: what of
+    /// the Annotation's text it's about. Two Changes: the Comment, then what it's on.
+    pub fn annotation_comment_local(&mut self, annotation: &str, quote: &str, sender: &str, body: &str, now_ms: u64) -> Vec<Change> {
+        self.assert_no_burst();
+        let comment = self.commit_local(ChangeKind::Comment { pieces: Vec::new(), quote: quote.to_string(), sender: sender.to_string(), body: body.to_string() }, now_ms);
+        let on = self.set_field_local(&comment_record(comment.id), "annotation", annotation, now_ms);
+        vec![comment, on]
     }
 
     /// Ranges in the tree's fixed order that hold exactly the `selected` nodes: a new piece
@@ -1297,7 +1349,8 @@ impl Doc {
                     body: self.field(&record, "body").unwrap_or(&c.body).to_string(),
                     resolved: self.field(&record, "resolved") == Some("yes"),
                     quote: c.quote.clone(),
-                    on_work: c.pieces.is_empty(),
+                    on_work: c.pieces.is_empty() && self.field(&record, "annotation").is_none(),
+                    on_annotation: c.pieces.is_empty().then(|| self.field(&record, "annotation").map(str::to_string)).flatten(),
                     ranges,
                     replies: replies.into_iter().map(|r| {
                         let record = comment_record(r.id);
@@ -2329,6 +2382,59 @@ mod test {
         // Editing it again (having seen the notice) settles it.
         laptop.set_field_local(PREAMBLE_RECORD, "raw", "#set par(leading: 0.8em)\n#show link: underline", 3_700_000);
         assert!(laptop.merge_notices().is_empty());
+    }
+
+    #[test]
+    fn an_annotation_changed_on_two_devices_gets_a_notice() {
+        use crate::change::{annotation_record, ANNOTATION_FIELD};
+        let (mut laptop, mut phone) = laptop_and_phone();
+        let record = annotation_record("a1");
+        let first = laptop.set_field_local(&record, ANNOTATION_FIELD, r#"{"work":"w","body":"one"}"#, 1000);
+        phone.apply(&first);
+        let a = phone.set_field_local(&record, ANNOTATION_FIELD, r#"{"work":"w","body":"phone"}"#, 2_000);
+        let b = laptop.set_field_local(&record, ANNOTATION_FIELD, r#"{"work":"w","body":"laptop"}"#, 3_602_000);
+        laptop.apply(&a);
+        phone.apply(&b);
+        for doc in [&laptop, &phone] {
+            let notices = doc.merge_notices();
+            assert_eq!(notices.len(), 1);
+            let (_, _, lost) = doc.concurrent_field(notices[0].key).unwrap();
+            assert_eq!(lost, r#"{"work":"w","body":"phone"}"#);
+        }
+    }
+
+    #[test]
+    fn text_can_be_anchored_from_another_work_and_follows_its_characters() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "The rain had stopped.", 1000);
+        let pieces = doc.pieces_at(4, 8); // "rain had"
+        assert_eq!(doc.covered(&pieces), (4..12).collect::<Vec<_>>());
+        // Read back from text, as another Work's record holds them.
+        let again: Vec<Span> = pieces.iter().map(|p| Span::parse(&p.to_text()).unwrap()).collect();
+        assert_eq!(doc.covered(&again), (4..12).collect::<Vec<_>>());
+        // Text typed before it moves it along; text typed inside is covered too.
+        doc.insert_local(0, "Then ", 2000);
+        doc.close_burst(2001);
+        doc.insert_local(13, " just", 3000);
+        doc.close_burst(3001);
+        assert_eq!(doc.text(), "Then The rain just had stopped.");
+        let covered: String = doc.covered(&pieces).into_iter().map(|i| doc.text().chars().nth(i).unwrap()).collect();
+        assert_eq!(covered, "rain just had");
+        // All of it deleted: nothing covered (an Annotation on it is detached).
+        doc.delete_local(9, 13, 4000);
+        doc.close_burst(4001);
+        assert!(doc.covered(&pieces).is_empty());
+        assert!(doc.pieces_at(100, 3).is_empty());
+    }
+
+    #[test]
+    fn a_comment_on_an_annotation_is_neither_on_text_nor_on_the_work() {
+        let mut doc = Doc::new(DeviceId(1));
+        doc.insert_local(0, "Text.", 1000);
+        doc.close_burst(1001);
+        doc.annotation_comment_local("a1", "the note", AUTHOR, "Too long?", 2000);
+        let c = &doc.comments()[0];
+        assert_eq!((c.on_work, c.on_annotation.as_deref(), c.quote.as_str(), c.is_detached()), (false, Some("a1"), "the note", false));
     }
 
     #[test]

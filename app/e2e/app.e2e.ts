@@ -752,6 +752,71 @@ test("an Export with an Inclusion that can't be shown asks first", async ({ app 
   await expect.poll(exported).toBe(1);
 });
 
+test("a Footnote is written at the cursor, folds to its number, and lists in the Footnotes tab", async ({ app }) => {
+  await endOf(app, "She walked home.");
+  // No Footnotes yet: no tab for them.
+  await expect(app.locator("#panel-tab-footnotes")).toBeHidden();
+  await app.keyboard.press("Control+Alt+f");
+  await app.keyboard.type("In the rain.");
+  // Open while the cursor is in it: its number, then its text.
+  await expect(app.locator(".cm-tp-footnote-open")).toHaveText("1");
+  await expect(app.locator(".cm-tp-footnote")).toHaveText("In the rain.");
+  // The cursor leaves: folded to its number, the sentence reading on.
+  await app.keyboard.press("Control+Home");
+  await expect(app.locator(".cm-tp-footnote")).toHaveCount(0);
+  await expect(app.locator(".cm-tp-footnote-mark")).toHaveText("1");
+  // The Footnotes tab is offered now, and lists it.
+  await app.locator("#panel-toggle").click();
+  await app.locator("#panel-tab-footnotes").click();
+  await expect(app.locator(".footnote-row")).toContainText("In the rain.");
+  // Clicking it puts the cursor in it: open again.
+  await app.locator(".footnote-row").click();
+  await expect(app.locator(".cm-tp-footnote")).toHaveText("In the rain.");
+});
+
+test("included text is annotated: the note is kept here and numbered in the text", async ({ app }) => {
+  await endOf(app, "She walked home.");
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "Chapter: The Navidson Record" }).click();
+  const text = app.locator(".cm-inclusion-text p", { hasText: "quarter inch" });
+  await expect(text).toBeVisible();
+  // Select "quarter inch" in it, then Insert footnote's key: an Annotation.
+  await text.evaluate((p) => {
+    const node = p.firstChild!;
+    const start = node.textContent!.indexOf("quarter inch");
+    const range = document.createRange();
+    range.setStart(node, start);
+    range.setEnd(node, start + "quarter inch".length);
+    getSelection()!.removeAllRanges();
+    getSelection()!.addRange(range);
+    (p.closest(".cm-inclusion") as HTMLElement).focus();
+  });
+  await app.keyboard.press("Control+Alt+f");
+  const dialog = app.locator("dialog.annotation-dialog");
+  await expect(dialog).toContainText("Annotation on “quarter inch”");
+  await dialog.locator(".cm-content").click();
+  await app.keyboard.type("Truant measured it twice.");
+  await dialog.locator("button", { hasText: "Annotate" }).click();
+  const sent = await app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "annotate")?.args);
+  expect(sent).toMatchObject({ id: "Rain", from: 23 + "It measured a ".length, to: 23 + "It measured a quarter inch".length, body: "Truant measured it twice." });
+  // Its number follows what it covers, which is marked.
+  await expect(app.locator(".cm-inclusion .cm-incl-annotation")).toHaveAttribute("data-n", "1");
+  await expect(app.locator(".cm-inclusion .cm-annotated")).toHaveText("quarter inch");
+  // Opened from its number, changed.
+  await app.locator(".cm-inclusion .cm-incl-annotation").click();
+  await expect(dialog).toBeVisible();
+  await dialog.locator(".cm-content").click();
+  await app.keyboard.press("Control+End");
+  await app.keyboard.type(" Then again.");
+  await dialog.locator("button", { hasText: "Save" }).click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.log.find((e: any) => e.cmd === "set_annotation")?.args.body)).toBe("Truant measured it twice. Then again.");
+  // Listed in the Footnotes tab as this Work's.
+  await app.locator("#panel-toggle").click();
+  await app.locator("#panel-tab-footnotes").click();
+  await expect(app.locator(".footnote-row.annotation.mine")).toContainText("Then again.");
+});
+
 test("a Comment on included text is kept in the Work it comes from, and shown here", async ({ app }) => {
   await endOf(app, "She walked home.");
   await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });

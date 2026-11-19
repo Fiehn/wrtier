@@ -21,6 +21,8 @@
     included: {},
     /** Comments made on included text, by the Work they're kept in (positions in the shown text). */
     includedComments: {},
+    /** Annotations (ADR 0020), by the Work that made them: on its Inclusion at `at`, `from..to` in its text. */
+    annotations: {},
     changes: 1,
     /** Mods each Work has (the Chapter list is on Rain). */
     mods: { Rain: ["chapters", "counts"] },
@@ -279,6 +281,22 @@
       list.push({ id: `ic${list.length + 1}`, from, to, sender, body, quote, replies: [] });
       return null;
     },
+    annotate: ({ id, at, from, to, body }) => {
+      const list = (fake.annotations[id] ??= []);
+      const quote = handlers.get_inclusions({ id }).find((v) => v.at === at).text.slice(from, to);
+      const made = `an${list.length + 1}`;
+      list.push({ id: made, at, from, to, body: body.trim(), quote });
+      return made;
+    },
+    set_annotation: ({ id, annotation, body }) => {
+      (fake.annotations[id] ?? []).find((a) => a.id === annotation).body = body.trim();
+      return null;
+    },
+    delete_annotation: ({ id, annotation }) => {
+      fake.annotations[id] = (fake.annotations[id] ?? []).filter((a) => a.id !== annotation);
+      return null;
+    },
+    detached_annotations: () => [],
     comment_in: ({ work, ops }) => {
       for (const op of ops) {
         const c = (fake.includedComments[work] ?? []).find((x) => x.id === op.comment);
@@ -367,7 +385,10 @@
         }));
         const found = fake.splits?.[target.work];
         const split = found && found.after === target.chapter && !target.settled ? { title: found.title, at: found.at } : null;
-        views.push({ at, work: target.work, label, chapter, text: shown.trimEnd(), missing: null, language: "en", whole: target.chapter === null, starts: target.chapter ?? 0, comments, split, styles: target.styles ?? [] });
+        const annotations = (fake.annotations[id] ?? []).filter((a) => a.at === at).map((a) => ({
+          id: a.id, owner: id, ownerLabel: id, mine: true, at: a.to, ranges: [[a.from, a.to]], body: a.body, quote: a.quote, notes: [],
+        }));
+        views.push({ at, work: target.work, label, chapter, text: shown.trimEnd(), missing: null, language: "en", whole: target.chapter === null, starts: target.chapter ?? 0, comments, split, styles: target.styles ?? [], annotations });
       }
       return views;
     },

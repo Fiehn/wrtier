@@ -12,6 +12,10 @@ import { PreambleDialog, type Preamble } from "./preambledialog";
 import { colourOf, COLOURS, reviewersTab, type Reviewer } from "./reviewers";
 import { SidePanel, type PanelTab } from "./sidepanel";
 import { CommentsPanel } from "./commentspanel";
+import { FootnotesPanel, type DetachedRow } from "./footnotespanel";
+import { findAnnotation, insertFootnote } from "./footnotes";
+import { askAnnotation } from "./annotationdialog";
+import { inclusionsOf } from "./inclusions";
 import { HistoryPanel, type ComparisonView, type HistoryView, type RestorePreview, type ReturnPreview, type RevertPreview, type SnippetsView } from "./historypanel";
 import { bindingsFrom, COMMANDS, isCommand, keyLabel, onBindingsChanged, setBindings, withKey, type CommandId } from "./keys";
 import { shortcutsTab } from "./shortcutsdialog";
@@ -21,7 +25,7 @@ import { PhoneLayout } from "./phone";
 import { PanelSizes } from "./panelsizes";
 import { fillNewWorkMods, fillVaultMods, openMods } from "./modsdialog";
 import { fillDictionaries } from "./spellmod";
-import { inUse, modNamed, noSettings, vaultModInUse, type ModContext, type ModSettings, type ModsState } from "./mods";
+import { inUse, modExtensions, modNamed, noSettings, vaultModInUse, type ModContext, type ModSettings, type ModsState } from "./mods";
 import { LEVEL_NAMES, type MarkCounts, type MarkLevel } from "./marks";
 import { ChapterList } from "./chapterlist";
 import { CountLine } from "./countline";
@@ -228,6 +232,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     showToolbar();
     preview.show(tabs.activeIsWork ? tabs.active : null);
     commentsPanel.render();
+    footnotesPanel.workChanged();
     historyPanel.workChanged();
     showModViews();
     rememberSoon();
@@ -242,6 +247,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     chapterList.edited(id);
     countLine.edited(id);
     findInVault.edited(id);
+    footnotesPanel.edited(id);
   },
   committed: (id) => preview.committed(id),
   cursor: (id, at) => {
@@ -269,6 +275,8 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     if (id === tabs.active) commentsPanel.render();
   },
   addComment: (id) => startComment(id),
+  footnote: (id) => footnoteIn(id),
+  annotation: (id, _at, annotation, owner) => openAnnotation(id, annotation, owner),
   selectionMenu: (id, x, y) => showMenu(x, y, selectionMenu(id)),
   historyGrew: (id) => historyPanel.grew(id),
   textHistory: (id) => textHistory(id),
@@ -425,16 +433,132 @@ function textHistory(id: string) {
   });
 }
 
+// ---- Footnotes ----
+
+// The Footnotes tab: offered only while the Work in front has a Footnote (sidepanel.ts).
+const footnotesPanel = new FootnotesPanel($("footnotes-list"), {
+  work: () => (tabs.activeIsWork ? tabs.active : null),
+  view: (work) => tabs.viewOf(work),
+  go: (work, at) => {
+    const view = tabs.viewOf(work);
+    if (!view) return;
+    phone.toWrite();
+    view.dispatch({ selection: { anchor: Math.min(at, view.state.doc.length) }, scrollIntoView: true });
+    view.focus();
+  },
+  openAnnotation: (work, annotation, owner) => openAnnotation(work, annotation, owner),
+  detached: (work) => invoke<DetachedRow[]>("detached_annotations", { id: work }),
+  deleteAnnotations: (work, ids) => act(async () => {
+    const what = ids.length === 1 ? "this Detached annotation" : `these ${ids.length} Detached annotations`;
+    if (!(await confirmAsk(`Delete ${what}? Undo brings each back.`, "Delete"))) return;
+    await tabs.settled(work);
+    for (const annotation of ids) await invoke("delete_annotation", { id: work, annotation });
+    annotationsChanged(work);
+  }),
+  available: (has, now) => {
+    panel.setAvailable("footnotes", has, now);
+    const button = $("phone-footnotes");
+    if (has || now || phone.screen !== "footnotes") button.hidden = !has;
+    if (!has && now && phone.screen === "footnotes") phone.show("write");
+  },
+});
+
+/** Its key (Ctrl+Alt+F at first), the toolbar's Note, or "Insert footnote": `#footnote[]` at the cursor or around the selection. */
+function footnoteIn(id: string, included = tabs.includedSelectionOf(id)) {
+  const view = tabs.viewOf(id);
+  if (!view) return;
+  // On included text, which can't be changed here: a note on it is an Annotation (ADR 0020).
+  if (included) {
+    annotateIncluded(id, included);
+    return;
+  }
+  view.dispatch({ ...insertFootnote(view.state), scrollIntoView: true, userEvent: "input.footnote" });
+  view.focus();
+}
+
+/** Short enough to name in a title. */
+const clipped = (text: string, n = 60) => (text.length > n ? `${text.slice(0, n).trimEnd()}…` : text);
+
+/** A new Annotation on text selected in an Inclusion: written in its own small editor, then kept in this Work. */
+function annotateIncluded(id: string, included: { at: number; from: number; to: number; quote: string; label: string }) {
+  act(async () => {
+    const answer = await askAnnotation({ title: `Annotation on “${clipped(included.quote.replace(/\s+/g, " "))}”`, quote: "", body: "", editable: true, existing: false, mods: annotationMods(id) });
+    if (answer?.kind !== "save" || !answer.body.trim()) return;
+    await tabs.settled(id);
+    await invoke("annotate", { id, at: included.at, from: included.from, to: included.to, body: answer.body });
+    annotationsChanged(id);
+  });
+}
+
+/** An Annotation's number clicked (or its row in the Footnotes tab): this Work's own to change, another's to read. */
+function openAnnotation(id: string, annotation: string, owner: string) {
+  const view = tabs.viewOf(id);
+  if (!view) return;
+  const found = findAnnotation(inclusionsOf(view.state), annotation, owner);
+  if (!found) {
+    showError("That Annotation isn't shown here any more.");
+    return;
+  }
+  const { note, on } = found;
+  act(async () => {
+    const whose = note.mine ? "" : `${note.ownerLabel || "Another Work"}'s `;
+    const answer = await askAnnotation({
+      title: on ? `${whose}Annotation on a note` : `${whose}Annotation on “${clipped(note.quote.replace(/\s+/g, " "))}”`,
+      quote: on ? on.body : "",
+      body: note.body,
+      editable: note.mine,
+      existing: true,
+      canAnnotate: !note.mine,
+      canComment: note.mine,
+      mods: annotationMods(id),
+    });
+    if (!answer) return;
+    await tabs.settled(id);
+    if (answer.kind === "save") {
+      if (!answer.body.trim()) {
+        if (await confirmAsk("Delete this Annotation? Undo brings it back.", "Delete")) await invoke("delete_annotation", { id, annotation });
+      } else {
+        await invoke("set_annotation", { id, annotation, body: answer.body });
+      }
+    } else if (answer.kind === "delete") {
+      await invoke("delete_annotation", { id, annotation });
+    } else if (answer.kind === "comment") {
+      openTab("comments");
+      await commentsPanel.startAddingAnnotation(id, annotation, note.body);
+      return;
+    } else if (answer.kind === "annotate") {
+      const more = await askAnnotation({ title: `Annotation on ${whose}note`, quote: note.body, body: "", editable: true, existing: false, mods: annotationMods(id) });
+      if (more?.kind !== "save" || !more.body.trim()) return;
+      await invoke("annotate_annotation", { id, owner, on: annotation, body: more.body });
+    }
+    annotationsChanged(id);
+  });
+}
+
+/** The Work's Mods in use here, for an Annotation's editor: they check its text in the Work's language. */
+function annotationMods(id: string) {
+  const state = modsOf.get(id);
+  return state ? modExtensions(inUse(state), modContext(id)) : [];
+}
+
+/** An Annotation was made, changed or deleted in `id`: its Inclusions and the Footnotes tab follow. */
+function annotationsChanged(id: string) {
+  tabs.refreshInclusionsOf(id);
+  footnotesPanel.edited(id);
+}
+
 // Shown or not, and which tab, are remembered on this Device. The pages only compile while
 // their tab is showing, and the History only loads while its tab is.
 const panel = new SidePanel(
   $("side-panel"),
-  [$("panel-tab-pages"), $("panel-tab-comments"), $("panel-tab-history")],
-  { pages: $("preview"), comments: $("comments-pane"), history: $("history-pane") },
+  [$("panel-tab-pages"), $("panel-tab-comments"), $("panel-tab-footnotes"), $("panel-tab-history")],
+  { pages: $("preview"), comments: $("comments-pane"), footnotes: $("footnotes-pane"), history: $("history-pane") },
   $("panel-toggle"),
   (pagesInView, inView) => {
     preview.setOpen(pagesInView);
     historyPanel.setVisible(inView === "history");
+    // (Not while the panel is being made: the Footnotes tab asks it what's offered.)
+    queueMicrotask(() => footnotesPanel.setVisible(inView === "footnotes"));
   },
 );
 
@@ -497,6 +621,10 @@ const commentsPanel = new CommentsPanel($("comments-list"), $("comments-new"), {
     });
     return 1;
   },
+  showAnnotation: (work, annotation) => {
+    phone.toWrite();
+    openAnnotation(work, annotation, "");
+  },
   setPending: (work, range) => tabs.setPending(work, range),
   pendingRange: (work) => tabs.pendingRange(work),
   reviewers: () => invoke<Reviewer[]>("get_reviewers"),
@@ -547,6 +675,7 @@ function selectionMenu(id: string): MenuItem[] {
   if (included) {
     return [
       { label: withKey("Add Comment", "addComment"), run: () => startComment(id, included) },
+      { label: withKey("Annotate", "footnote"), run: () => footnoteIn(id, included) },
       { label: "Copy", run: () => act(() => navigator.clipboard.writeText(included.quote)) },
     ];
   }
@@ -557,6 +686,7 @@ function selectionMenu(id: string): MenuItem[] {
   };
   return [
     { label: withKey("Add Comment", "addComment"), run: () => startComment(id) },
+    { label: withKey("Insert footnote", "footnote"), run: () => footnoteIn(id) },
     { label: withKey("History of this text", "textHistory"), run: () => textHistory(id) },
     { label: withKey("Find and replace…", "find"), run: () => findBar.open(false) },
     "separator",
@@ -2058,7 +2188,7 @@ $("toolbar-view").addEventListener("click", () => setFormatted(!tabs.formatted))
 /** Shown with a tab in front; Comments, the History and the views are a Work's only. */
 function showToolbar() {
   toolbar.hidden = tabs.active === null;
-  for (const id of ["addComment", "textHistory"]) {
+  for (const id of ["addComment", "footnote", "textHistory"]) {
     toolbar.querySelector<HTMLButtonElement>(`[data-command="${id}"]`)!.disabled = !tabs.activeIsWork;
   }
   $<HTMLButtonElement>("toolbar-view").disabled = !tabs.activeIsWork;

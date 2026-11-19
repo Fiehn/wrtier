@@ -1,7 +1,7 @@
 // Where the markup is in the prose part of Typst, for the Formatted view.
 //
 // A small parser on purpose (see the plan): headings, *strong*, _emphasis_, `raw`, comments,
-// escapes, line breaks, #code, labels and references, math, links, list markers, and the
+// escapes, line breaks, #code, Footnotes, labels and references, math, links, list markers, and the
 // dashes and ellipsis Typst turns into glyphs. It only tells the editor how to show the text;
 // compiling always uses Typst itself. Nothing it finds reaches past a blank line, so parsing
 // one paragraph gives the same result as parsing the whole Work, and where it disagrees with
@@ -14,6 +14,8 @@ export type Span =
   | { kind: "strong" | "emph"; from: number; to: number; open: [number, number]; close: [number, number] }
   /** `` `raw` `` or ```` ```raw``` ````: `open` and `close` are the backticks (and language). */
   | { kind: "raw"; from: number; to: number; open: [number, number]; close: [number, number] }
+  /** `#footnote[…]`: `open` is `#footnote[`, `close` its `]`; the text between is markup again. */
+  | { kind: "footnote"; from: number; to: number; open: [number, number]; close: [number, number] }
   /** `\x`: the backslash hides, the character shows. */
   | { kind: "escape"; from: number; to: number }
   /** `--`, `---`, `...`: shown as `glyph`. */
@@ -32,7 +34,7 @@ export function parseMarkup(text: string, base = 0): Span[] {
   const spans: Span[] = [];
   const n = text.length;
   /** Open `*` and `_` (strong, emphasis) and `[` of content blocks, innermost last. */
-  let open: { kind: "strong" | "emph" | "content"; at: number }[] = [];
+  let open: { kind: "strong" | "emph" | "content"; at: number; footnote?: number }[] = [];
   let lineStart = true;
   let i = 0;
 
@@ -202,6 +204,12 @@ export function parseMarkup(text: string, base = 0): Span[] {
         continue;
       }
       if (text[j] === "[" && balanced(j) !== -1) {
+        // A Footnote: the whole of it is one span, made when its `]` is reached.
+        if (text.slice(i + 1, j) === "footnote") {
+          open.push({ kind: "content", at: j, footnote: i });
+          i = j + 1;
+          continue;
+        }
         add({ kind: "code", ...at(i, j + 1) });
         open.push({ kind: "content", at: j });
         i = j + 1;
@@ -214,8 +222,11 @@ export function parseMarkup(text: string, base = 0): Span[] {
     if (c === "]") {
       const index = open.map((o) => o.kind).lastIndexOf("content");
       if (index !== -1) {
+        const head = open[index].footnote;
+        const bracket = open[index].at;
         open = open.slice(0, index); // anything still open inside it ends with it
-        add({ kind: "code", ...at(i, i + 1) });
+        if (head !== undefined) add({ kind: "footnote", ...at(head, i + 1), open: [base + head, base + bracket + 1], close: [base + i, base + i + 1] });
+        else add({ kind: "code", ...at(i, i + 1) });
         i++;
         continue;
       }

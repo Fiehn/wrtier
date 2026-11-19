@@ -36,6 +36,13 @@ impl Doc {
     /// Replaces each of `edits` (which mustn't overlap), as one action. `find`, `with` and
     /// `count` say what it was, for the History view. Returns the Changes recorded.
     pub fn replace_matches_local(&mut self, edits: &[ReplaceEdit], find: &str, with: &str, count: usize, now_ms: u64) -> Vec<Change> {
+        self.replace_and_set_local(edits, &[], find, with, count, now_ms)
+    }
+
+    /// `replace_matches_local`, also setting `fields` (record, field, value) in the same action:
+    /// matches replaced in text kept in fields (an Annotation's), which undo takes back with
+    /// the rest.
+    pub fn replace_and_set_local(&mut self, edits: &[ReplaceEdit], fields: &[(String, String, String)], find: &str, with: &str, count: usize, now_ms: u64) -> Vec<Change> {
         self.assert_no_burst();
         let mut sorted: Vec<&ReplaceEdit> = edits.iter().collect();
         // Last first: each one only touches the tree after the earlier ones' places, so what's
@@ -59,6 +66,9 @@ impl Doc {
             }
         }
         self.refresh();
+        for (record, field, value) in fields {
+            changes.push(self.set_field_local(record, field, value, now_ms));
+        }
         if changes.len() > 1 {
             let record = replace_record(changes[0].id);
             let ids = changes.iter().map(|c| c.id.to_string()).collect::<Vec<_>>().join(",");
