@@ -21,7 +21,7 @@ import { bindings, COMMANDS, withKey, type CommandId } from "./keys";
 import { chaptersIn, type IncludedEntry, type MoveOp } from "./chapters";
 import { sessionTints, setTints } from "./sessiontints";
 import { makesMarks, modExtensions, type Mod, type ModContext } from "./mods";
-import { dismissKey, markActions, markAt, marks, openCardAtCursor, setDismissed, stepMark, withSuggestions, type Mark, type MarkCounts } from "./marks";
+import { dismissKey, marks, openCardAt, openCardAtCursor, setDismissed, stepMark, type Mark, type MarkCounts } from "./marks";
 import { INCLUSION, includedSelection, inclusions, inclusionsOf, placeInclusion, rawInclusions, readerText, setInclusions, workDrops, type InclusionView } from "./inclusions";
 import { wordsIn } from "./counts";
 import { findExtension } from "./find";
@@ -70,6 +70,12 @@ export type TabEvents = {
   annotation(id: string, at: number, annotation: string, owner: string): void;
   /** Right-click inside a selection: the app's own menu, at (x, y). */
   selectionMenu(id: string, x: number, y: number): void;
+  /** Right-click with nothing selected there (the cursor is put at the click): what can be put
+   *  there, at (x, y). `included`: in an Inclusion's text, where nothing can be. */
+  cursorMenu(id: string, x: number, y: number, included: boolean): void;
+  /** A long press selects text here (Android), and fires a right-click too: with nothing selected
+   *  and no Mark there, it's left to the system. */
+  longPressSelects: boolean;
   /** A Work's History grew (typing recorded, something taken in, a Revert...). */
   historyGrew(id: string): void;
   /** Its key (Ctrl+Shift+H at first): the History of the selection, or the paragraph. */
@@ -82,8 +88,6 @@ export type TabEvents = {
   dropWork(id: string, work: string, pos: number): void;
   /** "Styles" on an Inclusion's bar: pick Styles for it only (it has `styles`), with a menu at (x, y). */
   inclusionStyles(id: string, at: number, styles: string[], x: number, y: number): void;
-  /** Right-click on a Mark: the app's menu with what it offers, at (x, y). */
-  markMenu(id: string, x: number, y: number, items: { label: string; run: () => void }[]): void;
   /** "Stop checking this rule in this Work" on a Mark's card. */
   stopRule(id: string, mark: Mark): void;
   /** How many Marks of each kind the Work's editor shows now. */
@@ -360,31 +364,40 @@ class Tab {
     this.sync.requestHighlights();
     this.sync.setTinting(tabs.tinting);
 
-    // Right-click on a Mark: what it offers. Inside a selection: the app's menu (Add Comment,
-    // Cut, Copy, Paste). Anywhere else the system's own: spelling is the Spellchecker's Marks,
-    // never the system's (CONTEXT.md).
+    // Right-click is always the app's, never the system's (spelling is the Spellchecker's Marks,
+    // CONTEXT.md). Inside a selection: what can be done with it (Add Comment, Cut, Copy, Paste).
+    // Anywhere else the cursor goes there first; then on a Mark its card opens, as a click opens
+    // it, and elsewhere a menu of what can be put there (Insert Image, Paste, Undo…).
+    // Where a long press selects text (Android), with nothing selected and no Mark it's left to
+    // the system (`longPressSelects`).
     this.view.contentDOM.addEventListener("contextmenu", (e) => {
-      // Text selected in an Inclusion's text (ADR 0015): the app's menu too, to comment on it.
-      const inIncluded = (e.target as Element).closest(".cm-inclusion") !== null;
-      if (inIncluded) {
-        if (!includedSelection(this.view)) return;
+      // An Inclusion's text (ADR 0015) can't be changed here: a selection in it can be commented
+      // on, and without one only the Work as a whole.
+      if ((e.target as Element).closest(".cm-inclusion") !== null) {
+        const selected = includedSelection(this.view) !== null;
+        if (tabs.events.longPressSelects && !selected) return;
         e.preventDefault();
-        tabs.events.selectionMenu(this.id, e.clientX, e.clientY);
+        if (selected) tabs.events.selectionMenu(this.id, e.clientX, e.clientY);
+        else tabs.events.cursorMenu(this.id, e.clientX, e.clientY, true);
         return;
       }
       const selection = this.view.state.selection.main;
       const pos = this.view.posAtCoords({ x: e.clientX, y: e.clientY });
-      // On a Mark: what it offers (its Suggestions, once they're in; the Mod's actions; Dismiss).
-      const mark = pos === null || !selection.empty ? null : markAt(this.view.state, pos);
-      if (mark) {
+      if (pos !== null && !selection.empty && pos >= selection.from && pos <= selection.to) {
         e.preventDefault();
-        const { clientX: x, clientY: y } = e;
-        void withSuggestions(this.view, mark).then((m) => tabs.events.markMenu(this.id, x, y, markActions(this.view, m)));
+        tabs.events.selectionMenu(this.id, e.clientX, e.clientY);
         return;
       }
-      if (selection.empty || pos === null || pos < selection.from || pos > selection.to) return;
+      if (pos !== null && openCardAt(this.view, pos)) {
+        e.preventDefault();
+        this.view.focus();
+        return;
+      }
+      if (tabs.events.longPressSelects) return;
       e.preventDefault();
-      tabs.events.selectionMenu(this.id, e.clientX, e.clientY);
+      this.view.focus();
+      if (pos !== null) this.view.dispatch({ selection: { anchor: pos } });
+      tabs.events.cursorMenu(this.id, e.clientX, e.clientY, false);
     });
     this.pane.addEventListener("wrtier-open-comments", (e) => tabs.events.openComments(this.id, (e as CustomEvent<string[]>).detail));
     this.pane.addEventListener("wrtier-add-comment", () => tabs.events.addComment(this.id));

@@ -2,7 +2,7 @@
 // three kinds shared by every Mod: a Mistake (red), a Rule break (yellow) and a Query (blue).
 // They're the app's, not the Mods': a Mod only says where a Mark goes, its kind, why, its
 // Suggestions and any actions of its own (`markSources`). Everything else is here, the same
-// whichever Mod made a Mark: drawing it, the card (hover, click, tap, Ctrl+.), accepting a
+// whichever Mod made a Mark: drawing it, the card (hover, click, right-click, tap, Ctrl+.), accepting a
 // Suggestion (an ordinary edit by the Author, as if typed: one undo step), dismissing it (kept by
 // the Vault, ADR 0018), going from one to the next (F8), and counting them.
 //
@@ -10,7 +10,7 @@
 // a sentence is half written. Marks the typing since touched are dropped until then. A Mod may
 // answer later (the Spellchecker asks Rust, ADR 0019); an answer about text that has changed
 // since is dropped, and the Mods look again once the typing pauses. A Mark's Suggestions may
-// also come later, asked for only when its card or the right-click menu shows them.
+// also come later, asked for only when its card shows them.
 
 import { Facet, Prec, StateEffect, StateField, type EditorState, type Extension, type Transaction } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, hoverTooltip, keymap, showTooltip, ViewPlugin, type Tooltip, type ViewUpdate } from "@codemirror/view";
@@ -303,15 +303,6 @@ export async function withSuggestions(view: EditorView, mark: Mark): Promise<Mar
   return done;
 }
 
-/** What a Mark offers, as menu items (right-click, the card): its Suggestions, the Mod's actions, Dismiss. */
-export function markActions(view: EditorView, mark: Mark): { label: string; run: () => void }[] {
-  return [
-    ...mark.suggestions.map((s, i) => ({ label: s.label, run: () => accept(view, mark, i) })),
-    ...(mark.actions ?? []).map((a) => ({ label: a.label, run: () => runAction(view, a) })),
-    { label: mark.dismissLabel ?? "Dismiss", run: () => dismiss(view, mark) },
-  ];
-}
-
 // ---- The card ----
 
 /** The card open on a Mark (by click, Ctrl+. or F8); `keys`: opened from the keyboard, so 1, 2, D and Esc act on it. */
@@ -429,6 +420,14 @@ export function openCardAtCursor(view: EditorView): boolean {
   const mark = markAt(view.state, head);
   if (!mark) return false;
   view.dispatch({ effects: openCard.of({ mark, keys: true }) });
+  return true;
+}
+
+/** Right-click on a Mark at `pos`: the cursor goes there and its card opens, as a click opens it. False if there's no Mark. */
+export function openCardAt(view: EditorView, pos: number): boolean {
+  const mark = markAt(view.state, pos);
+  if (!mark) return false;
+  view.dispatch({ selection: { anchor: pos }, effects: openCard.of({ mark, keys: false }) });
   return true;
 }
 

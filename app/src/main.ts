@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { redo, undo } from "@codemirror/commands";
+import type { EditorView } from "@codemirror/view";
 import { type WorkState } from "./sync";
 import { Tabs, type OpenedWork } from "./tabs";
 import type { Folder } from "./tree";
@@ -133,7 +135,8 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     showCount($("panel-tab-history"), "History", count);
   },
   modCommand: (id, command) => modCommand(id, command),
-  markMenu: (_id, x, y, items) => showMenu(x, y, items),
+  cursorMenu: (id, x, y, included) => showMenu(x, y, cursorMenu(id, included)),
+  longPressSelects: onAndroid,
   stopRule: (id, mark) => act(async () => {
     await invoke("set_mod_setting", { scope: "work", id, key: `${mark.mod}.rule.${mark.rule}`, value: "off" });
     await refreshMods(id);
@@ -723,20 +726,47 @@ function selectionMenu(id: string): MenuItem[] {
     "separator",
     { label: "Cut", run: command("cut") },
     { label: "Copy", run: command("copy") },
-    {
-      label: "Paste",
-      run: () => act(async () => {
-        let text: string;
-        try {
-          text = await navigator.clipboard.readText();
-        } catch {
-          throw new Error("The clipboard can't be read from this menu here. Use Ctrl+V.");
-        }
-        const { from, to } = view.state.selection.main;
-        view.focus();
-        view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length }, userEvent: "input.paste", scrollIntoView: true });
-      }),
-    },
+    { label: "Paste", run: () => pasteInto(view) },
+  ];
+}
+
+/** Paste from a menu: the clipboard's text in place of the selection (or at the cursor). */
+function pasteInto(view: EditorView) {
+  act(async () => {
+    let text: string;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      throw new Error("The clipboard can't be read from this menu here. Use Ctrl+V.");
+    }
+    const { from, to } = view.state.selection.main;
+    view.focus();
+    view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length }, userEvent: "input.paste", scrollIntoView: true });
+  });
+}
+
+/** Right-click with nothing selected there, the cursor moved to the click: what can be put there,
+ *  and Undo and Redo. In an Inclusion's text only a Comment on the Work; in a Style library file
+ *  (no Comments, footnotes or Images) Paste, Undo and Redo. */
+function cursorMenu(id: string, included: boolean): MenuItem[] {
+  const view = tabs.viewOf(id);
+  if (!view) return [];
+  if (included) return [{ label: "Comment on this Work…", run: commentOnWork }];
+  // A Work's undo goes through its History; a library file's editor has its own.
+  const work = tabs.activeIsWork;
+  const editing: MenuItem[] = [
+    { label: "Paste", run: () => pasteInto(view) },
+    "separator",
+    { label: "Undo", run: () => (work ? tabs.runCommand("undo") : undo(view)) },
+    { label: "Redo", run: () => (work ? tabs.runCommand("redo") : redo(view)) },
+  ];
+  if (!work) return editing;
+  return [
+    { label: "Insert Image…", run: () => insertImage(id) },
+    { label: "Insert footnote", run: () => footnoteIn(id) },
+    { label: "Comment on this Work…", run: commentOnWork },
+    "separator",
+    ...editing,
   ];
 }
 
