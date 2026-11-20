@@ -34,7 +34,7 @@ import { UninstallDialog } from "./uninstall";
 import { FindBar } from "./findbar";
 import { FindInVault, type TextForFinding, type VaultWork } from "./findinvault";
 import { ReadingPanel } from "./reading";
-import { $, act, ask, askText, clearError, confirmAsk, offer, onUpdatesAsked, showError, showProblems, wireCloseButtons } from "./ui";
+import { $, act, ask, askText, clearError, confirmAsk, offer, onUpdatesAsked, showError, showProblems, wireCloseButtons, closeDialogsOnClickOutside } from "./ui";
 import { PreambleActions } from "./preambleactions";
 import { VaultBrowser, type Entry } from "./vaultbrowser";
 import { MovingWorks } from "./movingworks";
@@ -44,6 +44,7 @@ import { SettingsDialog } from "./settingsdialog";
 // ---- Messages and dialogs (ui.ts) ----
 
 wireCloseButtons();
+closeDialogsOnClickOutside();
 
 /** How the Vault syncs through Syncthing: the line at the top of the sidebar and its dialog. */
 const syncPanel = new SyncPanel((message) => showError(message), (text, yes) => confirmAsk(text, yes));
@@ -58,7 +59,8 @@ const findBar = new FindBar({
     await tabs.reveal(work, at, at); // also when it was open already
   }),
 });
-$("find-open").addEventListener("click", () => findBar.open(false));
+// The tab row's Find opens the bar, and closes it again if it's open there.
+$("find-open").addEventListener("click", () => (findBar.openInFront ? findBar.close() : findBar.open(false)));
 
 // ---- Tabs ----
 

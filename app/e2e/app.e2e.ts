@@ -1213,6 +1213,40 @@ test("a Work's Preamble… and Mods… are in the tab row and its menu, not on t
   await expect(app.locator("#menu button", { hasText: "Mods…" })).toBeVisible();
 });
 
+test("a click outside a dialog closes it as Esc does, unless it started inside or the dialog says no", async ({ app }) => {
+  await app.locator("#library > summary").click();
+  const dialog = app.locator("#ask-text");
+  const plus = app.locator("#library .library-add").first();
+  await plus.click();
+  await expect(dialog).toBeVisible();
+  // Selecting the name and letting go outside: still open.
+  const field = (await app.locator("#ask-text-input").boundingBox())!;
+  await app.mouse.move(field.x + 5, field.y + field.height / 2);
+  await app.mouse.down();
+  await app.mouse.move(5, 5);
+  await app.mouse.up();
+  await expect(dialog).toBeVisible();
+  // A click on the backdrop: closed, and nothing made.
+  await app.mouse.click(5, 5);
+  await expect(dialog).toBeHidden();
+  expect(await app.evaluate(() => (window as any).__fake.log.some((e: any) => e.cmd === "create_library"))).toBe(false);
+  // A dialog that's busy (as an update installing) refuses Esc, and the click outside too.
+  await app.evaluate(() => document.getElementById("ask-text")!.addEventListener("cancel", (e) => e.preventDefault()));
+  await plus.click();
+  await app.mouse.click(5, 5);
+  await expect(dialog).toBeVisible();
+});
+
+test("the tab row's Find opens the Find bar, and closes it again", async ({ app }) => {
+  await app.locator("#find-open").click();
+  await expect(app.locator("#find-bar")).toBeVisible();
+  await expect(app.locator("#find-input")).toBeFocused();
+  await app.locator("#find-open").click();
+  await expect(app.locator("#find-bar")).toBeHidden();
+  await app.locator("#find-open").click();
+  await expect(app.locator("#find-bar")).toBeVisible();
+});
+
 // ---- The Reading panel (reading.ts) ----
 
 const reading = (page: Page) => page.locator("#reading-panel");

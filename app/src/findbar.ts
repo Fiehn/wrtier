@@ -94,6 +94,11 @@ export class FindBar {
     return !this.bar.hidden;
   }
 
+  /** Open over the tab in front (not the Reading panel): what the tab row's Find button closes. */
+  get openInFront(): boolean {
+    return this.isOpen && this.place === "front";
+  }
+
   /**
    * Ctrl+F (or Ctrl+H, `withReplace`). A selection within one line is what to find; one over
    * several lines is where to look ("In selection"). With `query` (Find in Vault's "Open with

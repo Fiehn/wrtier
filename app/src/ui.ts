@@ -106,7 +106,32 @@ export function wireCloseButtons() {
   }
 }
 
-/** Shows a <dialog> and resolves with the button that closed it ("" if Escape). */
+/**
+ * A click outside an open dialog (on its backdrop) closes it as Esc does: the dialog's "cancel"
+ * comes first, so one that's busy (installing an update…) stays open. Only a click that both
+ * starts and ends outside counts: selecting text in a field and letting go outside doesn't.
+ */
+export function closeDialogsOnClickOutside() {
+  const outside = (e: MouseEvent): HTMLDialogElement | null => {
+    const dialog = e.target;
+    if (!(dialog instanceof HTMLDialogElement) || !dialog.open) return null;
+    // On the dialog itself but outside its box: the backdrop (a modal dialog's backdrop is its own).
+    const r = dialog.getBoundingClientRect();
+    const inBox = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    return inBox ? null : dialog;
+  };
+  let pressed: HTMLDialogElement | null = null;
+  document.addEventListener("pointerdown", (e) => (pressed = outside(e)), true);
+  document.addEventListener("click", (e) => {
+    const dialog = outside(e);
+    const started = pressed;
+    pressed = null;
+    if (!dialog || dialog !== started) return;
+    if (dialog.dispatchEvent(new Event("cancel", { cancelable: true }))) dialog.close();
+  }, true);
+}
+
+/** Shows a <dialog> and resolves with the button that closed it ("" if Escape or a click outside). */
 export function ask(dialog: HTMLDialogElement): Promise<string> {
   return new Promise((resolve) => {
     dialog.addEventListener("close", () => resolve(dialog.returnValue), { once: true });
