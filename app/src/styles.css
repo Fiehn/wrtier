@@ -4628,3 +4628,162 @@ body.window-maximized #window-maximize .when-maximized {
   margin: 4px 0 0;
   font-size: 12px;
 }
+
+/* ---- The Marks panel (markspanel.ts): every Mark in the Work, by kind, each as its card ---- */
+
+#marks-pane {
+  padding: 12px 16px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+#marks-list > p.muted {
+  margin: 0;
+}
+
+.marks-kind > summary {
+  cursor: pointer;
+  color: var(--muted);
+  padding: 4px 0;
+}
+
+.marks-kind + .marks-kind {
+  margin-top: 8px;
+}
+
+.marks-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A Mark's card: its colour down the side, as in the editor. */
+.mark-entry {
+  margin: 6px 0 10px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--mark-query);
+  background: var(--bg);
+  border-radius: 0 5px 5px 0;
+}
+
+.mark-entry-mistake { border-left-color: var(--mark-mistake); }
+.mark-entry-rule { border-left-color: var(--mark-rule); }
+
+/* The text around it, in the editor's font: clicked, the editor goes there. */
+.mark-context {
+  all: unset;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0 0 4px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-family: var(--editor-font-family);
+  line-height: 1.45;
+  color: var(--text);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.mark-context:hover,
+.mark-context:focus-visible {
+  background: var(--chip);
+}
+
+.mark-hit {
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-skip-ink: none;
+  text-decoration-color: var(--mark-query);
+}
+
+.mark-hit-mistake { text-decoration-color: var(--mark-mistake); }
+.mark-hit-rule { text-decoration-color: var(--mark-rule); }
+
+.mark-why {
+  margin: 0 0 6px;
+  color: var(--muted);
+}
+
+.mark-suggestion {
+  display: block;
+  width: 100%;
+  margin: 2px 0;
+  padding: 3px 6px;
+  text-align: left;
+  font: inherit;
+  font-family: var(--editor-font-family);
+  color: var(--text);
+  background: var(--chip);
+  border: 1px solid transparent;
+  border-radius: 4px;
+}
+
+.mark-suggestion:hover {
+  background: var(--chip-hover);
+}
+
+.mark-looking {
+  margin: 2px 0;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.mark-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.mark-row button {
+  flex: 1 1 auto;
+  padding: 3px 6px;
+  font: inherit;
+  color: var(--text);
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.mark-row button:hover {
+  background: var(--chip);
+}
+
+.mark-stop {
+  display: block;
+  margin-top: 4px;
+  padding: 2px 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  background: none;
+  border: none;
+}
+
+.mark-stop:hover {
+  color: var(--text);
+}
+
+/* The same Mark in several places: the word and how many times, its places under it. */
+.mark-repeated-head {
+  margin: 0 0 4px;
+  font-family: var(--editor-font-family);
+}
+
+.mark-times {
+  margin-left: 6px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--muted);
+}
+
+.mark-places > summary {
+  margin-top: 6px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mark-place {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}

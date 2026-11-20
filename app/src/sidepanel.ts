@@ -1,15 +1,17 @@
-// The panel beside the editor: the Page preview, the Comments, the Footnotes and the History,
-// one tab at a time. It's shown and hidden as a whole (Ctrl+Shift+P). Which tab is open and
-// whether the panel shows are Device state, kept in this Device's local storage.
+// The panel beside the editor: the Page preview, the Comments, the Marks, the Footnotes, the
+// Images and the History, one tab at a time. It's shown and hidden as a whole (Ctrl+Shift+P).
+// Which tab is open and whether the panel shows are Device state, kept in this Device's local
+// storage.
 //
 // The Footnotes tab is offered only while the Work in front has a Footnote or an Annotation
 // (CONTEXT.md). Open when its last one goes, it stays until another tab is picked, so writing a
-// Footnote and deleting it again doesn't make it come and go.
+// Footnote and deleting it again doesn't make it come and go. The Marks tab is offered while the
+// Work in front has a Mod that makes Marks.
 
 import { withKey } from "./keys";
 
-export type PanelTab = "pages" | "comments" | "footnotes" | "images" | "history";
-const TABS: PanelTab[] = ["pages", "comments", "footnotes", "images", "history"];
+export type PanelTab = "pages" | "comments" | "marks" | "footnotes" | "images" | "history";
+const TABS: PanelTab[] = ["pages", "comments", "marks", "footnotes", "images", "history"];
 
 export type PanelState = { shown: boolean; tab: PanelTab };
 
@@ -27,7 +29,7 @@ export class SidePanel {
   shown = false;
   tab: PanelTab = "pages";
   /** Tabs not offered just now (the Footnotes tab, in a Work without any). */
-  private unavailable = new Set<PanelTab>(["footnotes", "images"]);
+  private unavailable = new Set<PanelTab>(["marks", "footnotes", "images"]);
 
   /**
    * `changed` runs after every change, with whether the Page preview is in view (it only

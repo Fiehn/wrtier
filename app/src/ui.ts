@@ -216,6 +216,7 @@ export const SYMBOLS = {
   removePerson: ["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", "M5 7a4 4 0 1 0 8 0a4 4 0 1 0-8 0", "M22 11h-6"], // user-minus
   show: ["M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0", "M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0"], // eye
   takeOff: ["M18 6 6 18", "m6 6 12 12"], // x
+  marks: ["m6 16 6-12 6 12", "M8 12h8", "m16 20 2 2 4-4"], // spell-check
 };
 
 /** A button that shows only a symbol, named in its tooltip and to screen readers; `count` beside

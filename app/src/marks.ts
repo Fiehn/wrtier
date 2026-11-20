@@ -66,6 +66,8 @@ export type MarkHooks = {
   /** Stops checking a Mark's rule in this Work (the setting "<mod>.rule.<rule>", "off"). */
   stopRule?(mark: Mark): void;
   counted?(counts: MarkCounts): void;
+  /** The Marks shown changed (found, dismissed, moved by typing, Suggestions came in): the Marks panel follows. */
+  changed?(): void;
 };
 export const markHooks = Facet.define<MarkHooks, MarkHooks | null>({ combine: (all) => all[0] ?? null });
 
@@ -210,6 +212,7 @@ const looker = ViewPlugin.fromClass(class {
   }
 
   update(u: ViewUpdate) {
+    if (u.state.field(shownField) !== u.startState.field(shownField)) u.state.facet(markHooks)?.changed?.();
     if (u.docChanged) this.schedule(SETTLE_MS);
     else if (u.startState.facet(markSources) !== u.state.facet(markSources)) this.schedule(0);
     const counts = countsOf(u.state);
@@ -264,26 +267,32 @@ const looker = ViewPlugin.fromClass(class {
 
 // ---- Acting on a Mark ----
 
-/** Accepts a Suggestion: an edit by the Author, exactly as if typed, one undo step. */
-export function accept(view: EditorView, mark: Mark, n: number) {
+/**
+ * Accepts a Suggestion: an edit by the Author, exactly as if typed, one undo step. `focus`: the
+ * editor takes the focus (not from the Marks panel, which works away from it).
+ */
+export function accept(view: EditorView, mark: Mark, n: number, focus = true) {
   const s = mark.suggestions[n];
   if (!s) return;
   view.dispatch({ changes: s.edits, userEvent: "input.type", effects: closeCard.of(null) });
-  view.focus();
+  if (focus) view.focus();
 }
 
 /** Dismisses a Mark: it goes now, and the Vault keeps it (ADR 0018). */
-export function dismiss(view: EditorView, mark: Mark) {
+export function dismiss(view: EditorView, mark: Mark, focus = true) {
   view.dispatch({ effects: [addDismissed.of({ key: dismissKey(mark), ranges: [[mark.from, mark.to]], whole: true }), closeCard.of(null)] });
   view.state.facet(markHooks)?.dismiss(mark);
-  view.focus();
+  if (focus) view.focus();
 }
 
 /** Runs one of the Mod's own actions on a Mark, and closes its card. */
-function runAction(view: EditorView, action: MarkAction) {
+export function runAction(view: EditorView, action: MarkAction) {
   action.run();
   view.dispatch({ effects: closeCard.of(null) });
 }
+
+/** Is `mark` still shown where it was (no typing since moved or dropped it)? */
+export const stillShown = (state: EditorState, mark: Mark) => marksOf(state).some((m) => sameMark(m, mark));
 
 /**
  * The Mark with its Suggestions: at once if it has them, else asked of its Mod, and kept with it
@@ -429,6 +438,15 @@ export function openCardAt(view: EditorView, pos: number): boolean {
   if (!mark) return false;
   view.dispatch({ selection: { anchor: pos }, effects: openCard.of({ mark, keys: false }) });
   return true;
+}
+
+/** Goes to a Mark in the editor and opens its card (from the Marks panel). */
+export function showMark(view: EditorView, mark: Mark) {
+  view.dispatch({
+    selection: { anchor: mark.from },
+    effects: [openCard.of({ mark, keys: true }), EditorView.scrollIntoView(mark.from, { y: "center" })],
+  });
+  view.focus();
 }
 
 /** Goes to the next (or previous) Mark of any Mod, or of one kind, and opens its card (F8). False if there are none. */

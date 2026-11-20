@@ -14,6 +14,7 @@ import type { Reviewer } from "./reviewers";
 import { SidePanel, type PanelTab } from "./sidepanel";
 import { CommentsPanel } from "./commentspanel";
 import { FootnotesPanel, type DetachedRow } from "./footnotespanel";
+import { MarksPanel } from "./markspanel";
 import { ImagesPanel, sizeText, type ImageRow, type ImagesView, type PastPicture } from "./imagespanel";
 import { imageLine } from "./images";
 import { findAnnotation, insertFootnote } from "./footnotes";
@@ -36,7 +37,7 @@ import { UninstallDialog } from "./uninstall";
 import { FindBar } from "./findbar";
 import { FindInVault, type TextForFinding, type VaultWork } from "./findinvault";
 import { ReadingPanel } from "./reading";
-import { $, act, ask, askText, clearError, confirmAsk, offer, onUpdatesAsked, showError, showProblems, wireCloseButtons, closeDialogsOnClickOutside } from "./ui";
+import { $, act, ask, askText, clearError, confirmAsk, offer, onUpdatesAsked, showError, showProblems, SYMBOLS, symbolButton, wireCloseButtons, closeDialogsOnClickOutside } from "./ui";
 import { PreambleActions } from "./preambleactions";
 import { VaultBrowser, type Entry } from "./vaultbrowser";
 import { MovingWorks } from "./movingworks";
@@ -80,7 +81,8 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     footnotesPanel.workChanged();
     imagesPanel.workChanged();
     historyPanel.workChanged();
-    showModViews();
+    showModViews(true);
+    marksPanel.workChanged();
     rememberSoon();
     browser.highlightOpen();
     // The Work being read got a tab: the Reading panel mirrors it from now on.
@@ -144,6 +146,9 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
   markCounts: (id, counts) => {
     markCountsOf.set(id, counts);
     if (id === tabs.active) showMarkCounts();
+  },
+  marksChanged: (id) => {
+    if (id === tabs.active) marksPanel.changed();
   },
   dropWork: (id, work, pos) => act(() => includeChecked(id, work, null, pos)),
   inclusionStyles: (id, at, styles, x, y) => {
@@ -570,10 +575,16 @@ function showCount(tab: HTMLElement, name: string, count: number) {
 
 // Shown or not, and which tab, are remembered on this Device. The pages only compile while
 // their tab is showing, and the History only loads while its tab is.
+// Every Mark in the Work in front, by kind (markspanel.ts).
+const marksPanel = new MarksPanel($("marks-list"), {
+  view: () => (tabs.activeIsWork ? tabs.viewOf(tabs.active!) : null),
+  marking: () => tabs.activeIsWork && marking(tabs.active!),
+});
+
 const panel = new SidePanel(
   $("side-panel"),
-  [$("panel-tab-pages"), $("panel-tab-comments"), $("panel-tab-footnotes"), $("panel-tab-images"), $("panel-tab-history")],
-  { pages: $("preview"), comments: $("comments-pane"), footnotes: $("footnotes-pane"), images: $("images-pane"), history: $("history-pane") },
+  [$("panel-tab-pages"), $("panel-tab-comments"), $("panel-tab-marks"), $("panel-tab-footnotes"), $("panel-tab-images"), $("panel-tab-history")],
+  { pages: $("preview"), comments: $("comments-pane"), marks: $("marks-pane"), footnotes: $("footnotes-pane"), images: $("images-pane"), history: $("history-pane") },
   $("panel-toggle"),
   (pagesInView, inView) => {
     preview.setOpen(pagesInView);
@@ -582,6 +593,7 @@ const panel = new SidePanel(
     queueMicrotask(() => {
       footnotesPanel.setVisible(inView === "footnotes");
       imagesPanel.setVisible(inView === "images");
+      marksPanel.setVisible(inView === "marks");
     });
   },
 );
@@ -884,6 +896,8 @@ const modsOf = new Map<string, ModsState>();
 
 /** Is this Mod at work in this Work on this Device? */
 const modInUse = (id: string, mod: string) => inUse(modsOf.get(id) ?? { work: [], newWorks: [], vault: [], hidden: [] }).some((m) => m.id === mod);
+/** Does a Work have a Mod in use here that makes Marks (the Marks tab is offered)? */
+const marking = (id: string) => inUse(modsOf.get(id) ?? { work: [], newWorks: [], vault: [], hidden: [] }).some((m) => m.marks);
 
 /** Each open Work's Mods' settings, and its language, as last asked: what its Mods are told. */
 const modSettingsOf = new Map<string, ModSettings>();
@@ -947,6 +961,20 @@ function showMarkCounts() {
     b.addEventListener("click", () => id && tabs.stepMark(id, level));
     return b;
   }));
+  // Every one of them in the Marks panel, at the first kind there is (not on the phone: no Marks screen).
+  if (shown.length > 0 && !phone.active) {
+    el.append(symbolButton("See them all in the Marks panel", SYMBOLS.marks, () => {
+      openTab("marks");
+      marksPanel.showKind(shown[0]);
+    }));
+  }
+  // The Marks tab's count: the Mistakes.
+  const mistakes = counts?.mistake ?? 0;
+  const tab = $("panel-tab-marks");
+  const named = mistakes > 0 ? `Marks (${mistakes} ${mistakes === 1 ? "Mistake" : "Mistakes"})` : "Marks";
+  tab.title = named;
+  tab.setAttribute("aria-label", named);
+  tab.querySelector(".panel-count")!.textContent = mistakes > 0 ? String(mistakes) : "";
 }
 
 // A Dictionary was downloaded, updated or removed (spellmod.ts): every Spellchecker looks again.
@@ -1015,10 +1043,13 @@ const countLine = new CountLine($("counts"), {
 });
 
 /** The Mods that show the Work in front (the Chapter list, the counts) follow it. */
-function showModViews() {
+/** What the Mods in use show for the Work in front. `now`: another Work came to the front. */
+function showModViews(now = false) {
   const id = tabs.activeIsWork ? tabs.active : null;
   chapterList.show(id && modInUse(id, "chapters") ? id : null);
   countLine.show(id && modInUse(id, "counts") ? id : null);
+  panel.setAvailable("marks", id !== null && marking(id), now);
+  if (!now) marksPanel.workChanged(); // a Mod that makes Marks added or taken away
   showMarkCounts();
 }
 

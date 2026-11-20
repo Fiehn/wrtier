@@ -92,6 +92,8 @@ export type TabEvents = {
   stopRule(id: string, mark: Mark): void;
   /** How many Marks of each kind the Work's editor shows now. */
   markCounts(id: string, counts: MarkCounts): void;
+  /** The Marks the Work's editor shows changed (the Marks panel follows). */
+  marksChanged(id: string): void;
   /** A Mod's command's key, while writing in a Work: it runs it, or offers to add the Mod. */
   modCommand(id: string, command: CommandId): boolean;
 };
@@ -311,6 +313,7 @@ class Tab {
             dismiss: (mark) => this.sync.dismiss(mark.from, mark.to, dismissKey(mark)),
             stopRule: (mark) => tabs.events.stopRule(this.sync.id, mark),
             counted: (counts) => tabs.events.markCounts(this.sync.id, counts),
+            changed: () => tabs.events.marksChanged(this.sync.id),
           }),
           modsCompartment.of([]),
           EditorView.updateListener.of((update) => {
