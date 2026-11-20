@@ -319,24 +319,67 @@ kbd {
   margin-top: 6px;
 }
 
-/* The top part: Open Vault…, Settings, and the open Vault's path, under them a line. */
+/* The top part: the Vault's name (to open another) and Settings, the sync line under them. */
 #sidebar-top {
   flex: none;
   padding: 12px 12px 10px;
   border-bottom: 1px solid var(--line);
 }
 
-#vault-root {
-  margin: 6px 0 0;
-  font-size: 12px;
-  word-break: break-all;
+#vault-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-#vault-root:empty {
-  display: none;
+#choose-vault {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: var(--chip);
+  font-weight: 600;
+  text-align: left;
 }
 
+#choose-vault:hover {
+  background: color-mix(in srgb, var(--chip) 88%, var(--text));
+}
+
+#vault-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-chevrons {
+  flex: none;
+  color: var(--muted);
+}
+
+/* A symbol like ☰ (#sidebar-toggle). */
+#open-settings {
+  flex: none;
+  display: flex;
+  padding: 6px;
+  border: none;
+  background: none;
+  color: var(--muted);
+}
+
+#open-settings:hover {
+  color: var(--text);
+  background: var(--chip);
+}
+
+/* Open… and Find in Vault: small blue buttons side by side (their keys are in their tooltips). */
 #vault-actions {
+  flex-wrap: nowrap;
   margin-bottom: 10px;
 }
 

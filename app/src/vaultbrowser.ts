@@ -186,7 +186,7 @@ export class VaultBrowser {
       opened = await invoke<VaultOpened>("open_vault", { path, create: true });
     }
     if (opened.status !== "opened") return;
-    $("vault-root").textContent = opened.root;
+    showVault(opened.root);
     this.root = opened.root;
     this.loadOpenFolders();
     $("vault-actions").hidden = false;
@@ -611,4 +611,14 @@ export class VaultBrowser {
     await this.deps.preamble.refreshElements(created.id);
     await this.refresh();
   }
+}
+
+/** The Vault button at the top of the sidebar: the Vault's name (its folder's), its path in the tooltip. */
+export function vaultName(root: string): string {
+  return root.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || root;
+}
+
+function showVault(root: string) {
+  $("vault-name").textContent = vaultName(root);
+  $("choose-vault").title = `${root}\nClick to open another Vault`;
 }

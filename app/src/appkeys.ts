@@ -119,11 +119,7 @@ export class AppKeys {
   showKeys() {
     $("open-switcher").title = withKey("Open a Work", "quickSwitcher");
     $("find-open").title = withKey("Find and replace", "find");
-    $("open-switcher-key").textContent = keyLabel("quickSwitcher");
-    $("open-switcher-key").hidden = !keyLabel("quickSwitcher");
     $("open-find-in-vault").title = withKey("Find some text in every Work", "findInVault");
-    $("find-in-vault-key").textContent = keyLabel("findInVault");
-    $("find-in-vault-key").hidden = !keyLabel("findInVault");
     $("view-mode").title = withKey("Switch between the Formatted and the Raw view", "toggleView");
     $("preamble-open").title = withKey("The Work's Looks, Styles, Story elements and settings", "preamble");
     $("mods-open").title = withKey("The Work's optional features, such as spellcheck", "mods");

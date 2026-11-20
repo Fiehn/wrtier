@@ -8,7 +8,7 @@ vi.mock("./android", () => ({ onAndroid: false, browseForVault: vi.fn(), ensureF
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(() => Promise.resolve(() => {})) }));
 
 import { elementInfos, missingQuestion, pdfExported, restoredLine } from "./preambleactions";
-import { entryNote, folderPath, isDisabled, pickedAfterFolderMove, pickedAfterRename, type Entry } from "./vaultbrowser";
+import { entryNote, folderPath, isDisabled, pickedAfterFolderMove, pickedAfterRename, vaultName, type Entry } from "./vaultbrowser";
 import { dropFolder, RefusedLine } from "./movingworks";
 import { emptyLine, runAppCommand } from "./appkeys";
 import { settingsTabs, sharedValueText, tabAfter } from "./settingsdialog";
@@ -68,6 +68,12 @@ describe("the Vault browser", () => {
     expect(pickedAfterRename(["Rain", "Snow"], "Rain", "Old/Rain")).toEqual(["Old/Rain", "Snow"]);
     expect(pickedAfterFolderMove(["Old/Rain", "Older/Snow", "Sun"], "Old", "Stories/Old")).toEqual(["Stories/Old/Rain", "Older/Snow", "Sun"]);
     expect(folderPath(" Stories / Old ")).toBe("Stories/Old");
+  });
+
+  it("names the Vault after its folder", () => {
+    expect(vaultName("C:\\Users\\me\\White Vault")).toBe("White Vault");
+    expect(vaultName("/home/me/White Vault/")).toBe("White Vault");
+    expect(vaultName("C:/Fake Vault")).toBe("Fake Vault");
   });
 });
 
