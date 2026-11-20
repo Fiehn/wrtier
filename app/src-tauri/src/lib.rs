@@ -19,6 +19,7 @@ pub mod typeset;
 pub mod uninstall;
 pub mod update;
 pub mod vault;
+pub mod vaults;
 pub mod work;
 
 use device::DeviceState;
@@ -165,14 +166,14 @@ struct Startup {
 
 #[tauri::command]
 fn startup(state: State<AppState>) -> Result<Startup, String> {
-    with_app(&state, |app| Ok(Startup { last_vault: app.device.last_vault.as_ref().map(|p| p.display().to_string()) }))
+    with_app(&state, |app| Ok(Startup { last_vault: app.device.last_vault().map(|p| p.display().to_string()) }))
 }
 
 /// On Android the Vault is picked with the app's own folder browser instead (Android's picker
 /// gives no file path): see `list_folders`.
 #[cfg(mobile)]
 #[tauri::command]
-async fn pick_folder(_app: AppHandle) -> Result<Option<String>, String> {
+async fn pick_folder(_app: AppHandle, _title: Option<String>) -> Result<Option<String>, String> {
     Err("On Android, Vaults are chosen with the app's folder browser.".to_string())
 }
 
@@ -184,9 +185,9 @@ fn list_folders(path: String) -> Result<folders::FolderListing, String> {
 
 #[cfg(desktop)]
 #[tauri::command]
-async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+async fn pick_folder(app: AppHandle, title: Option<String>) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        app.dialog().file().set_title("Choose your Vault").blocking_pick_folder()
+        app.dialog().file().set_title(title.as_deref().unwrap_or("Choose your Vault")).blocking_pick_folder()
             .and_then(|path| path.into_path().ok())
             .map(|path| path.display().to_string())
     })
@@ -200,7 +201,7 @@ enum VaultOpened {
     /// The folder has no `vault.db`: the interface asks before making it a Vault.
     NotAVault,
     #[serde(rename_all = "camelCase")]
-    Opened { root: String, device_name: Option<String>, suggested_name: String },
+    Opened { root: String, name: String, device_name: Option<String>, suggested_name: String },
 }
 
 #[tauri::command]
@@ -211,17 +212,259 @@ fn open_vault(state: State<AppState>, path: String, create: bool) -> Result<Vaul
             Opened::NotAVault => Ok(VaultOpened::NotAVault),
             Opened::Vault(vault) => {
                 let device_name = vault.device_name();
+                let name = vault.name();
                 if let Some(previous) = app.vault.as_mut() {
                     previous.close_all(now_ms());
                 }
                 app.vault = Some(vault);
                 typeset::warm_up();
-                app.device.last_vault = Some(root);
+                // First on this Device's Known Vaults, with its name as it is now.
+                app.device.remember_vault(&root, &name);
                 app.device.save()?;
-                Ok(VaultOpened::Opened { root: path, device_name, suggested_name: device::suggested_name() })
+                Ok(VaultOpened::Opened { root: path, name, device_name, suggested_name: device::suggested_name() })
             }
         }
     })
+}
+
+// ---- Known Vaults and Manage Vaults (v3 plan, Vault management; ADR 0022) ----
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KnownVaultRow {
+    path: String,
+    name: String,
+    /// Its folder is where the list says (not on a drive that's unplugged, say).
+    found: bool,
+    /// It's the Vault open now.
+    open: bool,
+}
+
+/// This Device's Known Vaults, the most recently opened first.
+#[tauri::command]
+fn known_vaults(state: State<AppState>) -> Result<Vec<KnownVaultRow>, String> {
+    with_app(&state, |app| {
+        let open = app.vault.as_ref().map(|v| v.root.clone());
+        Ok(app.device.known_vaults.iter().map(|k| KnownVaultRow {
+            path: k.path.display().to_string(),
+            name: k.name.clone(),
+            found: k.path.is_dir(),
+            open: open.as_deref() == Some(k.path.as_path()),
+        }).collect())
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultFolder {
+    /// It's a Vault already.
+    vault: bool,
+    /// How many files are in it (up to 10,000), to say before making it a Vault.
+    files: usize,
+}
+
+/// A folder to open as a Vault: is it one, and if not, what's in it.
+#[tauri::command]
+fn vault_folder(path: String) -> Result<VaultFolder, String> {
+    let root = PathBuf::from(&path);
+    if !root.is_dir() {
+        return Err(format!("{path} isn't a folder."));
+    }
+    let vault = root.join(vault::VAULT_FILE).exists() || !wrtier::conflicts::conflict_copies(&root.join(vault::VAULT_FILE)).is_empty();
+    Ok(VaultFolder { vault, files: if vault { 0 } else { vaults::count_files(&root, 10_000) } })
+}
+
+/// Makes a new Vault called `name` in a folder of its own in `location`: its folder's path. The
+/// interface opens it next.
+#[tauri::command]
+fn create_vault(state: State<AppState>, name: String, location: String) -> Result<String, String> {
+    let name = vault::checked_name(&name)?;
+    let folder = vaults::new_vault_folder(std::path::Path::new(&location), &name)?;
+    std::fs::create_dir(&folder).map_err(err)?;
+    with_app(&state, |app| match Vault::open(&folder, app.device.device, true, &app.recovery_dir)? {
+        Opened::Vault(mut made) => made.set_name(&name, now_ms()),
+        Opened::NotAVault => Err("The Vault couldn't be made.".into()),
+    })?;
+    Ok(folder.display().to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncthingAt {
+    /// Syncthing is set up on this Device (its settings were found, or given by hand).
+    found: bool,
+    /// It answered.
+    running: bool,
+    /// How it syncs the folder, if it answered.
+    synced: Option<syncthing::Synced>,
+}
+
+/// How Syncthing syncs a folder (a Vault, or where a new one would go): for the Syncthing tick in
+/// Manage Vaults.
+#[tauri::command]
+async fn syncthing_at(state: State<'_, AppState>, path: String) -> Result<SyncthingAt, String> {
+    let manual = with_app(&state, |app| Ok(app.device.syncthing.clone()))?;
+    let Some(connection) = manual.or_else(syncthing::find) else {
+        return Ok(SyncthingAt { found: false, running: false, synced: None });
+    };
+    tauri::async_runtime::spawn_blocking(move || match syncthing::synced(&syncthing::Client::new(&connection), std::path::Path::new(&path)) {
+        Ok(synced) => SyncthingAt { found: true, running: true, synced: Some(synced) },
+        Err(_) => SyncthingAt { found: true, running: false, synced: None },
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// This Device's Syncthing label for the open Vault follows its Vault name (ADR 0022). Quietly
+/// does nothing if Syncthing isn't there or doesn't sync it as a folder of its own.
+#[tauri::command]
+async fn follow_vault_name(state: State<'_, AppState>) -> Result<(), String> {
+    let (root, name, manual) = with_app(&state, |app| {
+        let vault = open_vault_of(app)?;
+        Ok((vault.root.clone(), vault.name(), app.device.syncthing.clone()))
+    })?;
+    let Some(connection) = manual.or_else(syncthing::find) else { return Ok(()) };
+    let _ = tauri::async_runtime::spawn_blocking(move || syncthing::follow_name(&syncthing::Client::new(&connection), &root, &name)).await;
+    Ok(())
+}
+
+/// Renames a Known Vault, open or not: its new Vault name, as kept.
+#[tauri::command]
+fn rename_vault(state: State<AppState>, path: String, name: String) -> Result<String, String> {
+    with_app(&state, |app| {
+        let root = PathBuf::from(&path);
+        let name = match app.vault.as_mut().filter(|v| v.root == root) {
+            Some(open) => {
+                open.set_name(&name, now_ms())?;
+                open.name()
+            }
+            None => vault::rename_closed(&root, app.device.device, &name, now_ms())?,
+        };
+        app.device.rename_known(&root, &name);
+        app.device.save()?;
+        Ok(name)
+    })
+}
+
+/// Takes a Vault off this Device's Known Vaults. Nothing in it is touched.
+#[tauri::command]
+fn forget_vault(state: State<AppState>, path: String) -> Result<(), String> {
+    with_app(&state, |app| {
+        let root = PathBuf::from(&path);
+        if app.vault.as_ref().is_some_and(|v| v.root == root) {
+            return Err("The open Vault can't be taken off the list: it's in use.".into());
+        }
+        app.device.forget_vault(&root);
+        app.device.save()
+    })
+}
+
+/// A Known Vault whose folder went missing is at `found_at` now: its new place, and its name as
+/// kept there.
+#[tauri::command]
+fn locate_vault(state: State<AppState>, path: String, found_at: String) -> Result<String, String> {
+    let to = PathBuf::from(&found_at);
+    if !to.join(vault::VAULT_FILE).exists() {
+        return Err(format!("{found_at} isn't a Vault: there's no {} in it.", vault::VAULT_FILE));
+    }
+    with_app(&state, |app| {
+        let name = vault::read_name(&to, app.device.device)?;
+        if app.device.known_vaults.iter().any(|k| k.path == to) {
+            // On the list already: the missing entry just goes.
+            app.device.forget_vault(std::path::Path::new(&path));
+        } else {
+            app.device.relocate_vault(std::path::Path::new(&path), &to);
+        }
+        app.device.rename_known(&to, &name);
+        app.device.save()?;
+        Ok(name)
+    })
+}
+
+/// Opens a Known Vault's folder in the system's file manager.
+#[cfg(desktop)]
+#[tauri::command]
+fn show_vault_folder(handle: AppHandle, state: State<AppState>, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    // Only a folder on the list: the interface can't open just any path this way.
+    let known = with_app(&state, |app| Ok(app.device.known_vaults.iter().any(|k| k.path.display().to_string() == path)))?;
+    if !known {
+        return Err("That isn't one of this Device's Vaults.".into());
+    }
+    handle.opener().open_path(path, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn show_vault_folder(_path: String) -> Result<(), String> {
+    Err("Android has no file manager to show it in.".into())
+}
+
+/// Is `place` inside `folder` (both as they are on disk; letters' case aside on Windows)?
+fn inside(place: &std::path::Path, folder: &std::path::Path) -> bool {
+    let same = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (place, folder) = (same(place), same(folder));
+    if cfg!(windows) {
+        let lower = |p: &std::path::Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+        lower(&place).starts_with(lower(&folder))
+    } else {
+        place.starts_with(&folder)
+    }
+}
+
+/// Moves a Known Vault's folder into `to_parent`, under its own name: its new path. The open Vault
+/// is closed first, everything written; the interface opens it again from its new place. How it's
+/// synced decides how (v3 plan): not synced, just moved; a Syncthing folder of its own, taken out
+/// of Syncthing here, moved and added back with the same ID; inside a larger Syncthing folder,
+/// only moved within it, since moving it out would delete it on every other Device.
+#[cfg(desktop)]
+#[tauri::command]
+async fn move_vault(state: State<'_, AppState>, path: String, to_parent: String) -> Result<String, String> {
+    let from = PathBuf::from(&path);
+    let parent = PathBuf::from(&to_parent);
+    let to = vaults::moved_to(&from, &parent)?;
+    let manual = with_app(&state, |app| {
+        if app.vault.as_ref().is_some_and(|v| v.root == from) {
+            if let Some(mut open) = app.vault.take() {
+                open.close_all(now_ms());
+            }
+        }
+        Ok(app.device.syncthing.clone())
+    })?;
+    let connection = manual.or_else(syncthing::find);
+    let (f, t) = (from.clone(), to.clone());
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let Some(connection) = connection else { return vaults::move_folder(&f, &t) };
+        let client = syncthing::Client::new(&connection);
+        match syncthing::synced(&client, &f) {
+            Err(syncthing::ApiError::NotRunning) => Err("Syncthing is set up on this Device but isn't running. Start it first, so it can follow the move.".into()),
+            Err(e) => Err(syncthing::describe(e)),
+            Ok(syncthing::Synced::NotSynced) => vaults::move_folder(&f, &t),
+            Ok(syncthing::Synced::Own { id, .. }) => syncthing::move_own_folder(&client, &id, &t, || vaults::move_folder(&f, &t)),
+            Ok(syncthing::Synced::Inside { label, path, .. }) => {
+                if inside(&parent, std::path::Path::new(&path)) {
+                    vaults::move_folder(&f, &t)
+                } else {
+                    Err(format!(
+                        "This Vault is synced as part of the Syncthing folder “{label}”. Moving it out of there would delete it on your other Devices. Move it somewhere inside {path}, or make it a Syncthing folder of its own first.",
+                    ))
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    with_app(&state, |app| {
+        app.device.relocate_vault(&from, &to);
+        app.device.save()
+    })?;
+    Ok(to.display().to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+async fn move_vault(_path: String, _to_parent: String) -> Result<String, String> {
+    Err("Vaults aren't moved on Android.".into())
 }
 
 #[tauri::command]
@@ -723,7 +966,8 @@ async fn share_with_peer(state: State<'_, AppState>, id: String, name: String) -
 async fn share_vault_with_syncthing(state: State<'_, AppState>) -> Result<(), String> {
     let (root, connection) = syncthing_for(&state)?;
     let connection = connection.ok_or("Syncthing wasn't found.")?;
-    tauri::async_runtime::spawn_blocking(move || syncthing::share_vault(&syncthing::Client::new(&connection), &root))
+    let name = with_app(&state, |app| Ok(open_vault_of(app)?.name()))?;
+    tauri::async_runtime::spawn_blocking(move || syncthing::share_vault(&syncthing::Client::new(&connection), &root, &name))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -1487,6 +1731,16 @@ pub fn run() {
             list_folders,
             app_hidden,
             open_vault,
+            known_vaults,
+            vault_folder,
+            create_vault,
+            syncthing_at,
+            follow_vault_name,
+            rename_vault,
+            forget_vault,
+            locate_vault,
+            show_vault_folder,
+            move_vault,
             set_device_name,
             list_works,
             open_work,

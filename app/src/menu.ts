@@ -86,7 +86,8 @@ export function showMenu(x: number, y: number, items: MenuItem[]) {
     });
     menu.append(button);
   }
-  document.body.append(menu);
+  // Inside the dialog that's open, if one is: everything outside it is inert meanwhile.
+  (document.querySelector("dialog:modal") ?? document.body).append(menu);
   // Keep it on the screen.
   const box = menu.getBoundingClientRect();
   menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - box.width - 4))}px`;

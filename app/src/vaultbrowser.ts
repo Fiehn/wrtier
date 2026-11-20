@@ -11,7 +11,6 @@ import { showMenu, type MenuItem } from "./menu";
 import { colourOf, COLOURS } from "./reviewers";
 import { vaultModInUse, type ModsState } from "./mods";
 import { endWorkDrag, startWorkDrag } from "./inclusions";
-import { browseForVault, ensureFilesAccess, onAndroid } from "./android";
 import type { ReadingPanel, ReadingPlace } from "./reading";
 import type { LibraryPanel } from "./library";
 import type { PhoneLayout } from "./phone";
@@ -23,7 +22,10 @@ import { $, act, actionButton, ask, askText, clearError, confirmAsk, FOLDER_HINT
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
   | { status: "notAVault" }
-  | { status: "opened"; root: string; deviceName: string | null; suggestedName: string };
+  | { status: "opened"; root: string; name: string; deviceName: string | null; suggestedName: string };
+
+/** One of this Device's Known Vaults (CONTEXT.md), as the Rust core lists them. */
+export type KnownVault = { path: string; name: string; found: boolean; open: boolean };
 
 type EntryKind =
   | { kind: "work" }
@@ -59,6 +61,8 @@ export type VaultBrowserDeps = {
   startMove(item: Movable): void;
   endMove(): void;
   moveToItem(item: Movable, at: { x: number; y: number }): MenuItem[];
+  /** Manage Vaults (vaultsdialog.ts). */
+  manageVaults(): void;
 };
 
 /** What's said under a Work that can't simply be opened. */
@@ -106,7 +110,21 @@ export class VaultBrowser {
 
   /** The open Vault's name (its folder's), as the Vault bar shows it; null before one is open. */
   get name(): string | null {
-    return this.root ? vaultName(this.root) : null;
+    return this.root ? this.vaultName : null;
+  }
+
+  /** The open Vault's folder; null before one is open. */
+  get path(): string | null {
+    return this.root || null;
+  }
+
+  /** The open Vault's Vault name (ADR 0022). */
+  private vaultName = "";
+
+  /** The open Vault was renamed (Manage Vaults). */
+  renamed(name: string) {
+    this.vaultName = name;
+    showVault(this.root, name);
   }
   /** The Works selected for a new Collection, in the order they were picked. */
   private picked: string[] = [];
@@ -122,12 +140,9 @@ export class VaultBrowser {
       await invoke("empty_trash");
       await this.refresh();
     }));
-    $("choose-vault").addEventListener("click", () => act(async () => {
-      // Android's own picker gives no file path, so the app has its own folder browser there.
-      if (onAndroid && !(await ensureFilesAccess())) return;
-      const path = onAndroid ? await browseForVault() : await invoke<string | null>("pick_folder");
-      if (path) await this.open(path);
-    }));
+    // The Vault's name: a menu of the Known Vaults to switch to, and Manage Vaults. With none
+    // open, Manage Vaults at once.
+    $("choose-vault").addEventListener("click", () => act(() => this.switchMenu()));
   }
 
   /** Is the Colours Vault Mod at work here? Its colours are kept either way. */
@@ -178,23 +193,44 @@ export class VaultBrowser {
     }
   }
 
-  /** Opens the Vault at `path` (asking first if it isn't one yet), with the tabs it had open last time. */
-  async open(path: string) {
-    const { tabs, readingPanel, findInVault, syncPanel, library, phone } = this.deps;
+  /** The Vault name's menu: the Known Vaults (the open one ticked, a missing one greyed), then Manage Vaults. */
+  private async switchMenu() {
+    if (!this.root) return this.deps.manageVaults();
+    const known = await invoke<KnownVault[]>("known_vaults");
+    const box = $("choose-vault").getBoundingClientRect();
+    showMenu(box.left, box.bottom + 2, [
+      ...known.map((k): MenuItem => ({
+        label: k.open ? `✓ ${k.name}` : k.found ? k.name : `${k.name} (not found)`,
+        // A missing one is found again in Manage Vaults (Locate…).
+        run: k.open ? () => {} : k.found ? () => act(() => this.open(k.path)) : () => this.deps.manageVaults(),
+      })),
+      "separator",
+      { label: "Manage Vaults…", run: () => this.deps.manageVaults() },
+    ]);
+  }
+
+  /**
+   * Opens the Vault at `path` (asking first if it isn't one yet), with the tabs it had open last
+   * time, in place of the one open now. False if it wasn't opened (the Author said no).
+   */
+  async open(path: string): Promise<boolean> {
+    const { tabs, readingPanel, syncPanel, library, phone } = this.deps;
     clearError();
-    await tabs.closeAll();
-    readingPanel.close(false);
-    findInVault.reset();
-    this.isOpen = false;
-    let opened = await invoke<VaultOpened>("open_vault", { path, create: false });
-    if (opened.status === "notAVault") {
+    // Asked before anything closes: saying no leaves the open Vault as it was.
+    const folder = await invoke<{ vault: boolean; files: number }>("vault_folder", { path });
+    if (!folder.vault) {
       $("ask-create-path").textContent = path;
-      if ((await ask($<HTMLDialogElement>("ask-create"))) !== "yes") return;
-      opened = await invoke<VaultOpened>("open_vault", { path, create: true });
+      $("ask-create-files").textContent = filesLine(folder.files);
+      if ((await ask($<HTMLDialogElement>("ask-create"))) !== "yes") return false;
     }
-    if (opened.status !== "opened") return;
-    showVault(opened.root);
+    await this.release();
+    const opened = await invoke<VaultOpened>("open_vault", { path, create: !folder.vault });
+    if (opened.status !== "opened") return false;
+    showVault(opened.root, opened.name);
     this.root = opened.root;
+    this.vaultName = opened.name;
+    // This Device's Syncthing label follows the Vault name (ADR 0022); never in the way.
+    void invoke("follow_vault_name").catch(() => {});
     this.loadOpenFolders();
     $("vault-actions").hidden = false;
     syncPanel.start();
@@ -217,6 +253,16 @@ export class VaultBrowser {
     // On the phone: writing, if a Work was open last time.
     phone.show(tabs.active ? "write" : "works");
     this.isOpen = true;
+    return true;
+  }
+
+  /** Closes what the window shows of the open Vault (its tabs written first): before another opens, or before it moves. */
+  async release() {
+    const { tabs, readingPanel, findInVault } = this.deps;
+    await tabs.closeAll();
+    readingPanel.close(false);
+    findInVault.reset();
+    this.isOpen = false;
   }
 
   private foldersKey() {
@@ -633,7 +679,14 @@ export function vaultName(root: string): string {
   return root.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || root;
 }
 
-function showVault(root: string) {
-  $("vault-name").textContent = vaultName(root);
-  $("choose-vault").title = `${root}\nClick to open another Vault`;
+function showVault(root: string, name: string) {
+  $("vault-name").textContent = name;
+  $("choose-vault").title = `${root}\nClick to switch to another Vault, or to manage them`;
+}
+
+/** What's in a folder about to be made a Vault, in words. */
+export function filesLine(files: number): string {
+  if (files === 0) return "It's empty.";
+  if (files >= 10_000) return "It holds more than 10,000 files.";
+  return `It holds ${files} ${files === 1 ? "file" : "files"}.`;
 }

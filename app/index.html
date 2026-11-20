@@ -297,10 +297,51 @@
       <form method="dialog">
         <p>This folder isn't a Vault yet:</p>
         <p id="ask-create-path" class="path"></p>
-        <p class="muted">Making it one adds a <code>vault.db</code> file to it.</p>
+        <p id="ask-create-files"></p>
+        <p class="muted">Making it one only adds a <code>vault.db</code> file to it. Nothing already there is changed.</p>
         <menu>
           <button type="button" data-close="cancel">Cancel</button>
           <button value="yes">Make it a Vault</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <!-- Manage Vaults (vaultsdialog.ts): this Device's Known Vaults on the left, a new Vault or a
+         folder opened as one on the right. -->
+    <dialog id="vaults" class="vaults-dialog">
+      <form method="dialog">
+        <h2>Manage Vaults</h2>
+        <div class="vaults-body">
+          <ul id="vaults-list" class="vaults-list" aria-label="This Device's Vaults"></ul>
+          <div class="vaults-new">
+            <section>
+              <h3>Create a new Vault</h3>
+              <label class="vault-field">Name <input id="new-vault-name" type="text" maxlength="100" autocomplete="off" spellcheck="false" /></label>
+              <div class="vault-field">
+                <span>Location</span>
+                <span id="new-vault-location" class="path"></span>
+                <button type="button" id="new-vault-browse">Browse…</button>
+              </div>
+              <p id="new-vault-folder" class="muted" hidden></p>
+              <label id="new-vault-sync-row" class="check" hidden><input type="checkbox" id="new-vault-sync" /> Sync with Syncthing</label>
+              <p id="new-vault-sync-note" class="muted" hidden></p>
+              <p id="new-vault-error" class="dialog-error" hidden></p>
+              <p class="row"><button type="button" id="new-vault-create">Create</button></p>
+            </section>
+            <section>
+              <h3>Open a folder as a Vault</h3>
+              <div class="vault-field">
+                <span id="open-vault-path" class="path muted">No folder chosen</span>
+                <button type="button" id="open-vault-browse">Browse…</button>
+              </div>
+              <label id="open-vault-sync-row" class="check" hidden><input type="checkbox" id="open-vault-sync" /> Sync with Syncthing</label>
+              <p id="open-vault-sync-note" class="muted" hidden></p>
+              <p class="row"><button type="button" id="open-vault-open" disabled>Open</button></p>
+            </section>
+          </div>
+        </div>
+        <menu>
+          <button type="button" data-close="cancel">Close</button>
         </menu>
       </form>
     </dialog>

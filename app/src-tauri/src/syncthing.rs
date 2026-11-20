@@ -176,6 +176,10 @@ impl Client {
     pub fn patch(&self, path: &str, body: &Value) -> Result<Value, ApiError> {
         Self::answer(self.agent.patch(self.url(path)).header("X-API-Key", &self.key).send_json(body)?)
     }
+
+    pub fn delete(&self, path: &str) -> Result<Value, ApiError> {
+        Self::answer(self.agent.delete(self.url(path)).header("X-API-Key", &self.key).call()?)
+    }
 }
 
 /// A query parameter, escaped.
@@ -431,20 +435,85 @@ pub fn share_with(client: &Client, vault: &Path, id: &str, name: &str) -> Result
     Ok(())
 }
 
-/// Makes the Vault a Syncthing folder of its own, labelled with its folder's name, so it can be
+/// Makes the Vault a Syncthing folder of its own, labelled with its Vault name, so it can be
 /// shared. `*-journal` is ignored before Syncthing first looks at it (Phase 0c).
-pub fn share_vault(client: &Client, vault: &Path) -> Result<(), String> {
+pub fn share_vault(client: &Client, vault: &Path, label: &str) -> Result<(), String> {
     let folders = client.get("/rest/config/folders").map_err(describe)?;
     if folder_holding(&folders, vault).is_some() {
         return Ok(());
     }
     crate::vault::add_journal_ignore(vault)?;
-    let label = vault.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Vault".into());
     let id = new_folder_id()?;
     let my_id = client.get("/rest/system/status").map_err(describe)?.get("myID").and_then(Value::as_str).unwrap_or("").to_string();
     client
         .post("/rest/config/folders", &json!({ "id": id, "label": label, "path": vault.display().to_string(), "devices": [{ "deviceID": my_id }] }))
         .map_err(describe)?;
+    Ok(())
+}
+
+// ---- Vaults and their Syncthing folders (Known Vaults, Manage Vaults; ADR 0022) ----
+
+/// How a folder is synced with Syncthing on this Device.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Synced {
+    /// Syncthing doesn't sync it.
+    NotSynced,
+    /// It's a Syncthing folder of its own.
+    Own { id: String, label: String },
+    /// It's inside a Syncthing folder, synced as part of it (at `path`).
+    Inside { id: String, label: String, path: String },
+}
+
+/// How Syncthing syncs `path` (a Vault, or where a new one would go).
+pub fn synced(client: &Client, path: &Path) -> Result<Synced, ApiError> {
+    let folders = client.get("/rest/config/folders")?;
+    let Some(folder) = folder_holding(&folders, path) else { return Ok(Synced::NotSynced) };
+    let id = folder.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let label = folder.get("label").and_then(Value::as_str).filter(|l| !l.is_empty()).unwrap_or(&id).to_string();
+    let folder_path = expand(folder.get("path").and_then(Value::as_str).unwrap_or(""));
+    if same_place(&folder_path) == same_place(path) {
+        Ok(Synced::Own { id, label })
+    } else {
+        Ok(Synced::Inside { id, label, path: folder_path.display().to_string() })
+    }
+}
+
+/// This Device's Syncthing label for the Vault follows its Vault name: labels are each Device's
+/// own and never shared (ADR 0022). Only for a Vault that's a Syncthing folder of its own.
+pub fn follow_name(client: &Client, vault: &Path, name: &str) -> Result<(), String> {
+    if let Synced::Own { id, label } = synced(client, vault).map_err(describe)?
+        && label != name
+    {
+        client.patch(&format!("/rest/config/folders/{}", param(&id)), &json!({ "label": name })).map_err(describe)?;
+    }
+    Ok(())
+}
+
+/// Moves a Vault that's a Syncthing folder of its own. Syncthing has no move: the folder is taken
+/// out of Syncthing on this Device only, `move_it` moves it, and it's added back with the same ID,
+/// Devices and settings at `to`. Syncthing then finds everything already there and downloads
+/// nothing; the other Devices notice nothing. If the move fails, it's added back where it was.
+pub fn move_own_folder(client: &Client, id: &str, to: &Path, move_it: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let path = format!("/rest/config/folders/{}", param(id));
+    let config = client.get(&path).map_err(describe)?;
+    if !config.is_object() {
+        return Err("Syncthing didn't say how this folder is set up.".into());
+    }
+    client.delete(&path).map_err(describe)?;
+    if let Err(e) = move_it() {
+        // Back as it was: nothing moved.
+        return match client.post("/rest/config/folders", &config) {
+            Ok(_) => Err(e),
+            Err(back) => Err(format!("{e} Syncthing also couldn't take the folder back: {}. Add it again in Syncthing with the folder ID {id}.", describe(back))),
+        };
+    }
+    let mut moved = config;
+    moved["path"] = json!(to.display().to_string());
+    client.post("/rest/config/folders", &moved).map_err(|e| format!(
+        "The Vault moved, but Syncthing couldn't be told: {}. Add it again in Syncthing at its new place, with the folder ID {id}, so it syncs as before.",
+        describe(e),
+    ))?;
     Ok(())
 }
 
@@ -683,7 +752,7 @@ mod tests {
         let elsewhere = tempfile::tempdir().unwrap();
         let fake = pretend_syncthing(routes(elsewhere.path()), "k3y");
         let client = Client::new(&Connection { address: fake.address.clone(), api_key: "k3y".into() });
-        share_vault(&client, dir.path()).unwrap();
+        share_vault(&client, dir.path(), "My novels").unwrap();
         assert!(std::fs::read_to_string(dir.path().join(".stignore")).unwrap().lines().any(|l| l == "*-journal"));
         let sent = fake.sent.lock().unwrap();
         let (_, target, body) = sent.iter().find(|(method, _, _)| method == "POST").unwrap();
@@ -692,5 +761,67 @@ mod tests {
         assert_eq!(body["path"], dir.path().display().to_string());
         assert_eq!(body["devices"], json!([{ "deviceID": "ME" }]));
         assert_eq!(body["id"].as_str().unwrap().len(), 11);
+        assert_eq!(body["label"], "My novels", "labelled with the Vault name");
+    }
+
+    #[test]
+    fn tells_a_vaults_own_syncthing_folder_from_one_it_is_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = dir.path().join("Writing");
+        std::fs::create_dir(&inner).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let fake = pretend_syncthing(routes(dir.path()), "k3y");
+        let client = Client::new(&Connection { address: fake.address.clone(), api_key: "k3y".into() });
+        assert_eq!(synced(&client, dir.path()).unwrap(), Synced::Own { id: "wrt-1".into(), label: "Writing".into() });
+        assert!(matches!(synced(&client, &inner).unwrap(), Synced::Inside { label, .. } if label == "Writing"));
+        assert_eq!(synced(&client, elsewhere.path()).unwrap(), Synced::NotSynced);
+    }
+
+    #[test]
+    fn this_devices_label_follows_the_vault_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = pretend_syncthing(routes(dir.path()), "k3y");
+        let client = Client::new(&Connection { address: fake.address.clone(), api_key: "k3y".into() });
+        follow_name(&client, dir.path(), "Writing").unwrap();
+        assert!(!fake.sent.lock().unwrap().iter().any(|(method, _, _)| method == "PATCH"), "the same already: left alone");
+        follow_name(&client, dir.path(), "My novels").unwrap();
+        let sent = fake.sent.lock().unwrap();
+        let (_, target, body) = sent.iter().find(|(method, _, _)| method == "PATCH").unwrap();
+        assert_eq!(target, "/rest/config/folders/wrt-1");
+        assert_eq!(serde_json::from_str::<Value>(body).unwrap(), json!({ "label": "My novels" }));
+    }
+
+    #[test]
+    fn a_moved_vault_goes_back_into_syncthing_with_the_same_id_at_its_new_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut table = routes(dir.path());
+        let config = json!({ "id": "wrt-1", "label": "Writing", "path": dir.path().display().to_string(), "devices": [{ "deviceID": "ME" }, { "deviceID": "PHONE" }], "rescanIntervalS": 3600 });
+        table.insert("GET /rest/config/folders/wrt-1", config);
+        let fake = pretend_syncthing(table, "k3y");
+        let client = Client::new(&Connection { address: fake.address.clone(), api_key: "k3y".into() });
+        let to = Path::new("D:/Writing");
+        move_own_folder(&client, "wrt-1", to, || Ok(())).unwrap();
+        let sent = fake.sent.lock().unwrap();
+        let changes: Vec<_> = sent.iter().filter(|(method, _, _)| method != "GET").collect();
+        assert_eq!((changes[0].0.as_str(), changes[0].1.as_str()), ("DELETE", "/rest/config/folders/wrt-1"));
+        assert_eq!((changes[1].0.as_str(), changes[1].1.as_str()), ("POST", "/rest/config/folders"));
+        let back: Value = serde_json::from_str(&changes[1].2).unwrap();
+        assert_eq!((back["id"].as_str(), back["path"].as_str()), (Some("wrt-1"), Some("D:/Writing")));
+        assert_eq!(back["devices"], json!([{ "deviceID": "ME" }, { "deviceID": "PHONE" }]), "the same Devices");
+        assert_eq!(back["rescanIntervalS"], 3600, "and the rest of its settings");
+    }
+
+    #[test]
+    fn a_failed_move_puts_the_folder_back_where_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut table = routes(dir.path());
+        table.insert("GET /rest/config/folders/wrt-1", json!({ "id": "wrt-1", "path": dir.path().display().to_string() }));
+        let fake = pretend_syncthing(table, "k3y");
+        let client = Client::new(&Connection { address: fake.address.clone(), api_key: "k3y".into() });
+        let error = move_own_folder(&client, "wrt-1", Path::new("D:/Writing"), || Err("The disk is full.".into())).unwrap_err();
+        assert_eq!(error, "The disk is full.");
+        let sent = fake.sent.lock().unwrap();
+        let (_, _, body) = sent.iter().find(|(method, _, _)| method == "POST").unwrap();
+        assert_eq!(serde_json::from_str::<Value>(body).unwrap()["path"], dir.path().display().to_string());
     }
 }

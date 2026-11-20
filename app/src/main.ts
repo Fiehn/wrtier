@@ -43,6 +43,7 @@ import { VaultBrowser, type Entry } from "./vaultbrowser";
 import { MovingWorks } from "./movingworks";
 import { AppKeys } from "./appkeys";
 import { SettingsDialog } from "./settingsdialog";
+import { VaultsDialog } from "./vaultsdialog";
 import { WindowFrame } from "./windowframe";
 
 // ---- Messages and dialogs (ui.ts) ----
@@ -1133,7 +1134,11 @@ const browser: VaultBrowser = new VaultBrowser({
   startMove: (item) => moving.start(item),
   endMove: () => moving.end(),
   moveToItem: (item, at) => moving.menuItem(item, at),
+  manageVaults: () => act(() => vaultsDialog.open()),
 });
+
+// Manage Vaults: this Device's Known Vaults, a new Vault, a folder opened as one (vaultsdialog.ts).
+const vaultsDialog = new VaultsDialog(browser);
 
 const moving = new MovingWorks({ browser, findInVault: { refresh: () => findInVault.refresh() } });
 

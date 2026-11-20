@@ -4787,3 +4787,140 @@ body.window-maximized #window-maximize .when-maximized {
   padding-top: 6px;
   border-top: 1px solid var(--line);
 }
+
+/* ---- Manage Vaults (vaultsdialog.ts): the Known Vaults on the left, a new one on the right ---- */
+
+dialog.vaults-dialog {
+  max-width: 760px;
+  max-height: calc(100vh - 32px);
+}
+
+.vaults-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.vaults-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 12px 0 0;
+  border-right: 1px solid var(--line);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.vaults-list > li.muted {
+  font-size: 13px;
+  padding: 6px 0;
+}
+
+/* A Known Vault: its name and folder (a click switches to it), and ⋯ at the right. */
+.vault-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 5px;
+}
+
+.vault-row:hover {
+  background: var(--chip);
+}
+
+.vault-pick {
+  all: unset;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.vault-pick:focus-visible {
+  outline: 2px solid var(--accent);
+  border-radius: 5px;
+}
+
+.vault-row.open .vault-pick {
+  cursor: default;
+}
+
+.vault-row-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-row-path {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Its folder isn't there: greyed until it's located or taken off the list. */
+.vault-row.missing .vault-pick {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.vaults-new section + section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.vaults-new h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.vaults-new p {
+  margin: 6px 0;
+  font-size: 13px;
+}
+
+.vault-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 6px 0;
+  font-size: 13px;
+}
+
+.vault-field input {
+  flex: 1;
+  min-width: 10em;
+}
+
+.vault-field .path {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.vaults-new label.check {
+  display: block;
+  margin: 6px 0;
+  font-size: 13px;
+}
+
+/* (The tick and its note show only when they apply.) */
+.vaults-new [hidden] {
+  display: none;
+}
+
+body.phone .vaults-body {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+body.phone .vaults-list {
+  border-right: none;
+  border-bottom: 1px solid var(--line);
+  padding: 0 0 8px;
+  max-height: 40vh;
+}
