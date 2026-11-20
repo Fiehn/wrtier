@@ -941,8 +941,13 @@ main > :not(#panes) {
   margin-bottom: 14px;
 }
 
-#tabbar:empty + #view-mode {
-  display: none;
+#tab-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: flex-end;
+  column-gap: 8px;
+  min-width: 0;
 }
 
 #sidebar-toggle {
@@ -1170,6 +1175,8 @@ main > :not(#panes) {
 .preview-error .link {
   color: inherit;
   text-decoration: underline;
+  border: none;
+  background: none;
 }
 
 .preview-note {
@@ -1692,12 +1699,28 @@ button {
   cursor: pointer;
 }
 
+/* The app's small blue buttons, each in a box so it reads as a button, not as text. The
+   Inclusion's buttons in the editor (.cm-inclusion-styles, -go, and the split note's) look the same. */
 button.link {
-  border: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
   background: none;
-  padding: 0 6px;
+  border-radius: 5px;
+  padding: 1px 7px;
   color: var(--accent);
   font-size: 12px;
+  /* A label on two lines doesn't read as a button: the rows wrap the buttons instead, and a
+     very long one is cut short (its tooltip says it all). */
+  white-space: nowrap;
+  flex-shrink: 0; /* in a row, the others give way first */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+button.link:hover:not(:disabled),
+button.link:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 /* ---- Dialogs ---- */
@@ -2511,6 +2534,8 @@ dialog#settings[open] {
 .comment-conflict .link {
   color: inherit;
   text-decoration: underline;
+  border: none;
+  background: none;
 }
 
 .comment-form {
@@ -2677,8 +2702,10 @@ dialog#settings[open] {
 
 .history-header {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
-  gap: 12px;
+  gap: 6px 12px;
   margin-bottom: 4px;
 }
 
@@ -3900,6 +3927,19 @@ body.phone #write-toolbar button:disabled {
   border-radius: 3px;
   cursor: pointer;
 }
+/* Boxed like the app's other blue buttons (button.link). */
+.cm-inclusion-styles,
+.cm-inclusion-go,
+.cm-inclusion-split button {
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 4px;
+}
+.cm-inclusion-styles:hover,
+.cm-inclusion-go:hover,
+.cm-inclusion-split button:hover {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
 .cm-inclusion-fold {
   color: var(--muted);
   width: 1.4em;
@@ -4018,11 +4058,10 @@ body.phone #write-toolbar button:disabled {
   font-size: 0.8em;
 }
 .cm-inclusion-split button {
-  border: none;
   background: none;
   color: var(--accent);
   font: inherit;
-  padding: 0 0.2em;
+  padding: 0 0.4em;
   cursor: pointer;
 }
 

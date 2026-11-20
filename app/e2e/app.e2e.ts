@@ -1182,8 +1182,8 @@ test("a Work's Preamble… and Mods… are in the tab row and its menu, not on t
   await rain.hover();
   await expect(rain.locator("button", { hasText: /Preamble…|Mods…/ })).toHaveCount(0);
   // In the tab row, beside Find, Raw view and the panel's button, for the Work in front.
-  const row = await app.evaluate(() => [...document.querySelectorAll("#tabrow > button:not([hidden])")].map((b) => b.id));
-  expect(row).toEqual(["sidebar-toggle", "find-open", "view-mode", "preamble-open", "mods-open", "panel-toggle"]);
+  const row = await app.evaluate(() => [...document.querySelectorAll("#tab-actions > button:not([hidden])")].map((b) => b.id));
+  expect(row).toEqual(["find-open", "view-mode", "preamble-open", "mods-open", "panel-toggle"]);
   await app.locator("#tabrow").screenshot({ path: info.outputPath("tabrow.png") });
   await app.locator("#preamble-open").click();
   await expect(app.locator("#preamble")).toBeVisible();
