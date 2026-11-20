@@ -2,6 +2,7 @@
 // Every change is saved at once (to vault.db); removing one only hides them as a sender.
 
 import { invoke } from "@tauri-apps/api/core";
+import { SYMBOLS, symbolButton } from "./ui";
 
 export type Reviewer = {
   id: string;
@@ -83,15 +84,10 @@ export function reviewersTab(confirm: (text: string, yes: string) => Promise<boo
         }
       });
     }
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "link";
-    remove.textContent = "Remove";
-    remove.title = "No longer offer them when adding a Comment. Their Comments stay as they are.";
-    remove.addEventListener("click", () => run(async () => {
+    const remove = symbolButton(`Remove ${r.name}`, SYMBOLS.removePerson, () => run(async () => {
       await invoke("set_reviewer_removed", { id: r.id, removed: true });
       await render();
-    }));
+    }), "Remove: no longer offer them when adding a Comment. Their Comments stay as they are.");
     fields.append(swatch(r.colour), name, role, remove);
 
     const colours = document.createElement("div");
@@ -122,14 +118,10 @@ export function reviewersTab(confirm: (text: string, yes: string) => Promise<boo
     const label = document.createElement("span");
     label.className = "reviewer-label";
     label.textContent = r.role ? `${r.name} (${r.role})` : r.name;
-    const back = document.createElement("button");
-    back.type = "button";
-    back.className = "link";
-    back.textContent = "Bring back";
-    back.addEventListener("click", () => run(async () => {
+    const back = symbolButton(`Bring back ${r.name}`, SYMBOLS.restore, () => run(async () => {
       await invoke("set_reviewer_removed", { id: r.id, removed: false });
       await render();
-    }));
+    }), "Bring back: offer them again when adding a Comment");
     li.append(swatch(r.colour), label, back);
     return li;
   }

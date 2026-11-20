@@ -68,6 +68,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     $("empty").hidden = tabs.active !== null;
     // A library file is plain Typst: no pages of its own (and no Formatted view, in the ⌄ menu).
     $("panel-toggle").hidden = !tabs.activeIsWork;
+    $("comment-on-work").hidden = !tabs.activeIsWork;
     $("tab-menu").hidden = tabs.active === null;
     tabs.bar.querySelector(".tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
     findBar.attach();
@@ -107,7 +108,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
   tabMenu: (id, x, y) => showMenu(x, y, [
     { label: "Read beside", run: () => readBeside(id, tabs.cursorOf(id) ?? 0) },
     "separator",
-    { label: withKey("Close", "closeTab"), run: () => act(() => tabs.close(id)) },
+    { label: "Close", run: () => act(() => tabs.close(id)) },
   ]),
   addElement: (id, name) => act(() => preambleActions.addElement(id, name)),
   openComments: (_id, ids) => {
@@ -129,7 +130,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
   },
   textHistory: (id) => textHistory(id),
   notices: (count) => {
-    $("panel-tab-history").textContent = count > 0 ? `History (${count})` : "History";
+    showCount($("panel-tab-history"), "History", count);
   },
   modCommand: (id, command) => modCommand(id, command),
   markMenu: (_id, x, y, items) => showMenu(x, y, items),
@@ -555,6 +556,15 @@ function deleteImage(id: string, image: ImageRow) {
   });
 }
 
+/** A count on one of the panel's tabs (open Comments, History notices): a number beside its
+ *  symbol, and in its name. */
+function showCount(tab: HTMLElement, name: string, count: number) {
+  const named = count > 0 ? `${name} (${count})` : name;
+  tab.title = named;
+  tab.setAttribute("aria-label", named);
+  tab.querySelector(".panel-count")!.textContent = count > 0 ? String(count) : "";
+}
+
 // Shown or not, and which tab, are remembered on this Device. The pages only compile while
 // their tab is showing, and the History only loads while its tab is.
 const panel = new SidePanel(
@@ -654,12 +664,21 @@ const commentsPanel = new CommentsPanel($("comments-list"), $("comments-new"), {
   },
   showResolved: () => showResolved.checked,
   counted: (open) => {
-    $("panel-tab-comments").textContent = open > 0 ? `Comments (${open})` : "Comments";
+    showCount($("panel-tab-comments"), "Comments", open);
   },
   error: showError,
 });
 
 /** Its key (Ctrl+Shift+M at first) or "Add Comment": a new Comment on the selection, or the word at the cursor. */
+/** A Comment on the Work in front as a whole: written in the Comments panel, which opens for it. */
+function commentOnWork() {
+  if (!tabs.activeIsWork) return;
+  const work = tabs.active!;
+  openTab("comments");
+  act(() => commentsPanel.startAddingWork(work));
+}
+$("comment-on-work").addEventListener("click", commentOnWork);
+
 function startComment(id: string, included = tabs.includedSelectionOf(id)) {
   // Text selected in an Inclusion: the Comment goes to the Work it includes (ADR 0015).
   if (included) {
@@ -685,8 +704,8 @@ function selectionMenu(id: string): MenuItem[] {
   const included = tabs.includedSelectionOf(id);
   if (included) {
     return [
-      { label: withKey("Add Comment", "addComment"), run: () => startComment(id, included) },
-      { label: withKey("Annotate", "footnote"), run: () => footnoteIn(id, included) },
+      { label: "Add Comment", run: () => startComment(id, included) },
+      { label: "Annotate", run: () => footnoteIn(id, included) },
       { label: "Copy", run: () => act(() => navigator.clipboard.writeText(included.quote)) },
     ];
   }
@@ -696,11 +715,11 @@ function selectionMenu(id: string): MenuItem[] {
     document.execCommand(name);
   };
   return [
-    { label: withKey("Add Comment", "addComment"), run: () => startComment(id) },
-    { label: withKey("Insert footnote", "footnote"), run: () => footnoteIn(id) },
-    { label: withKey("Insert Image…", "insertImage"), run: () => insertImage(id) },
-    { label: withKey("History of this text", "textHistory"), run: () => textHistory(id) },
-    { label: withKey("Find and replace…", "find"), run: () => findBar.open(false) },
+    { label: "Add Comment", run: () => startComment(id) },
+    { label: "Insert footnote", run: () => footnoteIn(id) },
+    { label: "Insert Image…", run: () => insertImage(id) },
+    { label: "History of this text", run: () => textHistory(id) },
+    { label: "Find and replace…", run: () => findBar.open(false) },
     "separator",
     { label: "Cut", run: command("cut") },
     { label: "Copy", run: command("copy") },
@@ -1232,6 +1251,9 @@ $("switcher-input").addEventListener("keydown", (e) => {
   }
 });
 $("open-switcher").addEventListener("click", () => void openSwitcher());
+// A new Work or folder at the top of the Vault (inside a folder: its right-click menu).
+$("new-work").addEventListener("click", () => act(() => browser.newWork()));
+$("new-folder").addEventListener("click", () => act(() => browser.newFolder()));
 
 // ---- Hiding the Vault browser, for writing with nothing else on screen (remembered here) ----
 
@@ -1301,19 +1323,19 @@ try {
 
 // ---- The tab row's ⌄: what can be done with the tab in front ----
 
-/** Its items: Find for any tab; the view, the Preamble and the Mods for a Work's (any Work's
- *  Preamble and Mods are also in its right-click menu in the Vault browser); on the phone, the
- *  Chapter list's sheet. The phone has no keys to show. */
+/** Its items: Find for any tab; a Comment on the Work, the view, the Preamble and the Mods for a
+ *  Work's (any Work's Preamble and Mods are also in its right-click menu in the Vault browser); on
+ *  the phone, the Chapter list's sheet. Names only: the keys are in Settings → Shortcuts. */
 function tabMenuItems(): MenuItem[] {
-  const named = (text: string, command: CommandId) => (phone.active ? text : withKey(text, command));
   const items: MenuItem[] = [];
   if (phone.chaptersShown) items.push({ label: "Chapters", run: () => phone.openChapters() });
-  if (tabs.active !== null) items.push({ label: named("Find and replace", "find"), run: () => findBar.open(false) });
+  if (tabs.active !== null) items.push({ label: "Find and replace", run: () => findBar.open(false) });
   if (tabs.activeIsWork) {
     items.push(
-      { label: named(tabs.formatted ? "Raw view" : "Formatted view", "toggleView"), run: () => setFormatted(!tabs.formatted) },
-      { label: named("Preamble…", "preamble"), run: () => act(() => preambleActions.editPreamble(tabs.active!)) },
-      { label: named("Mods…", "mods"), run: () => act(() => editMods(tabs.active!)) },
+      { label: "Comment on this Work…", run: commentOnWork },
+      { label: tabs.formatted ? "Raw view" : "Formatted view", run: () => setFormatted(!tabs.formatted) },
+      { label: "Preamble…", run: () => act(() => preambleActions.editPreamble(tabs.active!)) },
+      { label: "Mods…", run: () => act(() => editMods(tabs.active!)) },
     );
   }
   return items;

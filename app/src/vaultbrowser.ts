@@ -18,7 +18,7 @@ import type { PhoneLayout } from "./phone";
 import type { SyncPanel } from "./syncpanel";
 import type { PreambleActions } from "./preambleactions";
 import { FOLDER_DRAG } from "./movingworks";
-import { $, act, actionButton, ask, askText, clearError, confirmAsk, FOLDER_HINT, showError, showProblems, small, type SyncProblem } from "./ui";
+import { $, act, actionButton, ask, askText, clearError, confirmAsk, FOLDER_HINT, showError, showProblems, small, symbol, SYMBOLS, type SyncProblem } from "./ui";
 
 // The same shapes as the Rust side's (vault.rs, lib.rs).
 type VaultOpened =
@@ -115,7 +115,9 @@ export class VaultBrowser {
     // Right-click: what can be done with a Work, a folder, or the Vault.
     // (Only in the Vault's part of the sidebar: the Chapters below aren't Works.)
     $("sidebar-vault").addEventListener("contextmenu", (e) => this.contextMenu(e));
-    $("empty-trash").addEventListener("click", () => act(async () => {
+    $("empty-trash").addEventListener("click", (e) => act(async () => {
+      e.preventDefault(); // on the Trash's line: it stays open
+      e.stopPropagation();
       if (!(await confirmAsk("Delete everything in the trash for good, on every Device? This can't be undone.", "Empty the trash"))) return;
       await invoke("empty_trash");
       await this.refresh();
@@ -430,7 +432,7 @@ export class VaultBrowser {
     await this.refresh();
   }
 
-  private async newFolder(parent?: string) {
+  async newFolder(parent?: string) {
     const path = await askText("What's the new folder called?", parent ? `${parent}/` : "", "Create",
       "Put it inside another folder with a slash, e.g. Short stories/Old.");
     if (path === null) return;
@@ -571,12 +573,20 @@ export class VaultBrowser {
     const list = $("trash-list");
     list.replaceChildren();
     for (const work of trashed) {
+      // Its name, and at the right the symbol that puts it back.
       const item = document.createElement("li");
-      item.append(document.createTextNode(work.id + " "));
-      item.append(actionButton("Restore", `Put ${work.id} back`, async () => {
+      const name = document.createElement("span");
+      name.className = "trash-name";
+      name.textContent = work.id;
+      name.title = work.id;
+      const restore = actionButton("", `Put ${work.id} back`, async () => {
         await invoke("restore_work", { id: work.id });
         await this.refresh();
-      }));
+      });
+      restore.className = "trash-restore";
+      restore.setAttribute("aria-label", `Restore ${work.id}`);
+      restore.append(symbol(SYMBOLS.restore));
+      item.append(name, restore);
       list.append(item);
     }
   }

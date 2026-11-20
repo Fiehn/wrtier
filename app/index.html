@@ -18,24 +18,23 @@
           <div id="vault-bar">
             <!-- The open Vault's name (its folder's, for now); clicked, another Vault is opened. -->
             <button id="choose-vault" type="button" title="Open a Vault">
-              <svg class="vault-chevrons" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-                <path d="M8 9l4-4 4 4M8 15l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
+              <svg class="vault-chevrons" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 15 5 5 5-5" /><path d="m7 9 5-5 5 5" /></svg>
               <span id="vault-name">Open Vault…</span>
             </button>
             <button id="open-settings" type="button" aria-label="Settings" title="Settings: the editor, Reviewers, the Vault, keyboard shortcuts and the app">
-              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-                <path d="M9.84 4.92L10.44 2.12L13.56 2.12L14.16 4.92A7.4 7.4 0 0 1 15.47 5.47L17.88 3.91L20.09 6.12L18.53 8.53A7.4 7.4 0 0 1 19.08 9.84L21.88 10.44L21.88 13.56L19.08 14.16A7.4 7.4 0 0 1 18.53 15.47L20.09 17.88L17.88 20.09L15.47 18.53A7.4 7.4 0 0 1 14.16 19.08L13.56 21.88L10.44 21.88L9.84 19.08A7.4 7.4 0 0 1 8.53 18.53L6.12 20.09L3.91 17.88L5.47 15.47A7.4 7.4 0 0 1 4.92 14.16L2.12 13.56L2.12 10.44L4.92 9.84A7.4 7.4 0 0 1 5.47 8.53L3.91 6.12L6.12 3.91L8.53 5.47A7.4 7.4 0 0 1 9.84 4.92Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
-                <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6" />
-              </svg>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /><circle cx="12" cy="12" r="3" /></svg>
             </button>
           </div>
           <button id="sync-status" type="button" class="sync-status" hidden></button>
         </header>
         <div id="sidebar-vault">
         <div id="vault-actions" class="row" hidden>
-          <button id="open-switcher" type="button" class="link" title="Open a Work (Ctrl+O)">Open…</button>
-          <button id="open-find-in-vault" type="button" class="link" title="Find some text in every Work (Ctrl+Shift+F)">Find in Vault</button>
+          <!-- Lucide's square-pen and folder-plus: a new Work, a new folder, at the top of the Vault. -->
+          <button id="new-work" type="button" class="vault-action" title="New Work…" aria-label="New Work"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" /></svg></button>
+          <button id="new-folder" type="button" class="vault-action" title="New folder…" aria-label="New folder"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 10v6" /><path d="M9 13h6" /><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg></button>
+          <!-- Lucide's file-search (a Work by its name) and text-search (text in every Work). -->
+          <button id="open-switcher" type="button" class="vault-action" title="Open a Work (Ctrl+O)" aria-label="Open a Work"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="M4.268 21a2 2 0 0 0 1.727 1H18a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v3" /><path d="m9 18-1.5-1.5" /><circle cx="5" cy="14" r="3" /></svg></button>
+          <button id="open-find-in-vault" type="button" class="vault-action" title="Find some text in every Work (Ctrl+Shift+F)" aria-label="Find in Vault"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 6H3" /><path d="M10 12H3" /><path d="M10 18H3" /><circle cx="17" cy="15" r="3" /><path d="m21 19-1.9-1.9" /></svg></button>
         </div>
         <!-- Find in Vault (findinvault.ts): in place of the Works list while it's open. -->
         <div id="vault-find" role="search" aria-label="Find in Vault" hidden>
@@ -56,18 +55,16 @@
         <!-- The Style library and the trash: always in reach under the Works, however long they are. -->
         <div id="sidebar-shelf">
           <details id="library" hidden>
-            <summary>Style library</summary>
+            <!-- What the section does as a whole: a symbol at the right of its line, while it's open
+                 (Lucide's rotate-ccw and trash-2). -->
+            <summary>Style library<button type="button" class="section-action" id="restore-defaults" title="Restore defaults…" aria-label="Restore defaults"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></svg></button></summary>
             <div id="library-conflicts"></div>
             <div id="library-offers"></div>
             <div id="library-list"></div>
-            <div class="row library-new">
-              <button type="button" class="link" id="restore-defaults">Restore defaults…</button>
-            </div>
           </details>
           <details id="trash" hidden>
-            <summary>Trash</summary>
+            <summary>Trash<button type="button" class="section-action" id="empty-trash" title="Empty the trash…" aria-label="Empty the trash"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /><line x1="10" x2="10" y1="11" y2="17" /><line x1="14" x2="14" y1="11" y2="17" /></svg></button></summary>
             <ul id="trash-list"></ul>
-            <button id="empty-trash" type="button" class="link">Empty the trash…</button>
           </details>
         </div>
         <!-- The Chapter list Mod: the Chapters of the Work in front, if it has the Mod here. -->
@@ -84,23 +81,18 @@
         <!-- The top row: part of the window's title bar (windowframe.ts) where the gaps between
              its buttons move the window. -->
         <div id="tabrow">
-          <button id="sidebar-toggle" type="button" title="Hide the Works (Ctrl+\)" aria-label="Show or hide the Works">☰</button>
+          <!-- The Works' symbol, at the far left as the panel's is at the far right: its side filled while they're shown. -->
+          <button id="sidebar-toggle" type="button" title="Hide the Works (Ctrl+\)" aria-label="Show or hide the Works"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path class="panel-icon-side" stroke="none" d="M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4z" /><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M9 3v18" /></svg></button>
           <nav id="tabbar"></nav>
           <!-- Always some room after the tabs, however many: it moves the window. -->
           <div id="tab-gap"></div>
           <!-- What can be done with the tab in front, as a menu. -->
           <button id="tab-menu" type="button" aria-haspopup="menu" aria-label="What to do with this tab" title="What to do with this tab" hidden>
-            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-              <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
           </button>
-          <!-- The panel's symbol, at the far right as ☰ for the Works is at the far left: a window with a column at the right, filled while the panel is shown. -->
+          <!-- The panel's symbol, at the far right as the Works' is at the far left: its side filled while the panel is shown. -->
           <button id="panel-toggle" type="button" aria-pressed="false" aria-label="Show the panel" hidden>
-            <svg viewBox="0 0 18 14" width="18" height="14" aria-hidden="true">
-              <rect class="panel-icon-side" x="12" y="1" width="5" height="12" />
-              <rect x="0.5" y="0.5" width="17" height="13" rx="1.5" fill="none" stroke="currentColor" />
-              <line x1="11.5" y1="1" x2="11.5" y2="13" stroke="currentColor" />
-            </svg>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path class="panel-icon-side" stroke="none" d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4z" /><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M15 3v18" /></svg>
           </button>
         </div>
         <div id="problems" hidden></div>
@@ -176,11 +168,11 @@
       <aside id="side-panel" hidden>
         <header class="panel-tabs">
           <div role="tablist" aria-label="Panel">
-            <button id="panel-tab-pages" type="button" role="tab" aria-controls="preview" data-tab="pages">Pages</button>
-            <button id="panel-tab-comments" type="button" role="tab" aria-controls="comments-pane" data-tab="comments">Comments</button>
-            <button id="panel-tab-footnotes" type="button" role="tab" aria-controls="footnotes-pane" data-tab="footnotes" hidden>Footnotes</button>
-            <button id="panel-tab-images" type="button" role="tab" aria-controls="images-pane" data-tab="images" hidden>Images</button>
-            <button id="panel-tab-history" type="button" role="tab" aria-controls="history-pane" data-tab="history">History</button>
+            <button id="panel-tab-pages" type="button" role="tab" aria-controls="preview" data-tab="pages" title="Pages" aria-label="Pages"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="M10 9H8" /><path d="M16 13H8" /><path d="M16 17H8" /></svg><span class="panel-count"></span></button>
+            <button id="panel-tab-comments" type="button" role="tab" aria-controls="comments-pane" data-tab="comments" title="Comments" aria-label="Comments"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg><span class="panel-count"></span></button>
+            <button id="panel-tab-footnotes" type="button" role="tab" aria-controls="footnotes-pane" data-tab="footnotes" title="Footnotes" aria-label="Footnotes" hidden><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M12 8v8" /><path d="m8.5 14 7-4" /><path d="m8.5 10 7 4" /></svg><span class="panel-count"></span></button>
+            <button id="panel-tab-images" type="button" role="tab" aria-controls="images-pane" data-tab="images" title="Images" aria-label="Images" hidden><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" /></svg><span class="panel-count"></span></button>
+            <button id="panel-tab-history" type="button" role="tab" aria-controls="history-pane" data-tab="history" title="History" aria-label="History"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l4 2" /></svg><span class="panel-count"></span></button>
           </div>
         </header>
         <section id="preview" role="tabpanel" aria-labelledby="panel-tab-pages">
@@ -196,7 +188,11 @@
           <div id="preview-pages" tabindex="0" aria-label="Pages"></div>
         </section>
         <section id="comments-pane" role="tabpanel" aria-labelledby="panel-tab-comments" hidden>
-          <label class="check"><input type="checkbox" id="comments-show-resolved" /> Show resolved</label>
+          <div class="comments-head">
+            <!-- Lucide's message-square-plus: a Comment on the Work as a whole (also in the tab row's ⌄). -->
+            <button id="comment-on-work" type="button" class="symbol-button" title="Comment on this Work: on the Work as a whole, not on any of its text" aria-label="Comment on this Work" hidden><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /><path d="M12 7v6" /><path d="M9 10h6" /></svg></button>
+            <label class="check"><input type="checkbox" id="comments-show-resolved" /> Show resolved</label>
+          </div>
           <div id="comments-new" hidden></div>
           <div id="comments-list"></div>
         </section>

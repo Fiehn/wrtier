@@ -2,6 +2,7 @@
 // `styles/`), the Conflict copies waiting for the Author to pick a version, and making new ones.
 
 import { invoke } from "@tauri-apps/api/core";
+import { SYMBOLS, symbol } from "./ui";
 
 // The same shapes as the Rust side's (library.rs).
 export type Kind = "style" | "look" | "storyElement";
@@ -116,11 +117,12 @@ export class LibraryPanel {
     }
   }
 
-  /** The box with a plus at the right of a group's line, for making a new one of its kind. */
+  /** The plus at the right of a group's line, for making a new one of its kind. */
   private newButton(kind: Kind, one: string): HTMLButtonElement {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "library-add";
+    b.append(symbol(SYMBOLS.plus, 14));
     b.title = `New ${one}…`;
     b.setAttribute("aria-label", `New ${one}…`);
     b.dataset.kind = kind;

@@ -75,7 +75,9 @@ export class PreambleActions {
     $("preview-docx").addEventListener("click", () => act(async () => {
       if (preview.shown) await this.exportDocx(preview.shown, preview.shownMilestone);
     }));
-    $("restore-defaults").addEventListener("click", () => act(async () => {
+    $("restore-defaults").addEventListener("click", (e) => act(async () => {
+      e.preventDefault(); // on the Style library's line: it stays open
+      e.stopPropagation();
       const yes = await confirmAsk(
         "Put the Styles, Looks and Story elements the app comes with back as this version of the app has them? " +
         "Any you've changed go to the Vault's .trash folder first, and any you've removed come back. Your own are left alone. " +

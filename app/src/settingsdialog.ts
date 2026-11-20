@@ -16,7 +16,7 @@ import type { ReadingPanel } from "./reading";
 import type { PagePreview } from "./preview";
 import type { VaultBrowser } from "./vaultbrowser";
 import { openLicenses } from "./licensesdialog";
-import { $, act, actionButton, ask, confirmAsk, small } from "./ui";
+import { $, act, ask, confirmAsk, small, SYMBOLS, symbolButton } from "./ui";
 
 // The same shape as the Rust side's (vault/settings.rs).
 export type Settings = {
@@ -224,6 +224,7 @@ export class SettingsDialog {
     for (const path of browser.hiddenFolders) {
       const item = document.createElement("li");
       const name = document.createElement("span");
+      name.className = "hidden-folder-name";
       name.textContent = path;
       item.append(name);
       const unhide = async () => {
@@ -231,9 +232,9 @@ export class SettingsDialog {
         this.fillHiddenFolders();
       };
       if (browser.folders.includes(path)) {
-        item.append(actionButton("Unhide", `Show ${path} in the Vault browser again`, unhide));
+        item.append(symbolButton(`Unhide ${path}`, SYMBOLS.show, () => act(unhide), `Unhide: show ${path} in the Vault browser again`));
       } else {
-        item.append(small("not in the Vault now"), actionButton("Remove", `Take ${path} off the list`, unhide));
+        item.append(small("not in the Vault now"), symbolButton(`Take ${path} off the list`, SYMBOLS.takeOff, () => act(unhide), `Take ${path} off the list`));
       }
       list.append(item);
     }

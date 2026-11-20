@@ -97,6 +97,10 @@ const dictionaries = group(
   }),
 );
 
+// ---- Icons (Lucide's symbols, copied into index.html; scripts/licenses/lucide.txt) ----
+
+const icons = group([{ license: "ISC", by: "Lucide 0.460.0", text: fs.readFileSync(path.join(app, "scripts", "licenses", "lucide.txt"), "utf8") }]);
+
 // ---- Write ----
 
 const sections = [
@@ -107,6 +111,7 @@ const sections = [
   },
   { title: "Rust libraries", about: "Compiled into the app. Where a library offers a choice of licenses, the app uses it under the one shown.", items: rust },
   { title: "JavaScript libraries", about: "Part of the app's window: the editor and the bridge to the Rust side.", items: group(npmEntries) },
+  { title: "Icons", about: "The symbols on the app's buttons, from Lucide.", items: icons },
   {
     title: "Dictionaries",
     about: "The Spellchecker's Dictionaries built into the app, from wooorm/dictionaries. Those downloaded into a Vault keep their licence next to them, in its dictionaries folder.",

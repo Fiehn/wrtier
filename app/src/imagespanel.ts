@@ -6,6 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type { Picture, Pictures } from "./images";
+import { SYMBOLS, symbolButton } from "./ui";
 
 /** A Past picture of an Image (vault/images.rs `PastPicture`). */
 export type PastPicture = { hash: string; givenMs: number; size: number };
@@ -173,24 +174,18 @@ export class ImagesPanel {
     if (!this.visible) return;
     this.list.replaceChildren();
     if (!work || !view) return;
-    const insert = el("button", "link", "Insert Image…");
-    insert.type = "button";
-    insert.title = "Add a picture file as an Image, at the cursor";
-    insert.addEventListener("click", () => this.hooks.insert(work));
-    if (view.own.length === 0 && view.included.length === 0) {
-      this.list.append(el("p", "muted", "No Images. Add a picture with Insert Image, or drag a picture file onto the text."), insert);
-      return;
-    }
+    // Insert Image, and the Past pictures' folder if there are any: symbols at the top.
     const header = el("div", "images-header");
-    header.append(insert);
+    header.append(symbolButton("Insert Image…", SYMBOLS.insertImage, () => this.hooks.insert(work), "Insert Image…: add a picture file as an Image, at the cursor"));
     if (view.own.some((r) => r.past > 0)) {
-      const past = el("button", "link", "Past pictures…");
-      past.type = "button";
-      past.title = `Open the folder of pictures these Images had before (${view.pastFolder}). Delete any you don't need: a Milestone that had one then shows the current picture instead, and says so.`;
-      past.addEventListener("click", () => this.hooks.openPast(work));
-      header.append(past);
+      header.append(symbolButton("Past pictures…", SYMBOLS.openFolder, () => this.hooks.openPast(work),
+        `Past pictures…: open the folder of pictures these Images had before (${view.pastFolder}). Delete any you don't need: a Milestone that had one then shows the current picture instead, and says so.`));
     }
     this.list.append(header);
+    if (view.own.length === 0 && view.included.length === 0) {
+      this.list.append(el("p", "muted", "No Images. Insert one with the symbol above, or drag a picture file onto the text."));
+      return;
+    }
     if (view.own.length > 0) {
       if (view.included.length > 0) this.list.append(el("h3", "", "In this Work"));
       const ul = el("ul", "image-list");
@@ -200,11 +195,7 @@ export class ImagesPanel {
     for (const group of view.included) {
       const h = el("h3", "images-included");
       h.append(document.createTextNode(`In ${group.label}`));
-      const open = el("button", "link", "Open");
-      open.type = "button";
-      open.title = `Its Images are changed in ${group.label} itself`;
-      open.addEventListener("click", () => this.hooks.openWork(group.work));
-      h.append(open);
+      h.append(symbolButton(`Open ${group.label}`, SYMBOLS.openElsewhere, () => this.hooks.openWork(group.work), `Open ${group.label}: its Images are changed there`));
       this.list.append(h);
       const ul = el("ul", "image-list included");
       for (const row of group.images) ul.append(this.rowOf(work, row, urls.get(row.hash) ?? null, group.label));
@@ -234,23 +225,18 @@ export class ImagesPanel {
     if (row.standIn) about.append(el("span", "image-warning", "Its picture was deleted from the Past pictures: it shows the one on hand."));
     if (!from) {
       const actions = el("div", "image-actions");
-      const button = (label: string, title: string, run: () => void) => {
-        const b = el("button", "link", label);
-        b.type = "button";
-        b.title = title;
-        b.addEventListener("click", run);
-        actions.append(b);
-      };
       if (row.uses.length > 0) {
-        button("Go to", "Where the text uses it (again for the next place)", () => {
+        actions.append(symbolButton("Go to", SYMBOLS.goTo, () => {
           const i = ((this.next.get(row.name) ?? -1) + 1) % row.uses.length;
           this.next.set(row.name, i);
           this.hooks.go(work, row.uses[i]);
-        });
+        }, "Go to where the text uses it (again for the next place)"));
       }
-      button("Replace…", "Give it another picture: every place that uses it shows the new one", () => this.hooks.replace(work, row));
-      button("Rename…", "Rename it, and every place in the text that uses it, as one action", () => this.hooks.rename(work, row));
-      button("Delete", "Delete it: its picture is kept as a Past picture, and undo brings it back", () => this.hooks.remove(work, row));
+      actions.append(
+        symbolButton("Replace…", SYMBOLS.replaceImage, () => this.hooks.replace(work, row), "Replace…: give it another picture; every place that uses it shows the new one"),
+        symbolButton("Rename…", SYMBOLS.edit, () => this.hooks.rename(work, row), "Rename…: it, and every place in the text that uses it, as one action"),
+        symbolButton("Delete", SYMBOLS.delete, () => this.hooks.remove(work, row), "Delete it: its picture is kept as a Past picture, and undo brings it back"),
+      );
       about.append(actions);
       if (row.pastPictures.length > 0) about.append(this.pastOf(work, row));
     }
@@ -292,26 +278,18 @@ export class ImagesPanel {
       const date = new Date(past.givenMs).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
       about.append(el("span", "image-facts", `Added ${date} · ${sizeText(past.size)}`));
       const actions = el("div", "image-actions");
-      const use = el("button", "link", "Use this one");
-      use.type = "button";
-      use.title = "Give the Image this picture again: the one it has now becomes a Past picture";
-      use.addEventListener("click", () => this.hooks.usePast(work, row, past));
-      const remove = el("button", "link", "Delete");
-      remove.type = "button";
-      remove.title = "Delete this picture for good, on every Device";
-      remove.addEventListener("click", () => this.hooks.deletePast(work, row, [past]));
-      actions.append(use, remove);
+      actions.append(
+        symbolButton("Use this one", SYMBOLS.restore, () => this.hooks.usePast(work, row, past), "Use this one: give the Image this picture again; the one it has now becomes a Past picture"),
+        symbolButton("Delete", SYMBOLS.delete, () => this.hooks.deletePast(work, row, [past]), "Delete this picture for good, on every Device"),
+      );
       about.append(actions);
       li.append(thumb, about);
       list.append(li);
     }
     box.append(list);
     if (n > 1) {
-      const all = el("button", "link", `Delete all ${n}`);
-      all.type = "button";
-      all.title = "Delete every Past picture of this Image, for good, on every Device";
-      all.addEventListener("click", () => this.hooks.deletePast(work, row, row.pastPictures));
-      box.append(all);
+      box.append(symbolButton(`Delete all ${n}`, SYMBOLS.delete, () => this.hooks.deletePast(work, row, row.pastPictures),
+        `Delete all ${n}: every Past picture of this Image, for good, on every Device`, n));
     }
     return box;
   }

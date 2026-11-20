@@ -8,6 +8,7 @@
 import { colourOf, type Reviewer } from "./reviewers";
 import type { CommentOp, CommentHighlight, CommentReply } from "./sync";
 import { keyLabel } from "./keys";
+import { SYMBOLS, symbolButton } from "./ui";
 
 export type CommentsHooks = {
   /** The Work in front, if it's a Work. */
@@ -398,11 +399,6 @@ export class CommentsPanel {
     const includedShown = included
       .map((g) => ({ ...g, highlights: g.highlights.filter((m) => this.hooks.showResolved() || !m.resolved) }))
       .filter((g) => g.highlights.length > 0);
-    if (work) {
-      const add = button("Comment on this Work", () => void this.startAddingWork(work), "A Comment on the Work as a whole, not on any of its text");
-      add.classList.add("comments-on-work-button");
-      children.push(add);
-    }
     if (!work) {
       children.push(el("p", "muted", "Open a Work to see its Comments."));
     } else if (shown.length === 0 && includedShown.length === 0) {
@@ -467,18 +463,23 @@ export class CommentsPanel {
     }
 
     const actions = el("div", "comment-actions");
+    // Resolve is a switch: lit while resolved, and pressed again it reopens the Comment.
+    const resolve = symbolButton(highlight.resolved ? "Reopen" : "Resolve", SYMBOLS.resolve,
+      () => this.hooks.act(work, { op: "resolve", id: highlight.id, resolved: !highlight.resolved }),
+      highlight.resolved ? "Resolved: reopen it" : "Resolve");
+    resolve.setAttribute("aria-pressed", String(highlight.resolved));
     actions.append(
-      button("Reply", () => void this.openReply(work, highlight.id)),
-      button(highlight.resolved ? "Reopen" : "Resolve", () => this.hooks.act(work, { op: "resolve", id: highlight.id, resolved: !highlight.resolved })),
-      button("Edit", () => void this.openEdit(work, highlight.id, highlight.id, highlight.body, highlight.sender)),
-      button("Delete", () => this.hooks.act(work, { op: "deleteComment", id: highlight.id }), "Delete it and its Replies (the History keeps it, so it can be restored)"),
+      symbolButton("Reply", SYMBOLS.reply, () => void this.openReply(work, highlight.id)),
+      resolve,
+      symbolButton("Edit", SYMBOLS.edit, () => void this.openEdit(work, highlight.id, highlight.id, highlight.body, highlight.sender)),
+      symbolButton("Delete", SYMBOLS.delete, () => this.hooks.act(work, { op: "deleteComment", id: highlight.id }), "Delete it and its Replies (the History keeps it, so it can be restored)"),
     );
     if (highlight.ranges.length > 1) {
-      actions.append(button(`Show me (${highlight.ranges.length} places)`, () => {
+      actions.append(symbolButton(`Show me (${highlight.ranges.length} places)`, SYMBOLS.goTo, () => {
         const part = (this.parts.get(highlight.id) ?? -1) + 1;
         this.parts.set(highlight.id, part);
         this.hooks.show(work, highlight.id, part);
-      }, "Its text was split by a Move: steps through the places it's in"));
+      }, `Show me: its text was split by a Move into ${highlight.ranges.length} places, each click the next`, highlight.ranges.length));
     }
     card.append(actions);
     // A Reply being written goes at the bottom of its Comment.
@@ -509,8 +510,8 @@ export class CommentsPanel {
     if (reply.otherBody !== null) row.append(this.conflict(work, reply.id, reply.body, reply.otherBody));
     const actions = el("div", "comment-actions");
     actions.append(
-      button("Edit", () => void this.openEdit(work, comment, reply.id, reply.body, reply.sender)),
-      button("Delete", () => this.hooks.act(work, { op: "deleteComment", id: reply.id }), "Delete this Reply (the History keeps it)"),
+      symbolButton("Edit", SYMBOLS.edit, () => void this.openEdit(work, comment, reply.id, reply.body, reply.sender), "Edit this Reply"),
+      symbolButton("Delete", SYMBOLS.delete, () => this.hooks.act(work, { op: "deleteComment", id: reply.id }), "Delete this Reply (the History keeps it)"),
     );
     row.append(actions);
     return row;

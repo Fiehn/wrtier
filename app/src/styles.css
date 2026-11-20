@@ -313,8 +313,6 @@ kbd {
   flex: none;
   max-height: 40%;
   overflow-y: auto;
-  border-top: 1px solid var(--line);
-  padding: 2px 12px 8px;
 }
 
 #sidebar-shelf:not(:has(> :not([hidden]))),
@@ -322,8 +320,14 @@ kbd {
   display: none;
 }
 
+/* The Style library and the Trash: each a section of its own under a line, as the Chapters are. */
 #sidebar-shelf > details {
-  margin-top: 6px;
+  border-top: 1px solid var(--line);
+  padding: 0 12px 8px;
+}
+
+#sidebar-shelf > details > summary {
+  padding: 8px 0 4px;
 }
 
 /* The top part: the Vault's name (to open another) and Settings in the top row, the sync line
@@ -387,10 +391,32 @@ kbd {
   background: var(--chip);
 }
 
-/* Open… and Find in Vault: small blue buttons side by side (their keys are in their tooltips). */
+/* New Work, New folder, Open a Work and Find in Vault: plain symbols side by side, like Settings
+   (their names and keys are in their tooltips). */
 #vault-actions {
   flex-wrap: nowrap;
-  margin-bottom: 10px;
+  justify-content: center;
+  gap: 2px;
+  margin: -6px 0 6px;
+}
+
+.vault-action {
+  flex: none;
+  display: flex;
+  padding: 6px;
+  border: none;
+  background: none;
+  color: var(--muted);
+}
+
+.vault-action:hover {
+  color: var(--text);
+  background: var(--chip);
+}
+
+/* While Find in Vault is open, its symbol says so. */
+#sidebar-vault.finding #open-find-in-vault {
+  color: var(--accent);
 }
 
 /* ---- Find in Vault (findinvault.ts): in place of the Works list while it's open ---- */
@@ -775,7 +801,6 @@ kbd {
 /* ---- The Style library ---- */
 
 #library {
-  margin-top: 16px;
   font-size: 13px;
 }
 
@@ -801,22 +826,15 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
-/* The box with a plus at the right of a group's line: a new Look, Style or Story element. The plus
-   is drawn, not typed: a font's "+" sits on its own line, never quite in the middle of the box. */
+/* The plus at the right of a group's line: a new Look, Style or Story element. */
 #library .library-add {
   float: right;
-  box-sizing: border-box;
-  width: 15px;
-  height: 15px;
-  padding: 0;
-  margin-right: 4px;
+  display: flex;
+  padding: 2px;
+  margin-right: 2px;
   color: var(--muted);
-  background-color: transparent;
-  background-image: linear-gradient(currentColor, currentColor), linear-gradient(currentColor, currentColor);
-  background-position: center;
-  background-size: 7px 1px, 1px 7px;
-  background-repeat: no-repeat;
-  border: 1px solid var(--line);
+  background: none;
+  border: none;
   border-radius: 4px;
 }
 
@@ -861,9 +879,28 @@ kbd {
   color: var(--warn-text);
 }
 
-.library-new {
-  flex-wrap: wrap;
-  margin-top: 10px;
+/* What a section does as a whole (Restore defaults, Empty the trash): a symbol at the right of its
+   line, shown only while it's open, so it sits with what it acts on. */
+.section-action {
+  float: right;
+  display: flex;
+  padding: 2px;
+  /* Taller than the line: it hangs over it rather than pushing into the first row below. */
+  margin: -3px 2px -3px 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+}
+
+.section-action:hover,
+.section-action:focus-visible {
+  color: var(--text);
+  background: var(--chip);
+}
+
+details:not([open]) > summary > .section-action {
+  display: none;
 }
 
 .library-conflict {
@@ -943,7 +980,6 @@ kbd {
 }
 
 #trash {
-  margin-top: 16px;
   color: var(--muted);
   font-size: 13px;
 }
@@ -952,8 +988,34 @@ kbd {
   cursor: pointer;
 }
 
+/* A trashed Work: its name, cut short if long, and the symbol that puts it back at the right. */
 #trash-list li {
-  padding: 3px 0 3px 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0 1px 6px;
+}
+
+.trash-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trash-restore {
+  flex: none;
+  display: flex;
+  padding: 4px;
+  border: none;
+  background: none;
+  color: var(--muted);
+}
+
+.trash-restore:hover {
+  color: var(--text);
+  background: var(--chip);
 }
 
 /* ---- Tabs and the editor ---- */
@@ -1003,11 +1065,12 @@ main > #tabrow {
 }
 
 #sidebar-toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
   border: none;
   background: none;
-  font-size: 17px;
-  line-height: 1;
-  padding: 6px 8px;
+  padding: 6px;
   margin-bottom: 2px;
   color: var(--muted);
 }
@@ -1088,7 +1151,12 @@ main > #tabrow {
   fill: none;
 }
 
-#panel-toggle[aria-pressed="true"] .panel-icon-side {
+#sidebar-toggle svg {
+  display: block;
+}
+
+#panel-toggle[aria-pressed="true"] .panel-icon-side,
+#sidebar-toggle[aria-expanded="true"] .panel-icon-side {
   fill: currentColor;
   opacity: 0.45;
 }
@@ -1142,7 +1210,28 @@ main > #tabrow {
 
 .panel-tabs > [role="tablist"] > [role="tab"] {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   margin-bottom: 0;
+}
+
+.panel-tabs [role="tab"][hidden] {
+  display: none;
+}
+
+.panel-tabs [role="tab"] svg {
+  display: block;
+}
+
+/* Open Comments, History notices: a small number beside the symbol. */
+.panel-count {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.panel-count:empty {
+  display: none;
 }
 
 .panel-tabs [role="tab"],
@@ -1285,16 +1374,19 @@ main > #tabrow {
 
 /* ---- The Page preview ---- */
 
+/* A panel's first row, what can be done in it, is centred: the Pages' choices and Exports, the
+   Comments', Images' and History's actions (and the Vault browser's). */
 #preview header {
   display: flex;
   flex-wrap: wrap; /* a narrow panel puts the Export links on a line of their own */
-  align-items: baseline;
+  align-items: center;
+  justify-content: center;
   gap: 6px;
   padding: 10px 16px 8px;
 }
 
 #preview header .spacer {
-  flex: 1;
+  display: none;
 }
 
 #preview-bar {
@@ -2482,10 +2574,22 @@ dialog#settings[open] {
   margin-top: 4px;
 }
 
+/* Comment on this Work, then Show resolved. */
+.comments-head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: -4px 0 8px;
+}
+
 #comments-pane label.check {
   display: block;
   font-size: 13px;
-  margin-bottom: 8px;
+}
+
+#comment-on-work[hidden] {
+  display: none;
 }
 
 /* The text a new Comment will be on, while it's being written. */
@@ -2667,7 +2771,36 @@ dialog#settings[open] {
   display: flex;
   flex-wrap: wrap;
   gap: 2px;
-  margin: 2px -6px 0;
+  margin: 2px -4px 0;
+}
+
+/* A button that's only a symbol (symbolButton in ui.ts): Reply, Resolve, Edit, Delete, an Image's
+   Replace, and so on. Named in its tooltip. */
+.symbol-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+}
+
+.symbol-button:hover,
+.symbol-button:focus-visible {
+  color: var(--text);
+  background: var(--chip);
+}
+
+/* Resolved: its symbol lit, as a switch that's on. */
+.comment-actions .symbol-button[aria-pressed="true"] {
+  color: var(--reviewer-green);
+}
+
+.symbol-count {
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .comment-conflict {
@@ -2793,11 +2926,6 @@ dialog#settings[open] {
   font-size: 12px;
 }
 
-.comments-on-work-button {
-  display: block;
-  margin: 0 0 8px;
-}
-
 .comments-detached-note,
 .comments-included-note {
   font-size: 12px;
@@ -2856,7 +2984,7 @@ dialog#settings[open] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
   gap: 6px 12px;
   margin-bottom: 4px;
 }
@@ -3173,7 +3301,6 @@ dialog#settings[open] {
 
 /* "Colour text by Session": a faint tint on the text the newest Sessions wrote. */
 .history-header .check {
-  margin-right: auto;
   font-size: 13px;
 }
 
@@ -3333,13 +3460,18 @@ dialog#licenses {
   padding: 0;
 }
 
+/* A Hidden folder: its path, then at the right the symbol that shows it again. */
 .hidden-folders li {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 4px 10px;
   padding: 4px 0;
   overflow-wrap: anywhere;
+}
+
+.hidden-folder-name {
+  flex: 1;
 }
 
 .hidden-folders li.muted {
@@ -4253,8 +4385,9 @@ body.phone #write-toolbar button:disabled {
 
 .images-header {
   display: flex;
-  gap: 12px;
-  margin-bottom: 8px;
+  justify-content: center;
+  gap: 2px;
+  margin: -4px 0 8px;
 }
 
 #images-list h3 {
@@ -4263,8 +4396,8 @@ body.phone #write-toolbar button:disabled {
   color: var(--muted);
   margin: 12px 0 4px;
   display: flex;
-  gap: 8px;
-  align-items: baseline;
+  gap: 4px;
+  align-items: center;
 }
 
 .image-list {
@@ -4336,7 +4469,8 @@ body.phone #write-toolbar button:disabled {
 .image-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 2px 12px;
+  gap: 2px;
+  margin-left: -4px;
 }
 
 /* In the Formatted view: a line that's only an image shows its picture… */
