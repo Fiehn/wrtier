@@ -127,7 +127,6 @@ export class AppKeys {
     $("view-mode").title = withKey("Switch between the Formatted and the Raw view", "toggleView");
     $("preamble-open").title = withKey("The Work's Looks, Styles, Story elements and settings", "preamble");
     $("mods-open").title = withKey("The Work's optional features, such as spellcheck", "mods");
-    $("panel-toggle").title = withKey("The Page preview and the Comments", "togglePanel");
     $("panel-close").title = withKey("Hide the panel", "togglePanel");
     $("empty").textContent = emptyLine(keyLabel("quickSwitcher"));
     $("sidebar-toggle").title = withKey(this.deps.sidebarHidden() ? "Show the Works" : "Hide the Works", "toggleWorks");

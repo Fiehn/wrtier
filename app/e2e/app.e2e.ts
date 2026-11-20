@@ -994,7 +994,7 @@ test("an Inclusion gets Styles of its own from the bar", async ({ app }) => {
 });
 
 test("the PDF of a Milestone shown in the Page preview is of that Milestone", async ({ app }) => {
-  await app.getByRole("button", { name: "Show panel" }).click();
+  await app.getByRole("button", { name: "Show the panel" }).click();
   await app.locator("#panel-tab-pages").click();
   // Name a Milestone, as the Author would.
   await app.locator("#works li.work-entry", { hasText: "Rain" }).click({ button: "right" });
@@ -1183,8 +1183,23 @@ test("a Work's Preamble… and Mods… are in the tab row and its menu, not on t
   await expect(rain.locator("button", { hasText: /Preamble…|Mods…/ })).toHaveCount(0);
   // In the tab row, beside Find, Raw view and the panel's button, for the Work in front.
   const row = await app.evaluate(() => [...document.querySelectorAll("#tab-actions > button:not([hidden])")].map((b) => b.id));
-  expect(row).toEqual(["find-open", "view-mode", "preamble-open", "mods-open", "panel-toggle"]);
+  expect(row).toEqual(["find-open", "view-mode", "preamble-open", "mods-open"]);
+  // And the panel's symbol at the far right, as ☰ is at the far left.
+  expect(await app.evaluate(() => document.querySelector("#tabrow")!.lastElementChild!.id)).toBe("panel-toggle");
   await app.locator("#tabrow").screenshot({ path: info.outputPath("tabrow.png") });
+  // The panel's button is a symbol, saying what it does and whether the panel shows.
+  const toggle = app.locator("#panel-toggle");
+  await expect(toggle).toHaveText("");
+  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await expect(toggle).toHaveAttribute("aria-label", "Show the panel");
+  await toggle.click();
+  await expect(app.locator("#side-panel")).toBeVisible();
+  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  await expect(toggle).toHaveAttribute("aria-label", "Hide the panel");
+  await expect(toggle).toHaveAttribute("title", /^Hide the panel \(/);
+  await app.locator("#tabrow").screenshot({ path: info.outputPath("tabrow-shown.png") });
+  await toggle.click();
+  await expect(app.locator("#side-panel")).toBeHidden();
   await app.locator("#preamble-open").click();
   await expect(app.locator("#preamble")).toBeVisible();
   await app.keyboard.press("Escape");

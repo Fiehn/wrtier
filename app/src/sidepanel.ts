@@ -6,6 +6,8 @@
 // (CONTEXT.md). Open when its last one goes, it stays until another tab is picked, so writing a
 // Footnote and deleting it again doesn't make it come and go.
 
+import { withKey } from "./keys";
+
 export type PanelTab = "pages" | "comments" | "footnotes" | "images" | "history";
 const TABS: PanelTab[] = ["pages", "comments", "footnotes", "images", "history"];
 
@@ -119,11 +121,19 @@ export class SidePanel {
     }
   }
 
+  /** The tab row's panel symbol: says (with the key) what clicking it does now. */
+  showToggle() {
+    const what = this.shown ? "Hide the panel" : "Show the panel";
+    this.toggleButton.setAttribute("aria-pressed", String(this.shown));
+    this.toggleButton.setAttribute("aria-label", what);
+    this.toggleButton.title = withKey(this.shown ? what : `${what}: the Page preview, the Comments and the History`, "togglePanel");
+  }
+
   private apply() {
     this.root.hidden = !this.shown;
     this.showTabs();
     for (const tab of TABS) this.panes[tab].hidden = tab !== this.tab;
-    this.toggleButton.textContent = this.shown ? "Hide panel" : "Show panel";
+    this.showToggle();
     try {
       localStorage.setItem("panel", this.shown ? "open" : "closed");
       localStorage.setItem("panel-tab", this.tab);

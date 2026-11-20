@@ -1344,6 +1344,7 @@ new AppKeys({
   openFindInVault,
   zoom: preview.zoom,
   keysChanged: () => {
+    panel.showToggle();
     findBar.showKeys();
     commentsPanel.render();
   },

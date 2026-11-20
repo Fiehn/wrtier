@@ -974,10 +974,40 @@ main > :not(#panes) {
 
 #view-mode,
 #preamble-open,
-#mods-open,
-#panel-toggle {
+#mods-open {
   margin-bottom: 6px;
   white-space: nowrap;
+}
+
+/* The panel's symbol: a plain symbol like ☰ (#sidebar-toggle), not a boxed blue button, and
+   never wrapped onto a line of its own. */
+#panel-toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  padding: 6px 8px;
+  margin-bottom: 2px;
+  color: var(--muted);
+}
+
+#panel-toggle:hover {
+  color: var(--text);
+  background: var(--chip);
+}
+
+#panel-toggle svg {
+  display: block;
+}
+
+.panel-icon-side {
+  fill: none;
+}
+
+#panel-toggle[aria-pressed="true"] .panel-icon-side {
+  fill: currentColor;
+  opacity: 0.45;
 }
 
 /* ---- The side panel: Pages | Comments, one at a time ---- */

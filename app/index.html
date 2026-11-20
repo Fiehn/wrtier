@@ -84,8 +84,15 @@
             <button id="view-mode" type="button" class="link" title="Ctrl+E" hidden>Raw view</button>
             <button id="preamble-open" type="button" class="link" hidden>Preamble…</button>
             <button id="mods-open" type="button" class="link" hidden>Mods…</button>
-            <button id="panel-toggle" type="button" class="link" title="The Page preview, the Comments and the History (Ctrl+Shift+P)" hidden>Show panel</button>
           </div>
+          <!-- The panel's symbol, at the far right as ☰ for the Works is at the far left: a window with a column at the right, filled while the panel is shown. -->
+          <button id="panel-toggle" type="button" aria-pressed="false" aria-label="Show the panel" hidden>
+            <svg viewBox="0 0 18 14" width="18" height="14" aria-hidden="true">
+              <rect class="panel-icon-side" x="12" y="1" width="5" height="12" />
+              <rect x="0.5" y="0.5" width="17" height="13" rx="1.5" fill="none" stroke="currentColor" />
+              <line x1="11.5" y1="1" x2="11.5" y2="13" stroke="currentColor" />
+            </svg>
+          </button>
         </div>
         <div id="notice" hidden></div>
         <div id="style-notice" hidden></div>
