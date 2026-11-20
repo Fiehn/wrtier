@@ -692,6 +692,25 @@ test("a Chapter of another Work is included, read-only, and counted", async ({ a
   await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/goto.png` : undefined });
 });
 
+test("a click after an Inclusion lands on the line clicked", async ({ app }) => {
+  await endOf(app, "She walked home.");
+  await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Include in Rain…" }).click();
+  await app.locator("#menu button", { hasText: "Chapter: The Navidson Record" }).click();
+  await expect(app.locator(".cm-inclusion-text")).toContainText("a quarter inch more inside than out");
+  // The editor knows how tall the Inclusion is, margins and all: each line below is where it
+  // shows, so a click in the middle of one puts the cursor on it.
+  for (const text of ["Morning came slowly.", "The end."]) {
+    const box = (await line(app, text).boundingBox())!;
+    await app.mouse.click(box.x + 30, box.y + box.height / 2);
+    await expect.poll(() => app.evaluate(() => {
+      const node = window.getSelection()?.anchorNode;
+      const el = node instanceof Element ? node : node?.parentElement;
+      return el?.closest(".cm-line")?.textContent ?? "";
+    })).toBe(text);
+  }
+});
+
 test.describe("at phone width", () => {
   test.use({ viewport: { width: 412, height: 860 } });
 

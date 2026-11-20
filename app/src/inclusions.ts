@@ -202,7 +202,14 @@ class IncludedText extends WidgetType {
       });
       box.append(text);
     }
-    return box;
+    // The space around the box is the wrapper's padding, never a margin: the editor measures a
+    // block without its margins, and every line below would then be placed (numbered, clicked)
+    // that much too high.
+    const block = document.createElement("div");
+    block.className = "cm-inclusion-block";
+    block.contentEditable = "false";
+    block.append(box);
+    return block;
   }
 
   /** "Zampanò has a new Chapter after this one, not included", with what to do about it. */

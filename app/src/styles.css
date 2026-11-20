@@ -1280,11 +1280,16 @@ main > :not(#panes) {
   vertical-align: 0.15em;
 }
 
-/* One with no text of its own (a scene break) stands alone, centred like on the page. */
+/* One with no text of its own (a scene break) stands alone, centred like on the page. The space
+   above and below is a see-through border, not a margin: a margin would slip out of its line,
+   which the editor then measures that much short, putting every line below out of place. */
 .cm-tp-element-whole {
   display: block;
   width: fit-content;
-  margin: 0.2em auto;
+  margin: 0 auto;
+  border-top: 0.2em solid transparent;
+  border-bottom: 0.2em solid transparent;
+  background-clip: padding-box;
 }
 
 /* In the Style library but not in this Work: it won't typeset until it's added. */
@@ -3827,12 +3832,17 @@ body.phone #write-toolbar button:disabled {
   background: var(--warn-bg);
 }
 
-/* An Inclusion (ADR 0015): another Work's text, shown read-only under a bar that names it. */
+/* An Inclusion (ADR 0015): another Work's text, shown read-only under a bar that names it. The
+   space around it is its wrapper's padding: the editor measures a block without its margins, so
+   a margin would put every line below it (its number, and where a click lands) out of place. */
+.cm-inclusion-block {
+  padding: 0.4em 0;
+}
+
 .cm-inclusion {
   border-left: 3px solid var(--accent);
   background: var(--panel);
   border-radius: 0 4px 4px 0;
-  margin: 0.4em 0;
   padding: 0.2em 0.8em 0.4em;
   cursor: default;
 }
