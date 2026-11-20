@@ -1386,6 +1386,19 @@ async fn image_picture(handle: AppHandle, id: String, name: String, work: Option
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// One of the Work's Past pictures, as bytes, for its thumbnail in the Images tab.
+#[tauri::command]
+async fn past_picture(handle: AppHandle, id: String, hash: String) -> Result<tauri::ipc::Response, String> {
+    let bytes = off_main(handle, move |app| open_vault_of(app)?.past_picture(&id, &hash)).await?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Deletes some of the Work's Past pictures, for good (asked first). Returns how many went.
+#[tauri::command]
+async fn delete_past_pictures(handle: AppHandle, id: String, hashes: Vec<String>) -> Result<usize, String> {
+    off_main(handle, move |app| open_vault_of(app)?.delete_past_pictures(&id, &hashes)).await
+}
+
 /// Opens the Work's Past pictures folder in the system's file manager (made if it isn't there).
 #[tauri::command]
 fn open_past_pictures(handle: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
@@ -1445,6 +1458,8 @@ pub fn run() {
             get_images,
             image_picture,
             open_past_pictures,
+            past_picture,
+            delete_past_pictures,
             pick_folder,
             list_folders,
             app_hidden,

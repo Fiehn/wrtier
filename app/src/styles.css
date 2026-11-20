@@ -4170,3 +4170,39 @@ body.phone #write-toolbar button:disabled {
   padding: 0 6px;
   font-size: 0.8em;
 }
+
+/* An Image's Past pictures, listed under it while open. */
+.image-past {
+  margin-top: 4px;
+}
+
+.image-past-toggle {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.image-past-toggle:hover {
+  color: var(--text);
+}
+
+.image-past-list {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+}
+
+.image-past-row {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.image-thumb.small {
+  width: 48px;
+  height: 36px;
+}

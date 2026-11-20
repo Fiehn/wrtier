@@ -1201,10 +1201,11 @@ impl OpenWork {
         Ok(())
     }
 
-    /// `Op::SetImage`: the picture comes from the History file, where the Vault kept it.
+    /// `Op::SetImage`: the picture comes from the History file, where the Vault kept it, or from
+    /// the Past pictures folder (one used again; it moves back into the History file).
     fn set_image(&mut self, name: &str, hash: &str, now_ms: u64) -> Result<(), String> {
-        let bytes = storage::picture(&self.db, hash).map_err(err)?
-            .ok_or("That picture isn't kept in the Work (add it again).")?;
+        let bytes = wrtier::images::bytes_of(&self.db, hash)
+            .ok_or("That picture isn't kept in the Work any more (add it again).")?;
         let mut value = ImageValue::of(name.trim(), &bytes).ok_or("That isn't a picture the app can show.")?;
         // A new picture for an Image keeps its name, capitals and all.
         if let Some(had) = wrtier::images::image_of(&self.doc, &value.name) {

@@ -692,6 +692,35 @@ test("a Chapter of another Work is included, read-only, and counted", async ({ a
   await app.screenshot({ path: process.env.SHOTS ? `${process.env.SHOTS}/goto.png` : undefined });
 });
 
+test("an Image's Past pictures are listed under it, used again or deleted for good", async ({ app }) => {
+  await endOf(app, "She walked home.");
+  await app.keyboard.press("Control+Alt+i");
+  await app.locator("#panel-toggle").click();
+  await app.locator("#panel-tab-images").click();
+  await expect(app.locator(".image-row .image-title")).toHaveText("map.png");
+  await expect(app.locator(".image-past-toggle")).toHaveCount(0); // none yet
+  // Another picture by the same name: replaced, and the first is a Past picture.
+  await app.locator("#images-list").getByRole("button", { name: "Insert Image…" }).click();
+  await app.locator("#image-clash button[value=replace]").click();
+  const toggle = app.locator(".image-past-toggle");
+  await expect(toggle).toHaveText(/▸ 1 Past picture/);
+  await toggle.click();
+  await expect(app.locator(".image-past-row")).toHaveCount(1);
+  await expect(app.locator(".image-past-row img")).toHaveCount(1);
+  // Used again: the Image has it once more, and the one it had is the Past picture now.
+  const first = "1".padStart(64, "0");
+  await app.locator(".image-past-row").getByRole("button", { name: "Use this one" }).click();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.images.Rain["map.png"].hash)).toBe(first);
+  const second = "2".padStart(64, "0");
+  await expect(app.locator(".image-past-row")).toHaveAttribute("data-hash", second);
+  // Deleted for good, after asking.
+  await app.locator(".image-past-row").getByRole("button", { name: "Delete" }).click();
+  await app.locator("#ask-confirm-yes", { hasText: "Delete for good" }).click();
+  await expect(app.locator(".image-past-toggle")).toHaveCount(0);
+  const asked = await app.evaluate(() => (window as any).__fake.log.filter((e: any) => e.cmd === "delete_past_pictures").map((e: any) => e.args.hashes));
+  expect(asked).toEqual([[second]]);
+});
+
 test("a click after an Inclusion lands on the line clicked", async ({ app }) => {
   await endOf(app, "She walked home.");
   await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });

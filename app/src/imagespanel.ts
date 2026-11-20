@@ -1,11 +1,14 @@
 // The Images tab (ADR 0021): the Work in front's Images, each with its picture, its size, where
-// the text uses it (or that it doesn't) and its Past pictures, where it's replaced, renamed or
-// deleted; then the Images of the Works it includes, to look at only (they're changed in their
+// the text uses it (or that it doesn't) and its Past pictures (a list that opens under it, where
+// one is used again or deleted for good), where it's replaced, renamed or deleted; then the Images of the Works it includes, to look at only (they're changed in their
 // own Work). Offered only while there's an Image to list. It also hands the editor the pictures
 // its Formatted view shows.
 
 import { invoke } from "@tauri-apps/api/core";
 import type { Picture, Pictures } from "./images";
+
+/** A Past picture of an Image (vault/images.rs `PastPicture`). */
+export type PastPicture = { hash: string; givenMs: number; size: number };
 
 /** One Image (vault/images.rs `ImageRow`). */
 export type ImageRow = {
@@ -17,6 +20,8 @@ export type ImageRow = {
   uses: number[];
   past: number;
   pastSize: number;
+  /** Its Past pictures, newest first. */
+  pastPictures: PastPicture[];
   standIn: boolean;
 };
 
@@ -33,6 +38,10 @@ export type ImagesHooks = {
   replace(work: string, image: ImageRow): void;
   rename(work: string, image: ImageRow): void;
   remove(work: string, image: ImageRow): void;
+  /** Gives the Image one of its Past pictures again. */
+  usePast(work: string, image: ImageRow, past: PastPicture): void;
+  /** Deletes some of the Image's Past pictures, for good (asking first). */
+  deletePast(work: string, image: ImageRow, past: PastPicture[]): void;
   openPast(work: string): void;
   openWork(work: string): void;
   /** The pictures for the Work's editor. */
@@ -70,6 +79,8 @@ export class ImagesPanel {
   private readonly urls = new Map<string, Promise<string | null>>();
   /** Which use of each Image "Go to" went to last, to go on to the next. */
   private readonly next = new Map<string, number>();
+  /** The Images whose Past pictures are listed (open), by name. */
+  private readonly opened = new Set<string>();
 
   constructor(private readonly list: HTMLElement, private readonly hooks: ImagesHooks) {}
 
@@ -84,11 +95,13 @@ export class ImagesPanel {
     void this.refresh();
   }
 
-  /** Something in a Work may have changed its Images (its History grew: an edit, undo, a sync). */
-  changed(id: string) {
+  /** Something in a Work may have changed its Images (its History grew: an edit, undo, a sync).
+   *  `now`: the tab itself changed them, so it's asked again at once, not after the typing settles. */
+  changed(id: string, now = false) {
     if (id !== this.hooks.work()) return;
     clearTimeout(this.timer);
-    this.timer = window.setTimeout(() => void this.refresh(), SETTLE_MS);
+    if (now) void this.refresh();
+    else this.timer = window.setTimeout(() => void this.refresh(), SETTLE_MS);
   }
 
   /** A picture's address for the page; null if it can't be shown in one (a PDF). */
@@ -104,6 +117,23 @@ export class ImagesPanel {
           return null;
         });
       this.urls.set(row.hash, url);
+    }
+    return url;
+  }
+
+  /** A Past picture's address for the page (read when its list opens); null for a PDF. */
+  private pastUrl(work: string, kind: string, hash: string): Promise<string | null> {
+    const mime = MIME[kind];
+    if (!mime) return Promise.resolve(null);
+    let url = this.urls.get(hash);
+    if (!url) {
+      url = invoke<ArrayBuffer>("past_picture", { id: work, hash })
+        .then((bytes) => URL.createObjectURL(new Blob([bytes], { type: mime })))
+        .catch(() => {
+          this.urls.delete(hash);
+          return null;
+        });
+      this.urls.set(hash, url);
     }
     return url;
   }
@@ -198,7 +228,8 @@ export class ImagesPanel {
     about.append(el("strong", "image-title", row.name));
     const facts = [row.kind, sizeText(row.size)];
     if (!from) facts.push(row.uses.length === 0 ? "not used" : row.uses.length === 1 ? "used once" : `used ${row.uses.length} times`);
-    if (row.past > 0) facts.push(`${row.past} Past ${row.past === 1 ? "picture" : "pictures"} (${sizeText(row.pastSize)})`);
+    // Another Work's Past pictures are only counted: they're its own to use or delete.
+    if (from && row.past > 0) facts.push(`${row.past} Past ${row.past === 1 ? "picture" : "pictures"} (${sizeText(row.pastSize)})`);
     about.append(el("span", `image-facts${!from && row.uses.length === 0 ? " unused" : ""}`, facts.join(" · ")));
     if (row.standIn) about.append(el("span", "image-warning", "Its picture was deleted from the Past pictures: it shows the one on hand."));
     if (!from) {
@@ -221,8 +252,67 @@ export class ImagesPanel {
       button("Rename…", "Rename it, and every place in the text that uses it, as one action", () => this.hooks.rename(work, row));
       button("Delete", "Delete it: its picture is kept as a Past picture, and undo brings it back", () => this.hooks.remove(work, row));
       about.append(actions);
+      if (row.pastPictures.length > 0) about.append(this.pastOf(work, row));
     }
     li.append(thumb, about);
     return li;
+  }
+
+  /** The Image's Past pictures: a button that opens their list, and the list while it's open. */
+  private pastOf(work: string, row: ImageRow): HTMLElement {
+    const box = el("div", "image-past");
+    const open = this.opened.has(row.name);
+    const n = row.pastPictures.length;
+    const toggle = el("button", "image-past-toggle", `${open ? "▾" : "▸"} ${n} Past ${n === 1 ? "picture" : "pictures"} (${sizeText(row.pastSize)})`);
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.title = "The pictures it had before: use one again, or delete those you don't need";
+    toggle.addEventListener("click", () => {
+      if (this.opened.has(row.name)) this.opened.delete(row.name);
+      else this.opened.add(row.name);
+      box.replaceWith(this.pastOf(work, row));
+    });
+    box.append(toggle);
+    if (!open) return box;
+    const list = el("ul", "image-past-list");
+    for (const past of row.pastPictures) {
+      const li = el("li", "image-past-row");
+      li.dataset.hash = past.hash;
+      const thumb = el("div", "image-thumb small");
+      thumb.append(el("span", "muted", row.kind));
+      void this.pastUrl(work, row.kind, past.hash).then((url) => {
+        if (!url) return;
+        const img = el("img");
+        img.src = url;
+        img.alt = "";
+        img.draggable = false;
+        thumb.replaceChildren(img);
+      });
+      const about = el("div", "image-about");
+      const date = new Date(past.givenMs).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+      about.append(el("span", "image-facts", `Added ${date} · ${sizeText(past.size)}`));
+      const actions = el("div", "image-actions");
+      const use = el("button", "link", "Use this one");
+      use.type = "button";
+      use.title = "Give the Image this picture again: the one it has now becomes a Past picture";
+      use.addEventListener("click", () => this.hooks.usePast(work, row, past));
+      const remove = el("button", "link", "Delete");
+      remove.type = "button";
+      remove.title = "Delete this picture for good, on every Device";
+      remove.addEventListener("click", () => this.hooks.deletePast(work, row, [past]));
+      actions.append(use, remove);
+      about.append(actions);
+      li.append(thumb, about);
+      list.append(li);
+    }
+    box.append(list);
+    if (n > 1) {
+      const all = el("button", "link", `Delete all ${n}`);
+      all.type = "button";
+      all.title = "Delete every Past picture of this Image, for good, on every Device";
+      all.addEventListener("click", () => this.hooks.deletePast(work, row, row.pastPictures));
+      box.append(all);
+    }
+    return box;
   }
 }

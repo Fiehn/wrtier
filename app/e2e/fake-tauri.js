@@ -38,6 +38,10 @@
     vaultFolders: [],
     /** Each Work's Images (ADR 0021), by name in lowercase. */
     images: {},
+    /** Each Work's Past pictures, by Image (name in lowercase), newest first. */
+    past: {},
+    /** How many pictures Insert Image's picker has handed out: each is a new one. */
+    picked: 0,
     /** The colours of Works and folders (vault/colours.rs). */
     colours: { works: {}, folders: {} },
     /** Vault themes: file → { name, dark, css }. A test adds some before the page loads. */
@@ -110,9 +114,16 @@
           body: op.body, resolved: false, quote: "", timeMs: now, replies: [], otherBody: null,
         });
         break;
-      case "setImage":
-        (fake.images[id] ??= {})[op.name.toLowerCase()] = { name: op.name, kind: "PNG", size: 77, hash: op.hash };
+      case "setImage": {
+        const key = op.name.toLowerCase();
+        const had = fake.images[id]?.[key];
+        const past = ((fake.past[id] ??= {})[key] ??= []);
+        // The picture it had becomes a Past picture; one used again stops being one.
+        fake.past[id][key] = past.filter((p) => p.hash !== op.hash);
+        if (had && had.hash !== op.hash) fake.past[id][key].unshift({ hash: had.hash, givenMs: now, size: had.size });
+        (fake.images[id] ??= {})[key] = { name: op.name, kind: "PNG", size: 77, hash: op.hash };
         return false;
+      }
       case "deleteImage":
         delete fake.images[id]?.[op.name.toLowerCase()];
         return false;
@@ -312,14 +323,24 @@
         for (const m of text.matchAll(/image\(\s*"([^"\n]*)"/g)) {
           if (m[1].toLowerCase() === image.name.toLowerCase()) uses.push(m.index + m[0].indexOf('"') + 1);
         }
-        return { ...image, uses, past: 0, pastSize: 0, standIn: false };
+        const pastPictures = fake.past[id]?.[image.name.toLowerCase()] ?? [];
+        return { ...image, uses, past: pastPictures.length, pastSize: pastPictures.reduce((n, p) => n + p.size, 0), pastPictures, standIn: false };
       });
       return { own, included: [], pastFolder: "" };
     },
     // Insert Image's file picker: always the same small picture, "map.png".
     pick_image: ({ id }) => {
       const had = fake.images[id]?.["map.png"];
-      return { hash: "a".repeat(64), name: "map.png", kind: "PNG", size: 77, clash: had ? had.name : null, otherName: "map 2.png", same: had?.hash === "a".repeat(64) };
+      const hash = String(++fake.picked).padStart(64, "0");
+      return { hash, name: "map.png", kind: "PNG", size: 77, clash: had ? had.name : null, otherName: "map 2.png", same: had?.hash === hash };
+    },
+    past_picture: () => handlers.image_picture(),
+    delete_past_pictures: ({ id, hashes }) => {
+      let deleted = 0;
+      for (const [key, list] of Object.entries(fake.past[id] ?? {})) {
+        fake.past[id][key] = list.filter((p) => !hashes.includes(p.hash) || (deleted++, false));
+      }
+      return deleted;
     },
     // A red 300×200 PNG: tall enough to click its lower part.
     image_picture: () => Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAASwAAADICAIAAADdvUsCAAACRUlEQVR4nO3TMQEAIAzAMEDI/EtBFjJ6kCjo031nFtA5dQD8zoQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcQe3acClC+A44kAAAAASUVORK5CYII="), (c) => c.charCodeAt(0)).buffer,

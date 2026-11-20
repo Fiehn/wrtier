@@ -69,8 +69,21 @@ pub struct ImageRow {
     /// Its Past pictures still kept, and how much room they take.
     pub past: usize,
     pub past_size: u64,
+    /// Those Past pictures, newest first.
+    pub past_pictures: Vec<PastPicture>,
     /// Its picture is gone (a deleted Past picture brought back): the one on hand stands in.
     pub stand_in: bool,
+}
+
+/// A Past picture of an Image (ADR 0021), still kept in the Past pictures folder.
+#[derive(Serialize, Debug, PartialEq, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PastPicture {
+    pub hash: String,
+    /// When the Image was first given it (ms since 1970).
+    pub given_ms: u64,
+    /// Its file's size, in bytes.
+    pub size: u64,
 }
 
 /// The Images of one included Work, under its name.
@@ -102,24 +115,28 @@ pub(super) fn included_copies(shown: &[Shown]) -> Vec<IncludedCopy> {
         .collect()
 }
 
-/// The Past pictures still kept of the Image `name` (not its current picture), and their
-/// total size.
-fn past_of(db: &Path, doc: &Doc, name: &str, current: &str) -> (usize, u64) {
-    let hashes: BTreeSet<String> = stored::history_of(doc, name).into_iter()
-        .map(|(_, v)| v.hash)
-        .filter(|h| h != current)
-        .map(|h| h[..16].to_string())
-        .collect();
-    let Ok(entries) = std::fs::read_dir(stored::past_dir(db)) else { return (0, 0) };
-    let mut found = (0, 0);
+/// The Past pictures still kept of the Image `name` (not its current picture), newest first.
+fn past_of(db: &Path, doc: &Doc, name: &str, current: &str) -> Vec<PastPicture> {
+    // Each picture it had, by the start of its hash (as its file is named): the whole hash, and
+    // when it was first given.
+    let mut had: std::collections::BTreeMap<String, (String, u64)> = std::collections::BTreeMap::new();
+    for (ms, v) in stored::history_of(doc, name) {
+        if v.hash != current {
+            had.entry(v.hash[..16].to_string()).or_insert((v.hash, ms));
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(stored::past_dir(db)) else { return Vec::new() };
+    let mut found: Vec<PastPicture> = Vec::new();
     for entry in entries.flatten() {
         let file = entry.file_name().to_string_lossy().into_owned();
         let Some((stem, _)) = file.rsplit_once('.') else { continue };
-        if stem.rsplit_once(' ').is_some_and(|(_, short)| hashes.contains(short)) {
-            found.0 += 1;
-            found.1 += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let Some((hash, given_ms)) = stem.rsplit_once(' ').and_then(|(_, short)| had.get(short)) else { continue };
+        if found.iter().any(|p| p.hash == *hash) {
+            continue; // the same picture twice (written by two Devices at once)
         }
+        found.push(PastPicture { hash: hash.clone(), given_ms: *given_ms, size: entry.metadata().map(|m| m.len()).unwrap_or(0) });
     }
+    found.sort_by(|a, b| b.given_ms.cmp(&a.given_ms).then(a.hash.cmp(&b.hash)));
     found
 }
 
@@ -135,12 +152,15 @@ fn rows(db: &Path, doc: &Doc, text: Option<&str>) -> Vec<ImageRow> {
         None => Vec::new(),
     };
     stored::images_of(doc).into_iter().map(|v| {
-        let (past, past_size) = past_of(db, doc, &v.name, &v.hash);
+        let past_pictures = past_of(db, doc, &v.name, &v.hash);
         let lower = v.name.to_lowercase();
         ImageRow {
             uses: named.iter().filter(|(_, n)| *n == lower).map(|(at, _)| *at).collect(),
             stand_in: !held.contains(&v.hash) && stored::find_past(db, &v.hash).is_none(),
-            kind: kind_label(v.kind), size: v.size, hash: v.hash, name: v.name, past, past_size,
+            past: past_pictures.len(),
+            past_size: past_pictures.iter().map(|p| p.size).sum(),
+            past_pictures,
+            kind: kind_label(v.kind), size: v.size, hash: v.hash, name: v.name,
         }
     }).collect()
 }
@@ -189,6 +209,43 @@ impl Vault {
             }
         }
         Ok(ImagesView { own, included, past_folder })
+    }
+
+    /// Is `hash` a Past picture of one of the open Work's own Images: a picture one of them had,
+    /// and none has now?
+    fn is_past_picture(doc: &Doc, hash: &str) -> bool {
+        let current = stored::images_of(doc);
+        !current.iter().any(|v| v.hash == hash)
+            && doc.records_ever(wrtier::change::IMAGE_PREFIX).iter()
+                .flat_map(|record| doc.field_history(record, wrtier::change::IMAGE_FIELD))
+                .any(|(_, _, value)| ImageValue::parse(value).is_some_and(|v| v.hash == hash))
+    }
+
+    /// One of the open Work's Past pictures, for its thumbnail in the Images tab.
+    pub fn past_picture(&self, id: &str, hash: &str) -> Result<Vec<u8>, String> {
+        let work = self.works.get(&self.current_id(id)).ok_or_else(|| format!("{id} isn't open."))?;
+        if !Self::is_past_picture(&work.doc, hash) {
+            return Err("That isn't a Past picture of this Work.".into());
+        }
+        stored::find_past(&work.db, hash).map(|(_, bytes)| bytes).ok_or_else(|| "That Past picture has been deleted.".into())
+    }
+
+    /// Deletes some of the open Work's Past pictures from its Past pictures folder, for good, on
+    /// every Device (ADR 0021): a Milestone or undo that needs one then shows the picture on
+    /// hand instead. Only ever Past pictures of its own Images; returns how many went.
+    pub fn delete_past_pictures(&mut self, id: &str, hashes: &[String]) -> Result<usize, String> {
+        let work = self.works.get(&self.current_id(id)).ok_or_else(|| format!("{id} isn't open."))?;
+        let mut deleted = 0;
+        for hash in hashes {
+            if !Self::is_past_picture(&work.doc, hash) {
+                continue;
+            }
+            while let Some((path, _)) = stored::find_past(&work.db, hash) {
+                std::fs::remove_file(&path).map_err(|e| format!("Couldn't delete {}: {e}", path.display()))?;
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
     }
 
     /// The open Work's Past pictures folder.
@@ -439,6 +496,35 @@ mod tests {
         v.edit("Rain", vec![typing(0, "x")], 41_000).unwrap(); // something for the Text file to catch up on
         v.leave("Rain", 50_000).unwrap();
         assert_eq!(std::fs::read(&copy).unwrap(), BLUE);
+    }
+
+    #[test]
+    fn past_pictures_are_listed_newest_first_used_again_or_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = open(dir.path());
+        v.create_work("Rain", 1_000).unwrap();
+        add(&mut v, "Rain", "map.png", RED, 0, 2_000);
+        let blue = v.keep_picture("Rain", "map.png", BLUE).unwrap();
+        v.edit("Rain", vec![Op::SetImage { name: "map.png".into(), hash: blue.hash.clone() }], 30_000).unwrap();
+        // A third PNG, made by hand (Typst never reads it here).
+        let green = b"\x89PNG\r\n\x1a\n-green".to_vec();
+        let kept = v.keep_picture("Rain", "map.png", &green).unwrap();
+        v.edit("Rain", vec![Op::SetImage { name: "map.png".into(), hash: kept.hash.clone() }], 40_000).unwrap();
+        let row = &v.images("Rain").unwrap().own.into_iter().find(|r| r.name == "map.png").unwrap();
+        let listed: Vec<&str> = row.past_pictures.iter().map(|p| p.hash.as_str()).collect();
+        assert_eq!(listed, vec![blue.hash.as_str(), stored::hash_of(RED).as_str()], "newest first");
+        assert_eq!((row.past, row.past_size), (2, (BLUE.len() + RED.len()) as u64));
+        assert_eq!(v.past_picture("Rain", &blue.hash).unwrap(), BLUE);
+        assert!(v.past_picture("Rain", &kept.hash).is_err(), "the current picture isn't a Past one");
+        // Used again: it's the Image's picture once more, back in the History file.
+        v.edit("Rain", vec![Op::SetImage { name: "map.png".into(), hash: blue.hash.clone() }], 50_000).unwrap();
+        assert_eq!(image(&v, "Rain", "map.png").unwrap().hash, blue.hash);
+        assert!(storage::picture_hashes(&dir.path().join("Rain.db")).unwrap().contains(&blue.hash));
+        // Deleted: gone from the folder; the current picture can't be deleted this way.
+        assert_eq!(v.delete_past_pictures("Rain", &[stored::hash_of(RED), blue.hash.clone()]).unwrap(), 1);
+        assert!(stored::find_past(&dir.path().join("Rain.db"), &stored::hash_of(RED)).is_none());
+        let row = v.images("Rain").unwrap().own.into_iter().find(|r| r.name == "map.png").unwrap();
+        assert_eq!(row.past_pictures.iter().map(|p| p.hash.clone()).collect::<Vec<_>>(), vec![kept.hash.clone()]);
     }
 
     #[test]

@@ -12,7 +12,7 @@ import type { Reviewer } from "./reviewers";
 import { SidePanel, type PanelTab } from "./sidepanel";
 import { CommentsPanel } from "./commentspanel";
 import { FootnotesPanel, type DetachedRow } from "./footnotespanel";
-import { ImagesPanel, type ImageRow, type ImagesView } from "./imagespanel";
+import { ImagesPanel, sizeText, type ImageRow, type ImagesView, type PastPicture } from "./imagespanel";
 import { imageLine } from "./images";
 import { findAnnotation, insertFootnote } from "./footnotes";
 import { askAnnotation } from "./annotationdialog";
@@ -413,6 +413,12 @@ const imagesPanel = new ImagesPanel($("images-list"), {
   replace: (work, image) => replaceImage(work, image),
   rename: (work, image) => renameImage(work, image),
   remove: (work, image) => deleteImage(work, image),
+  usePast: (work, image, past) => act(async () => {
+    await tabs.settled(work);
+    tabs.image(work, { op: "setImage", name: image.name, hash: past.hash });
+    await imagesChanged(work);
+  }),
+  deletePast: (work, image, past) => deletePastPictures(work, image, past),
   openPast: (work) => act(() => invoke("open_past_pictures", { id: work })),
   openWork: (work) => act(() => openWork(work)),
   pictures: (work, pictures) => tabs.setPictures(work, pictures),
@@ -428,7 +434,7 @@ const imagesPanel = new ImagesPanel($("images-list"), {
 /** After an Image changed: the pages, the Images tab and the editor's pictures follow. */
 async function imagesChanged(id: string) {
   await tabs.settled(id);
-  imagesPanel.changed(id);
+  imagesPanel.changed(id, true);
   preview.edited(id);
 }
 
@@ -518,6 +524,21 @@ function renameImage(id: string, image: ImageRow) {
     await tabs.settled(id);
     tabs.image(id, { op: "renameImage", from: image.name, to: to.trim() });
     await imagesChanged(id);
+  });
+}
+
+/** Deletes Past pictures of an Image for good, after asking: what needed one shows the picture on hand instead. */
+function deletePastPictures(id: string, image: ImageRow, past: PastPicture[]) {
+  act(async () => {
+    const what = past.length === 1 ? "this Past picture" : `these ${past.length} Past pictures`;
+    const room = sizeText(past.reduce((n, p) => n + p.size, 0));
+    const yes = await confirmAsk(
+      `Delete ${what} of “${image.name}” (${room})? ${past.length === 1 ? "It's" : "They're"} gone for good, on every Device: undo can't bring ${past.length === 1 ? "it" : "them"} back. A Milestone that had ${past.length === 1 ? "it" : "one"} shows the picture the Image has now instead, and says so.`,
+      "Delete for good",
+    );
+    if (!yes) return;
+    await invoke("delete_past_pictures", { id, hashes: past.map((p) => p.hash) });
+    imagesPanel.changed(id, true);
   });
 }
 
