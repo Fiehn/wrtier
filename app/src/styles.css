@@ -1164,14 +1164,20 @@ main > #tabrow {
 /* ---- The side panel: Pages | Comments, one at a time ---- */
 
 /* Its width is set by panelsizes.ts, which has the same default. */
+/* Its narrowest has room for its whole tab row, and with the app's own frame the window's buttons
+   beside it (panelsizes.ts, SIDE_MIN). */
 #side-panel {
   width: min(42%, 640px);
-  min-width: 260px;
+  min-width: 290px;
   flex: none;
   display: flex;
   flex-direction: column;
   background: var(--panel);
   border-left: 1px solid var(--line);
+}
+
+body.custom-frame #side-panel {
+  min-width: 440px;
 }
 
 #side-panel[hidden],
@@ -1213,6 +1219,7 @@ main > #tabrow {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  padding: 6px 8px;
   margin-bottom: 0;
 }
 

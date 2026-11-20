@@ -24,7 +24,7 @@ import { HistoryPanel, type ComparisonView, type HistoryView, type RestorePrevie
 import { COMMANDS, keyLabel, withKey, type CommandId } from "./keys";
 import { ensureFilesAccess, onAndroid } from "./android";
 import { PhoneLayout } from "./phone";
-import { PanelSizes } from "./panelsizes";
+import { PanelSizes, setFramed } from "./panelsizes";
 import { openMods } from "./modsdialog";
 import { inUse, modExtensions, modNamed, noSettings, type ModContext, type ModSettings, type ModsState } from "./mods";
 import { LEVEL_NAMES, type MarkCounts, type MarkLevel } from "./marks";
@@ -1343,7 +1343,7 @@ $("sidebar-toggle").addEventListener("click", () => setSidebar($("app").classLis
 
 // ---- The panels' widths: dragged by their edges, remembered on this Device ----
 
-new PanelSizes({
+const panelSizes = new PanelSizes({
   vault: {
     element: $("sidebar"),
     handle: $("sidebar-resizer"),
@@ -1494,6 +1494,11 @@ $("open-uninstall").addEventListener("click", () => act(() => uninstaller.open()
 // ---- The window's frame and title (windowframe.ts) ----
 
 const frame = WindowFrame.start();
+// With the app's own frame, the Side panel's narrowest leaves room for the window's buttons.
+void frame.then((f) => {
+  setFramed(f.custom);
+  panelSizes.layout();
+});
 
 /** The window's title follows the tab in front and the open Vault (their names as shown). */
 function showTitle() {

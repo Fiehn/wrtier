@@ -14,7 +14,7 @@ All changes of any work you create are stored as an immutable list, when you mak
 
 2. Simplicity
 
-All elements of the program are stored as human readable, no unparseable binaries and no zip files of hundreds of documents. Each work contains two files. The database of changes and a text (``.typ``)  file that holds the latest final text including compilation instructions for look and styling using [typst](https://typst.app/) compilation. All other information relates to the look, feel and functionality of the editor and not the actual work. This allows easy disentanglement from the program at any point in time without ever opening the program again.
+All elements of the program are stored as human readable, no unparseable binaries and no zip files of hundreds of documents. Each work contains two files. The database of changes and a text (``.typ``)  file that holds the latest final text including compilation instructions for look and styling using [typst](https://typst.app/) compilation. All other information relates to the look, feel and functionality of the editor and not the actual work. This allows easy disentanglement from the program at any point in time without ever opening the program again. A ``.typ`` file can be opened as a plain text file by changing the extention to ``.txt`` or opening it with any text editor.
 
 3. Ownership
 

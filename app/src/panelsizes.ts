@@ -15,11 +15,25 @@ const GIVING_WAY: readonly PanelName[] = ["side", "reading", "vault"];
 /** The narrowest the editor gets while the panels can still give way. */
 export const EDITOR_MIN = 400;
 
-export const LIMITS = {
+/**
+ * The Side panel's narrowest: room for its whole tab row (six symbols and their counts), and with
+ * the app's own frame (windowframe.ts) the window's buttons beside them, since the panel's row is
+ * then the one at the window's top-right corner.
+ */
+export const SIDE_MIN = 290;
+export const SIDE_MIN_FRAMED = 440;
+let sideMin = SIDE_MIN;
+
+/** The window has the app's own frame (or not): the Side panel's narrowest follows. */
+export function setFramed(framed: boolean) {
+  sideMin = framed ? SIDE_MIN_FRAMED : SIDE_MIN;
+}
+
+export const LIMITS: Record<PanelName, { readonly min: number; readonly max: number }> = {
   vault: { min: 180, max: 480 },
   reading: { min: 260, max: Infinity },
-  side: { min: 260, max: Infinity },
-} as const;
+  side: { get min() { return sideMin; }, max: Infinity },
+};
 
 /** Arrow keys on a handle move it this far; with Shift, BIG_STEP. */
 export const STEP = 16;
