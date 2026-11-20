@@ -29,7 +29,7 @@ describe("Inclusions in the editor", () => {
     const { text, included } = readerText(state);
     expect(text).toBe("My words.\nThe rain had stopped.\nMore.");
     expect(countsOf(text).words).toBe(7);
-    expect(countsLine(countsOf(text), null, countsOf(included).words)).toBe("7 words (4 included) · 35 characters");
+    expect(countsLine(countsOf(text), null, countsOf(included).words)).toBe("7 words (4 included) · 3 sentences · 35 characters");
     // A selection that doesn't take the Inclusion counts only what it takes.
     expect(readerText(state, 0, 9).text).toBe("My words.");
   });

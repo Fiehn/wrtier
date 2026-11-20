@@ -52,8 +52,8 @@ export const MODS: Mod[] = [
   },
   {
     id: "counts",
-    name: "Word and character count",
-    about: "Shows the Work's words and characters under the editor, and the selection's while text is selected. Markup, comments and line breaks aren't counted.",
+    name: "Word count",
+    about: "Shows the Work's words, sentences and characters under the editor, and the selection's while text is selected. Markup, comments and line breaks aren't counted, and headings aren't sentences.",
   },
   {
     id: "spellcheck",

@@ -1,10 +1,10 @@
-// The word and character count Mod: a line under the editor with the Work's words and
-// characters, and the selection's while text is selected. It catches up after a short pause, so
+// The word count Mod: a line under the editor with the Work's words, sentences and characters,
+// and the selection's while text is selected. It catches up after a short pause, so
 // a novel isn't counted again on every key. Included text (ADR 0015) counts as if it were
 // written there, and the line says how many of the words are included. Footnotes' words count
 // too; the line's tooltip says how many there are.
 
-import { countsLine, countsOf, wordsIn, type Counts } from "./counts";
+import { countsLine, countsOf, wordsIn, wordsPerSentence, type Counts } from "./counts";
 import { footnoteStretches } from "./footnotes";
 
 /** Text as a reader sees it (Inclusions written out), and the included part on its own. */
@@ -76,6 +76,8 @@ export class CountLine {
       this.inFootnotes > 0 ? `${this.inFootnotes.toLocaleString()} in footnotes` : "",
     ].filter(Boolean);
     const words = parts.length && !selected ? `Words: ${parts.join(" · ")}. ` : "";
-    this.el.title = `${words}Characters with spaces; ${without} without. Markup, comments and line breaks aren't counted.${included}`;
+    const average = wordsPerSentence(selected ?? this.all);
+    const sentences = average ? `Sentences: ${average} words long on average; headings aren't sentences. ` : "";
+    this.el.title = `${words}${sentences}Characters with spaces; ${without} without. Markup, comments and line breaks aren't counted.${included}`;
   }
 }
