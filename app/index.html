@@ -122,6 +122,7 @@
           <button type="button" data-command="strong" aria-label="Bold" title="Bold"><b>B</b></button>
           <button type="button" data-command="emph" aria-label="Italic" title="Italic"><i>I</i></button>
           <button type="button" data-command="footnote" title="Insert a footnote">Note</button>
+          <button type="button" data-command="insertImage" title="Insert an Image (a picture file)">Image</button>
           <button type="button" data-command="addComment" title="Add a Comment on the selection">Comment</button>
           <button type="button" data-command="textHistory" title="History of the selection, or the paragraph">History</button>
           <button type="button" id="toolbar-view" title="Formatted or Raw view">Raw</button>
@@ -157,6 +158,7 @@
             <button id="panel-tab-pages" type="button" role="tab" aria-controls="preview" data-tab="pages">Pages</button>
             <button id="panel-tab-comments" type="button" role="tab" aria-controls="comments-pane" data-tab="comments">Comments</button>
             <button id="panel-tab-footnotes" type="button" role="tab" aria-controls="footnotes-pane" data-tab="footnotes" hidden>Footnotes</button>
+            <button id="panel-tab-images" type="button" role="tab" aria-controls="images-pane" data-tab="images" hidden>Images</button>
             <button id="panel-tab-history" type="button" role="tab" aria-controls="history-pane" data-tab="history">History</button>
           </div>
           <button id="panel-close" type="button" class="link" title="Hide the panel (Ctrl+Shift+P)">Hide</button>
@@ -181,6 +183,9 @@
         <section id="footnotes-pane" role="tabpanel" aria-labelledby="panel-tab-footnotes" hidden>
           <div id="footnotes-list"></div>
         </section>
+        <section id="images-pane" role="tabpanel" aria-labelledby="panel-tab-images" hidden>
+          <div id="images-list"></div>
+        </section>
         <section id="history-pane" role="tabpanel" aria-labelledby="panel-tab-history" hidden>
           <header class="history-header">
             <label class="check" title="Tint the text the last 5 Sessions wrote, the newest strongest (only on this Device)"><input type="checkbox" id="history-tint" /> Colour text by Session</label>
@@ -199,6 +204,7 @@
         <button type="button" data-screen="pages">Pages</button>
         <button type="button" data-screen="comments">Comments</button>
         <button type="button" data-screen="footnotes" id="phone-footnotes" hidden>Footnotes</button>
+        <button type="button" data-screen="images" id="phone-images" hidden>Images</button>
         <button type="button" data-screen="history">History</button>
       </nav>
     </div>
@@ -306,6 +312,18 @@
         <menu>
           <button type="button" data-close="cancel">Cancel</button>
           <button value="yes" id="ask-confirm-yes">Yes</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <!-- Insert Image, when the Work has an Image by that name already (images.ts). -->
+    <dialog id="image-clash">
+      <form method="dialog">
+        <p id="image-clash-text"></p>
+        <menu>
+          <button type="button" data-close="cancel">Cancel</button>
+          <button value="both" id="image-clash-both">Keep both</button>
+          <button value="replace">Replace it</button>
         </menu>
       </form>
     </dialog>

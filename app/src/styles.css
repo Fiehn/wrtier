@@ -4002,3 +4002,161 @@ body.phone #write-toolbar button:disabled {
 .report-list li + li {
   margin-top: 6px;
 }
+
+/* ---- Images (ADR 0021): the Images tab (imagespanel.ts) and the editor's pictures (images.ts) ---- */
+
+#images-pane {
+  padding: 12px 16px;
+  overflow-y: auto;
+}
+
+#images-list > p.muted {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.images-header {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+#images-list h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 12px 0 4px;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.image-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.image-row {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 10px;
+  padding: 8px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.image-row:hover {
+  background: var(--chip);
+}
+
+.image-thumb {
+  width: 72px;
+  height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.image-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.image-about {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.image-title {
+  overflow-wrap: anywhere;
+}
+
+.image-facts {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.image-facts.unused {
+  font-style: italic;
+}
+
+.image-warning {
+  color: var(--warn-text);
+  background: var(--warn-bg);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+.image-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+}
+
+/* In the Formatted view: a line that's only an image shows its picture… */
+.cm-image-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 0;
+  cursor: text;
+}
+
+.cm-image-block img {
+  max-width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  border-radius: 2px;
+}
+
+.cm-image-name {
+  font-family: system-ui, sans-serif;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* …and one inside other markup a small chip in place of its name. */
+.cm-image-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 0 2px;
+  border-radius: 4px;
+  background: var(--chip);
+  font-family: system-ui, sans-serif;
+  font-size: 0.8em;
+  vertical-align: middle;
+}
+
+.cm-image-chip img {
+  height: 1.4em;
+  width: auto;
+  border-radius: 2px;
+}
+
+.cm-image-block.missing,
+.cm-image-chip.missing {
+  color: var(--warn-text);
+  background: var(--warn-bg);
+  border: 1px dashed var(--warn-text);
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: 4px;
+}
+
+.cm-image-chip.missing {
+  padding: 0 6px;
+  font-size: 0.8em;
+}

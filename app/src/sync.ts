@@ -33,7 +33,8 @@ type Op =
   | { op: "include"; at: number; work: string; chapter: number | null }
   | { op: "replace"; edits: { from: number; to: number; text: string }[]; find: string; with: string; count: number; annotations?: { id: string; body: string }[] }
   | CommentOp
-  | HistoryOp;
+  | HistoryOp
+  | ImageOp;
 
 /** Something done from the History tab: one Revert each, which Ctrl+Z can take back. Sent in
  *  order with the typing; Rust closes the open burst first, and answers with patches. */
@@ -41,6 +42,14 @@ export type HistoryOp =
   | { op: "revert"; changes: string[]; dependents: boolean }
   | { op: "restore"; changes: string[] }
   | { op: "returnTo"; milestone: string; keep: string[] };
+
+/** Something done to the Work's Images (ADR 0021): one action each, which Ctrl+Z takes back. Sent
+ *  in order with the typing, like a History action (a rename rewrites the text, so Rust answers
+ *  with patches). A picture is kept in the Work first (`pick_image`, `keep_image_bytes`), by hash. */
+export type ImageOp =
+  | { op: "setImage"; name: string; hash: string }
+  | { op: "renameImage"; from: string; to: string }
+  | { op: "deleteImage"; name: string };
 
 /** Something done to Comments. Sent in order with the typing; Rust closes the open burst first. */
 export type CommentOp =
@@ -167,7 +176,7 @@ type Item =
   | { kind: "dismiss"; from: number; to: number; key: string }
   | { kind: "dismissed" }
   | { kind: "comment"; op: CommentOp }
-  | { kind: "history"; op: HistoryOp }
+  | { kind: "history"; op: HistoryOp | ImageOp }
   | { kind: "locate"; first: string; last: string | null; answer: (range: [number, number] | null) => void }
   | { kind: "stretch"; from: number; to: number; answer: (quote: string | null) => void }
   | { kind: "include"; at: number; work: string; chapter: number | null };
@@ -389,8 +398,8 @@ export class WorkSync {
     void this.flush();
   }
 
-  /** Reverts, restores or returns to a Milestone, in order with the typing. */
-  history(op: HistoryOp) {
+  /** Reverts, restores or returns to a Milestone, or changes an Image, in order with the typing. */
+  history(op: HistoryOp | ImageOp) {
     this.queue.push({ kind: "history", op });
     void this.flush();
   }

@@ -23,7 +23,7 @@ use typst::model::{FootnoteElem, FootnoteEntry, HeadingElem, ParElem};
 use typst::pdf::{PdfMarkerTag, PdfMarkerTagKind};
 use typst::syntax::{Source, Span};
 use typst::text::{FontStyle, TextItem};
-use typst::visualize::Paint;
+use typst::visualize::{ExchangeFormat, Image, ImageKind, Paint, RasterFormat};
 use typst_layout::PagedDocument;
 
 /// What a target picks out of the document.
@@ -93,6 +93,75 @@ pub struct Run {
     /// the body, the reference to it; in the footnote's own text, its number there. Its text is
     /// the number as Typst showed it; Word numbers footnotes itself.
     pub note: Option<usize>,
+    /// It's a picture (its index in `Measured::pictures`), set in line: its text is one
+    /// object replacement character.
+    pub picture: Option<usize>,
+}
+
+/// A picture on the pages, as a `.docx` can hold it, at the size it was set (in points).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Picture {
+    pub data: PictureData,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// A picture's file, in a kind Word shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PictureData {
+    Png(Vec<u8>),
+    Jpeg(Vec<u8>),
+    Gif(Vec<u8>),
+    /// Word shows the SVG where it can, and the PNG drawn from it elsewhere.
+    Svg { svg: Vec<u8>, png: Vec<u8> },
+}
+
+impl PictureData {
+    /// Its file's extension, and its content type.
+    pub fn kind(&self) -> (&'static str, &'static str) {
+        match self {
+            PictureData::Png(_) | PictureData::Svg { .. } => ("png", "image/png"),
+            PictureData::Jpeg(_) => ("jpeg", "image/jpeg"),
+            PictureData::Gif(_) => ("gif", "image/gif"),
+        }
+    }
+
+    /// The bytes Word falls back on (the PNG, for an SVG).
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            PictureData::Png(b) | PictureData::Jpeg(b) | PictureData::Gif(b) => b,
+            PictureData::Svg { png, .. } => png,
+        }
+    }
+
+    /// A picture Typst set, as Word can take it: raster pictures as they are (WebP and raw
+    /// pixels made PNG), an SVG with a PNG drawn from it at `width` × `height` points. None for
+    /// what Word can't show (a PDF page).
+    pub fn of(image: &Image, width: f64, height: f64) -> Option<PictureData> {
+        let png_of = |dynamic: &image::DynamicImage| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            dynamic.write_to(&mut out, image::ImageFormat::Png).ok().map(|()| out.into_inner())
+        };
+        match image.kind() {
+            ImageKind::Raster(raster) => match raster.format() {
+                RasterFormat::Exchange(ExchangeFormat::Png) => Some(PictureData::Png(raster.data().to_vec())),
+                RasterFormat::Exchange(ExchangeFormat::Jpg) => Some(PictureData::Jpeg(raster.data().to_vec())),
+                RasterFormat::Exchange(ExchangeFormat::Gif) => Some(PictureData::Gif(raster.data().to_vec())),
+                _ => png_of(raster.dynamic()).map(PictureData::Png),
+            },
+            ImageKind::Svg(svg) => {
+                // Drawn at about 150 dots per inch at the size it was set.
+                let scale = 150.0 / 72.0;
+                let size = svg.tree().size();
+                let (w, h) = ((width * scale).round().max(1.0), (height * scale).round().max(1.0));
+                let mut pixmap = resvg::tiny_skia::Pixmap::new(w as u32, h as u32)?;
+                let transform = resvg::tiny_skia::Transform::from_scale(w as f32 / size.width(), h as f32 / size.height());
+                resvg::render(svg.tree(), transform, &mut pixmap.as_mut());
+                Some(PictureData::Svg { svg: svg.data().to_vec(), png: pixmap.encode_png().ok()? })
+            }
+            ImageKind::Pdf(_) => None,
+        }
+    }
 }
 
 /// Where a unit is in a list: which list (the outermost one, as the walk met them), how deep,
@@ -199,6 +268,8 @@ pub struct Skipped {
 pub struct Measured {
     pub units: Vec<Unit>,
     pub skipped: Vec<Skipped>,
+    /// The pictures the units' runs show (`Run::picture`).
+    pub pictures: Vec<Picture>,
 }
 
 /// How close two edges must be to count as the same, in points.
@@ -319,6 +390,8 @@ struct Piece {
     inline: bool,
     /// See `Unit::right_bound`.
     right_bound: Option<f64>,
+    /// See `Run::picture`.
+    picture: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -355,6 +428,7 @@ struct Walk<'a> {
     /// The footnotes met so far, in order, to number them.
     notes: Vec<Location>,
     skipped: Vec<Skipped>,
+    pictures: Vec<Picture>,
 }
 
 impl Walk<'_> {
@@ -420,7 +494,7 @@ impl Walk<'_> {
                 }
                 FrameItem::Tag(tag) => self.tag(tag),
                 FrameItem::Text(text) if !self.in_artifact() => self.text(at, text),
-                FrameItem::Image(_, _, span) if !self.in_artifact() => self.skip(crate::Uncarried::Image, *span),
+                FrameItem::Image(image, size, span) if !self.in_artifact() => self.picture(at, image, size.x.to_pt(), size.y.to_pt(), *span),
                 // Underlines and strike-throughs are carried as such, a table's lines with the
                 // table; anything else drawn among the text isn't.
                 FrameItem::Shape(_, span) if !self.in_artifact() && !["underline", "strike", "table", "grid"].iter().any(|n| self.inside(n)) => {
@@ -465,6 +539,60 @@ impl Walk<'_> {
         }
     }
 
+    /// The unit text here belongs to: the innermost paragraph, heading, list item's body, table
+    /// cell, footnote or equation set apart; failing that, a labelled target; failing that, loose
+    /// text, numbered by where it was found.
+    fn unit_here(&mut self) -> UnitKey {
+        let body = |c: &Content| c.to_packed::<PdfMarkerTag>().is_some_and(|t| matches!(t.kind, PdfMarkerTagKind::ListItemBody));
+        let display = |c: &Content| c.to_packed::<EquationElem>().is_some_and(|e| e.block.get(StyleChain::default()));
+        let unit = self.open.iter().rev()
+            .find(|(_, c)| c.is::<ParElem>() || c.is::<HeadingElem>() || body(c) || c.is::<FootnoteEntry>() || display(c)
+                || c.elem().name() == "cell" || self.target_of(c).is_some())
+            .map(|(loc, _)| UnitKey::Element(*loc));
+        unit.unwrap_or_else(|| {
+            let same = self.pieces.last().is_some_and(|p| matches!(p.unit, UnitKey::Loose(n) if n == self.loose));
+            if !same {
+                self.loose += 1;
+            }
+            UnitKey::Loose(self.loose)
+        })
+    }
+
+    /// A picture, `width` × `height` points, set with its top left at `at`: a piece of its own
+    /// in the unit it's in, as wide and tall as it, so it's placed (centred, say) as it was.
+    /// One Word can't show, or in a footnote (which has no pictures of its own here), is left out.
+    fn picture(&mut self, at: Point, image: &Image, width: f64, height: f64, span: Span) {
+        let in_note = self.open.iter().any(|(_, c)| c.is::<FootnoteEntry>() || c.is::<FootnoteElem>());
+        let Some(data) = (!in_note).then(|| PictureData::of(image, width, height)).flatten() else {
+            self.skip(crate::Uncarried::Image, span);
+            return;
+        };
+        if self.inside("place") {
+            self.skip(crate::Uncarried::PlacedImage, span);
+        }
+        let index = self.pictures.len();
+        self.pictures.push(Picture { data, width, height });
+        // In a paragraph (put in a box, in line with its text), it's part of that; anywhere else
+        // it's a block of its own, apart from what's before and after it.
+        let unit = match self.unit_here() {
+            UnitKey::Loose(_) => {
+                self.loose += 2; // the next loose text starts a unit of its own too
+                UnitKey::Loose(self.loose - 1)
+            }
+            element => element,
+        };
+        // Set as the text before it was, so it changes nothing measured of the text around it.
+        let like = self.pieces.last();
+        let (family, size, metrics, fill) = like.map_or((String::new(), 0.0, Metrics::default(), String::new()), |p| (p.family.clone(), p.size, p.metrics, p.fill.clone()));
+        self.pieces.push(Piece {
+            unit, target: self.current_target(), scope: self.scopes.last().cloned(), page: self.page,
+            at: at + Point::with_y(typst::layout::Abs::pt(height)), width, cap: height, metrics, family, size,
+            italic: false, bold: false, fill, small_caps: false, underline: false, strike: false,
+            text: "\u{fffc}".into(), list: None, sources: Vec::new(), note: None, in_note: None, inline: false,
+            right_bound: self.rights.last().copied(), picture: Some(index),
+        });
+    }
+
     fn text(&mut self, at_point: Point, item: &TextItem) {
         // A list item's marker isn't text: Word numbers the list itself.
         let tag = self.open.iter().rev().find_map(|(_, c)| c.to_packed::<PdfMarkerTag>()).map(|t| t.kind.clone());
@@ -493,14 +621,7 @@ impl Walk<'_> {
             }
             None => (None, None),
         };
-        // The innermost paragraph, heading, list item's body, table cell, footnote or equation
-        // set apart is the unit; failing that, a labelled target.
-        let body = |c: &Content| c.to_packed::<PdfMarkerTag>().is_some_and(|t| matches!(t.kind, PdfMarkerTagKind::ListItemBody));
-        let display = |c: &Content| c.to_packed::<EquationElem>().is_some_and(|e| e.block.get(StyleChain::default()));
-        let unit = self.open.iter().rev()
-            .find(|(_, c)| c.is::<ParElem>() || c.is::<HeadingElem>() || body(c) || c.is::<FootnoteEntry>() || display(c)
-                || c.elem().name() == "cell" || self.target_of(c).is_some())
-            .map(|(loc, _)| UnitKey::Element(*loc));
+        let unit = self.unit_here();
         let lists: Vec<&(Location, Content)> = self.open.iter().filter(|(_, c)| matches!(c.elem().name(), "list" | "enum")).collect();
         let list = match (self.marker.take(), lists.first(), lists.last()) {
             (Some((marker, marker_left)), Some((outer, _)), Some((_, inner))) => {
@@ -512,13 +633,6 @@ impl Walk<'_> {
             }
             _ => None,
         };
-        let unit = unit.unwrap_or_else(|| {
-            let same = self.pieces.last().is_some_and(|p| matches!(p.unit, UnitKey::Loose(n) if n == self.loose));
-            if !same {
-                self.loose += 1;
-            }
-            UnitKey::Loose(self.loose)
-        });
         let target = if in_note.is_some() { None } else { self.current_target() };
         let inline = note.is_some() || self.inside("equation");
         let font = item.font.font();
@@ -554,7 +668,7 @@ impl Walk<'_> {
             family: info.family.clone(), size: item.size.to_pt(),
             italic: info.variant.style != FontStyle::Normal, bold: info.variant.weight.to_number() >= 600,
             fill, small_caps, underline, strike, text: item.text.to_string(), list, sources: place,
-            note, in_note, inline, right_bound,
+            note, in_note, inline, right_bound, picture: None,
         });
     }
 }
@@ -600,6 +714,7 @@ fn walk<'a>(document: &PagedDocument, options: &'a Options, main: Option<&'a Sou
         targets: &options.targets, scope_labels: options.scope.as_ref(), scopes: Vec::new(),
         open: Vec::new(), pieces: Vec::new(), page: 0, loose: 0, blocks: Vec::new(), main, places,
         small_caps: crate::fonts::SmallCaps::default(), marker: None, lists: Vec::new(), notes: Vec::new(), skipped: Vec::new(), rights: Vec::new(),
+        pictures: Vec::new(),
     };
     for (n, page) in document.pages().iter().enumerate() {
         walk.page = n;
@@ -625,7 +740,7 @@ pub fn measure(document: &PagedDocument, options: &Options) -> Vec<Unit> {
 pub fn measure_in(document: &PagedDocument, options: &Options, area: impl Fn(usize, Option<&str>) -> Area, main: &Source, places: bool) -> Measured {
     let walk = walk(document, options, Some(main), places);
     let units = group_all(walk.pieces).into_iter().map(|mut u| { u.area = area(u.page, u.scope.as_deref()); u }).collect();
-    Measured { units, skipped: walk.skipped }
+    Measured { units, skipped: walk.skipped, pictures: walk.pictures }
 }
 
 /// A soft hyphen: what Typst sets as the hyphen it adds where it breaks a word.
@@ -642,7 +757,7 @@ pub(crate) fn wraps_after(text: &str) -> bool {
 fn run_of(p: &Piece) -> Run {
     Run {
         text: String::new(), family: p.family.clone(), size: p.size, italic: p.italic, bold: p.bold, fill: p.fill.clone(),
-        small_caps: p.small_caps, underline: p.underline, strike: p.strike, at: Vec::new(), note: p.note,
+        small_caps: p.small_caps, underline: p.underline, strike: p.strike, at: Vec::new(), note: p.note, picture: p.picture,
     }
 }
 
@@ -673,7 +788,7 @@ fn runs_of(pieces: &[Piece]) -> (Vec<Run>, bool) {
                 continue;
             }
             if !wrapped {
-                runs.push(Run { text: "\n".into(), at: vec![None], ..run_of(p) });
+                runs.push(Run { text: "\n".into(), at: vec![None], picture: None, ..run_of(p) });
             }
         }
         hyphenated = false;
@@ -802,7 +917,10 @@ fn group(pieces: Vec<Piece>) -> Vec<Unit> {
         let page = pieces[0].page;
         let previous = units.last();
         let first_on_page = previous.is_none_or(|u| u.page != page);
-        let gap_before = previous.filter(|u| u.page == page).map(|u| lines[0].baseline - u.lines.last().unwrap().baseline);
+        // Spacing is fitted to the gaps between paragraphs of text: a picture's height isn't one.
+        let pictured = |pieces: &[Piece]| pieces.iter().any(|p| p.picture.is_some());
+        let beside_picture = pictured(&pieces) || previous.is_some_and(|u| u.runs.iter().any(|r| r.picture.is_some()));
+        let gap_before = previous.filter(|u| u.page == page && !beside_picture).map(|u| lines[0].baseline - u.lines.last().unwrap().baseline);
         let continues = matches!(key.0, UnitKey::Element(_)) && last_key == Some(key.0);
         let text: String = pieces.iter().map(|p| p.text.as_str()).collect::<String>().chars().take(40).collect();
         let (runs, ends_hyphenated) = runs_of(&pieces);

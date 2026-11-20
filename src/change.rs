@@ -150,6 +150,20 @@ pub fn included_record(work: &str) -> String {
 pub fn is_free_text(record: &str, field: &str) -> bool {
     (record == PREAMBLE_RECORD && field == "raw") || (record.starts_with("comment/") && field == "body")
         || (record.starts_with(ANNOTATION_PREFIX) && field == ANNOTATION_FIELD)
+        // Not free text, but whole values all the same: two Devices giving one Image different
+        // pictures (or one deleting it) without seeing each other is worth a Merge notice too.
+        || (record.starts_with(IMAGE_PREFIX) && field == IMAGE_FIELD)
+}
+
+/// The records holding a Work's Images (ADR 0021): `image/<its name in lowercase>`, so two
+/// Devices adding the same name meet in one record. Its one field, `picture`, says which picture
+/// it has (`images::ImageValue`), never the picture itself; empty, it's deleted. Content, like
+/// the text: undo, a Revert and returning to a Milestone take it back.
+pub const IMAGE_PREFIX: &str = "image/";
+pub const IMAGE_FIELD: &str = "picture";
+
+pub fn image_record(name: &str) -> String {
+    format!("{IMAGE_PREFIX}{}", name.to_lowercase())
 }
 
 /// The records holding a Work's Annotations (ADR 0020): notes it prints on the text of a Work

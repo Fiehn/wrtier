@@ -110,8 +110,10 @@ pub struct Options {
 /// Something on the pages the `.docx` can't hold as Typst set it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Uncarried {
-    /// An image: left out.
+    /// An image: left out (a PDF picture, or one in a footnote).
     Image,
+    /// An image placed apart from the text (`place`, text wrapped round it): kept in line.
+    PlacedImage,
     /// A line or shape drawn among the text (a box's border, a highlight): left out.
     Drawing,
     /// An equation: its symbols are kept, in a row, as text.
@@ -166,6 +168,7 @@ pub fn convert(document: &PagedDocument, main: &Source, options: &Options) -> Re
     };
     let measured = measure::measure_in(document, &measuring, |page, scope| setups.of(scope).area(page), main, !options.comments.is_empty());
     let mut laid = styles::lay_out(&measured.units, &options.targets, setup);
+    laid.pictures = measured.pictures;
     if options.plain {
         styles::make_plain(&mut laid);
     }

@@ -439,6 +439,9 @@ pub struct Header {
     pub elements: Vec<ElementForm>,
     /// What's missing (a Look naming a Style the library doesn't have, …): shown as warnings.
     pub missing: Vec<String>,
+    /// The pictures the text's Images (and its Inclusions') can show (ADR 0021). Not part of
+    /// `text`: filled in by the Vault for each compile.
+    pub images: crate::images::Files,
 }
 
 pub use wrtier::text_file::{HEADER_END, HEADER_START};

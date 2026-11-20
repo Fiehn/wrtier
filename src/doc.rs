@@ -472,6 +472,11 @@ impl Doc {
             .take_while(move |(record, _)| record.starts_with(prefix))
     }
 
+    /// Every record whose name starts with `prefix` that was ever set, in effect or not, sorted.
+    pub fn records_ever(&self, prefix: &str) -> Vec<String> {
+        self.records_starting(prefix).map(|(record, _)| record.clone()).collect()
+    }
+
     /// The records whose name starts with `prefix` (such as "reviewer/") that have a field in
     /// effect, sorted.
     pub fn records(&self, prefix: &str) -> Vec<String> {
@@ -479,6 +484,16 @@ impl Doc {
             .filter(|(_, fields)| fields.values().any(|values| Self::in_effect_of(values, &|id| self.is_in_effect(id)).is_some()))
             .map(|(record, _)| record.clone())
             .collect()
+    }
+
+    /// Every value a field was ever set to, in effect or not, in the fixed Change order, with
+    /// the Change that set it and when: what an Image's picture was at each point (ADR 0021).
+    pub fn field_history(&self, record: &str, field: &str) -> Vec<(ChangeId, Hlc, &str)> {
+        let mut values: Vec<(ChangeId, Hlc, &str)> = self.values_of(record, field).unwrap_or(&[]).iter()
+            .map(|v| (v.id, v.hlc, v.value.as_str()))
+            .collect();
+        values.sort_by_key(|&(id, hlc, _)| (hlc, id.device));
+        values
     }
 
     /// The value a field had in an earlier Change, such as the version a Merge notice says lost.

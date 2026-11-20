@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use wrtier::change::{Change, ChangeKind, NoticeKey};
+use wrtier::change::{image_record, Change, ChangeKind, NoticeKey, IMAGE_FIELD};
+use wrtier::images::ImageValue;
 use wrtier::conflicts::{conflict_copies, copies_among, files_beside};
 use wrtier::doc::{BurstKind, CutPasted, Doc, MergeNotice, Stretch};
 use wrtier::ids::{ChangeId, CharId, DeviceId};
@@ -108,6 +109,14 @@ pub enum Op {
     /// `annotations`: matches replaced in the Work's Annotations (ADR 0020), each one's new text,
     /// in the same action.
     Replace { edits: Vec<ReplaceOpEdit>, find: String, with: String, count: usize, #[serde(default)] annotations: Vec<AnnotationEdit> },
+    // Images (ADR 0021). Each closes the open burst first and is one action undo takes back.
+    /// Gives the Image `name` the picture `hash` (already kept in the History file by
+    /// `Vault::keep_picture`): a new Image, or a new picture for one (whatever its capitals).
+    SetImage { name: String, hash: String },
+    /// Renames an Image, and every use of its name the text has, as one action.
+    RenameImage { from: String, to: String },
+    /// Deletes an Image; text still using its name shows a placeholder.
+    DeleteImage { name: String },
 }
 
 /// An Annotation's new text, from an `Op::Replace`.
@@ -247,7 +256,7 @@ impl Op {
     /// patches, and the editor never sends anything after such an op in the same batch.
     fn may_differ(&self, cut_waiting: bool) -> bool {
         match self {
-            Op::Undo | Op::Redo | Op::Sync | Op::Revert { .. } | Op::Restore { .. } | Op::ReturnTo { .. } => true,
+            Op::Undo | Op::Redo | Op::Sync | Op::Revert { .. } | Op::Restore { .. } | Op::ReturnTo { .. } | Op::RenameImage { .. } => true,
             Op::Type { origin, .. } | Op::Delete { origin, .. } => *origin != Origin::Input,
             Op::Paste { .. } => cut_waiting,
             _ => false,
@@ -380,6 +389,9 @@ pub struct OpenWork {
     /// The `.db` and Text file as this Work last wrote or read them.
     db_stamp: Stamp,
     typ_stamp: Stamp,
+    /// The Images folder's files as last seen (`images::folder_stamp`): a copy changed outside
+    /// the app is taken in like an edit to the Text file (ADR 0021).
+    images_stamp: Vec<(String, u64, Option<std::time::SystemTime>)>,
     /// Counts the times something changed outside (see `WorkState::outside`).
     outside: u32,
     /// An edit to the Text file waits for the open burst to close (it's recorded at once).
@@ -404,6 +416,9 @@ pub struct OpenWork {
     /// What the Text file writes out for each Inclusion (ADR 0015), kept up to date by the Vault,
     /// which can find the included Works.
     pub inclusions: storage::Expansions,
+    /// The included Works' Images whose copies go beside the Text file, kept up to date by the
+    /// Vault with `inclusions`.
+    pub included_images: Vec<crate::images::IncludedCopy>,
     /// The text "History of this text" is about, held by identity (see `Op::Stretch`).
     pub stretch: Option<Stretch>,
     /// The answer to an `Op::Stretch` in the batch being applied.
@@ -453,6 +468,8 @@ impl OpenWork {
             style_notice: None,
             shelves: crate::preamble::ShelfCache::default(),
             inclusions: storage::Expansions::new(),
+            included_images: Vec::new(),
+            images_stamp: crate::images::folder_stamp(&db),
             stretch: None,
             stretch_answer: None,
             dismissing: Vec::new(),
@@ -1167,10 +1184,78 @@ impl OpenWork {
                 let changes = target.record(&mut self.doc, *id, now_ms);
                 self.unsaved.extend(changes);
             }
+            Op::SetImage { name, hash } => self.set_image(&name, &hash, now_ms)?,
+            Op::DeleteImage { name } => {
+                let had = wrtier::images::image_of(&self.doc, &name).ok_or_else(|| format!("There's no Image called \"{name}\"."))?;
+                self.authored();
+                self.close_burst(now_ms);
+                let change = self.doc.set_field_local(&image_record(&had.name), IMAGE_FIELD, "", now_ms);
+                self.sitting.push(change.id);
+                self.unsaved.push(change);
+            }
+            Op::RenameImage { from, to } => self.rename_image(&from, to.trim(), now_ms)?,
             op @ (Op::Comment { .. } | Op::WorkComment { .. } | Op::AnnotationComment { .. } | Op::Reply { .. } | Op::EditComment { .. } | Op::SetCommentSender { .. }
                 | Op::Resolve { .. } | Op::DeleteComment { .. }) => self.apply_comment_op(op, now_ms)?,
             op @ (Op::Revert { .. } | Op::Restore { .. } | Op::ReturnTo { .. }) => self.apply_history_op(op, now_ms)?,
         }
+        Ok(())
+    }
+
+    /// `Op::SetImage`: the picture comes from the History file, where the Vault kept it.
+    fn set_image(&mut self, name: &str, hash: &str, now_ms: u64) -> Result<(), String> {
+        let bytes = storage::picture(&self.db, hash).map_err(err)?
+            .ok_or("That picture isn't kept in the Work (add it again).")?;
+        let mut value = ImageValue::of(name.trim(), &bytes).ok_or("That isn't a picture the app can show.")?;
+        // A new picture for an Image keeps its name, capitals and all.
+        if let Some(had) = wrtier::images::image_of(&self.doc, &value.name) {
+            value.name = had.name;
+        }
+        crate::images::check_name(&value.name, value.kind)?;
+        self.authored();
+        self.close_burst(now_ms);
+        let change = self.doc.set_field_local(&image_record(&value.name), IMAGE_FIELD, &value.to_value(), now_ms);
+        self.sitting.push(change.id);
+        self.unsaved.push(change);
+        Ok(())
+    }
+
+    /// `Op::RenameImage`: the Image's new name, and every `image("…")` in the text naming it
+    /// (capitals aside) changed to it, as one action, like a Replace all: undo takes both back.
+    /// A name put together in code isn't found, and shows a placeholder afterwards.
+    fn rename_image(&mut self, from: &str, to: &str, now_ms: u64) -> Result<(), String> {
+        let had = wrtier::images::image_of(&self.doc, from).ok_or_else(|| format!("There's no Image called \"{from}\"."))?;
+        crate::images::check_name(to, had.kind)?;
+        if to == had.name {
+            return Ok(());
+        }
+        if !to.eq_ignore_ascii_case(&had.name) && wrtier::images::image_of(&self.doc, to).is_some() {
+            return Err(format!("There's an Image called \"{to}\" already."));
+        }
+        self.authored();
+        self.close_burst(now_ms);
+        let text = self.doc.text();
+        let mut edits = Vec::new();
+        for range in wrtier::images::named_in(&text) {
+            if text[range.clone()].eq_ignore_ascii_case(&had.name) {
+                let index = text[..range.start].chars().count();
+                edits.push(wrtier::doc::ReplaceEdit { index, len: text[range].chars().count(), text: to.to_string() });
+            }
+        }
+        let value = ImageValue { name: to.to_string(), ..had.clone() };
+        let mut fields = Vec::new();
+        if image_record(&had.name) != image_record(to) {
+            fields.push((image_record(&had.name), IMAGE_FIELD.to_string(), String::new()));
+        }
+        fields.push((image_record(to), IMAGE_FIELD.to_string(), value.to_value()));
+        let count = edits.len();
+        let changes = self.doc.replace_and_set_local(&edits, &fields, &had.name, to, count, now_ms);
+        for change in &changes {
+            if matches!(&change.kind, ChangeKind::SetField { record, .. } if record.starts_with(wrtier::change::IMAGE_PREFIX)) {
+                self.sitting.push(change.id);
+            }
+        }
+        self.recorded(changes);
+        self.positions = Positions::new(&self.doc.text());
         Ok(())
     }
 
@@ -1248,10 +1333,19 @@ impl OpenWork {
                 self.mine.append(&mut self.unsaved);
                 self.save_error = None;
                 self.text_file_behind = true;
+                self.settle_images();
                 self.db_stamp = stamp(&self.db); // our own write: not a change from outside
             }
             Err(e) if e.downcast_ref::<storage::SameIdDifferentContent>().is_some() => self.diverged(),
             Err(e) => self.save_error = Some(format!("Couldn't save to {}: {e}. Your writing is kept and saving is tried again.", file_name(&self.db))),
+        }
+    }
+
+    /// Keeps the History file holding exactly the Images' current pictures, the rest in the Past
+    /// pictures folder (ADR 0021). Quick when there's nothing to do.
+    fn settle_images(&mut self) {
+        if let Err(e) = wrtier::images::settle(&self.db, &self.doc) {
+            self.text_file_problem = Some(format!("Couldn't keep {}'s Past pictures in order: {e}", file_name(&self.db)));
         }
     }
 
@@ -1281,11 +1375,13 @@ impl OpenWork {
         let copies: Vec<PathBuf> = folders.copies_of(&self.db).into_iter().chain(folders.copies_of(&self.typ)).collect();
         let new_copy = copies.iter().any(|copy| !self.copies_tried.contains(copy));
         let typ_ready = self.typ_waiting && self.doc.burst().is_none();
-        if stamp(&self.db) != self.db_stamp || stamp(&self.typ) != self.typ_stamp || new_copy || typ_ready {
+        let images = crate::images::folder_stamp(&self.db);
+        if stamp(&self.db) != self.db_stamp || stamp(&self.typ) != self.typ_stamp || new_copy || typ_ready || images != self.images_stamp {
             self.outside += 1;
             // Noted until the `Sync` reads them, so this counts once.
             self.db_stamp = stamp(&self.db);
             self.typ_stamp = stamp(&self.typ);
+            self.images_stamp = images;
             self.typ_waiting = false;
             self.copies_tried.extend(copies);
         }
@@ -1381,6 +1477,24 @@ impl OpenWork {
                 }
             }
         }
+        // The copies of its Images, changed or added in another program (ADR 0021).
+        let mut pictures = Vec::new();
+        if self.doc.burst().is_none() && self.unsaved.is_empty() {
+            match crate::images::take_in_copies(&self.db, &mut self.doc, now_ms) {
+                Ok(taken) => {
+                    if !taken.changes.is_empty() {
+                        self.text_file_behind = true;
+                    }
+                    self.mine.extend(taken.changes);
+                    pictures = taken.names;
+                }
+                Err(e) => problems.push(format!("A picture beside {} couldn't be taken in: {e}", file_name(&self.typ))),
+            }
+        }
+        if !new.is_empty() || !pictures.is_empty() {
+            self.settle_images();
+        }
+        self.images_stamp = crate::images::folder_stamp(&self.db);
         self.db_stamp = stamp(&self.db);
         self.typ_stamp = stamp(&self.typ);
         self.copies_tried = conflict_copies(&self.db).into_iter().chain(conflict_copies(&self.typ)).collect();
@@ -1392,6 +1506,10 @@ impl OpenWork {
         }
         if edited {
             lines.push(format!("Took in an edit made to {} in another program.", file_name(&self.typ)));
+        }
+        if !pictures.is_empty() {
+            let quoted: Vec<String> = pictures.iter().map(|n| format!("\"{n}\"")).collect();
+            lines.push(format!("Took in {} changed in another program: {}.", if pictures.len() == 1 { "a picture" } else { "pictures" }, quoted.join(", ")));
         }
         if header_dropped {
             lines.push(format!("Edits to the Preamble at the top of {} were dropped: it's made from the Work's History. \
@@ -1437,7 +1555,9 @@ impl OpenWork {
             Ok(()) => {
                 self.text_file_behind = false;
                 self.text_file_written_ms = now_ms;
-                self.text_file_problem = None;
+                self.text_file_problem = crate::images::write_copies(&self.db, &self.doc, &self.included_images).err()
+                    .map(|e| format!("Couldn't write the copies of its Images beside {}: {e}", file_name(&self.typ)));
+                self.images_stamp = crate::images::folder_stamp(&self.db);
                 // Our own writes (the file, and its record in the `.db`): not changes from outside.
                 self.typ_stamp = stamp(&self.typ);
                 self.db_stamp = stamp(&self.db);

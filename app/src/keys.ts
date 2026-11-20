@@ -6,7 +6,7 @@
 
 export type CommandId =
   | "toggleWorks" | "quickSwitcher" | "closeTab" | "toggleView" | "togglePanel" | "preamble" | "mods" | "find" | "replace" | "findInVault"
-  | "undo" | "redo" | "redoAlt" | "strong" | "emph" | "footnote" | "addComment" | "textHistory" | "markCard" | "nextMark" | "previousMark"
+  | "undo" | "redo" | "redoAlt" | "strong" | "emph" | "footnote" | "insertImage" | "addComment" | "textHistory" | "markCard" | "nextMark" | "previousMark"
   | "zoomIn" | "zoomInAlt" | "zoomOut" | "zoomReset"
   // The Chapter list Mod's
   | "nextChapter" | "previousChapter" | "chapterUp" | "chapterDown";
@@ -41,6 +41,7 @@ export const COMMANDS: Command[] = [
   { id: "strong", label: "Strong (bold)", where: "editor", key: "Mod-b" },
   { id: "emph", label: "Emphasis (italic)", where: "editor", key: "Mod-i" },
   { id: "footnote", label: "Insert footnote (around the selection, or at the cursor)", where: "editor", key: "Mod-Alt-f" },
+  { id: "insertImage", label: "Insert Image (a picture file, at the cursor)", where: "editor", key: "Mod-Alt-i" },
   { id: "addComment", label: "Add a Comment", where: "editor", key: "Mod-Shift-m" },
   { id: "textHistory", label: "History of this text (the selection, or the paragraph)", where: "editor", key: "Mod-Shift-h" },
   { id: "markCard", label: "What the Mark at the cursor offers", where: "editor", key: "Mod-." },

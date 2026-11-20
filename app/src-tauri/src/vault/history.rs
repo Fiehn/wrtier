@@ -33,7 +33,9 @@ pub struct NoticeView {
     /// What Dismiss sends back (`work::notice_key`).
     pub key: String,
     /// "overlap" (two Moves took the same text), "loop" (a Move was skipped), "externalEdit" (a
-    /// Text file edited from an unknown version) or "preamble" (its raw Typst edited on two Devices).
+    /// Text file edited from an unknown version), "preamble" (its raw Typst edited on two Devices),
+    /// "annotation" (an Annotation changed on two) or "image" (an Image given two pictures, or
+    /// one and deleted, on two: `quote` is its name).
     pub kind: &'static str,
     /// Who made the Change it's about, and when: the later Move, the skipped Move, the External
     /// edit, or the raw Typst that's used.
@@ -354,10 +356,18 @@ fn notice_view(n: MergeNotice, doc: &Doc, name: &Namer) -> NoticeView {
             Ok(note) => note.body,
             Err(_) => "(deleted)".to_string(),
         });
+    // An Image given different pictures on two Devices (ADR 0021): the notice names it.
+    let image = doc.concurrent_field(n.key)
+        .filter(|(record, _, _)| record.starts_with(wrtier::change::IMAGE_PREFIX))
+        .map(|(record, shown, lost)| {
+            [shown, lost].iter().find_map(|v| wrtier::images::ImageValue::parse(v)).map(|v| v.name)
+                .unwrap_or_else(|| record[wrtier::change::IMAGE_PREFIX.len()..].to_string())
+        });
     let (kind, about, other) = match n.key {
         NoticeKey::Overlap { later, earlier } => ("overlap", later, Some(earlier)),
         NoticeKey::Loop { skipped } => ("loop", skipped, None),
         NoticeKey::UnknownTextFile { session } => ("externalEdit", session, None),
+        NoticeKey::ConcurrentField { later, earlier } if image.is_some() => ("image", later, Some(earlier)),
         NoticeKey::ConcurrentField { later, earlier } if annotation.is_some() => ("annotation", later, Some(earlier)),
         NoticeKey::ConcurrentField { later, earlier } => ("preamble", later, Some(earlier)),
     };
@@ -367,7 +377,7 @@ fn notice_view(n: MergeNotice, doc: &Doc, name: &Namer) -> NoticeView {
         device: name(doc, about.device),
         time_ms: doc.made_at(about).map_or(0, |h| h.0),
         other_device: other.map(|o| name(doc, o.device)),
-        quote: annotation.unwrap_or_else(|| short_quote(&n.text)),
+        quote: image.or(annotation).unwrap_or_else(|| short_quote(&n.text)),
         places: n.places.iter().map(|(first, last)| FindView { first: first.to_string(), last: Some(last.to_string()) }).collect(),
     }
 }

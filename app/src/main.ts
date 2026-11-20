@@ -12,6 +12,8 @@ import type { Reviewer } from "./reviewers";
 import { SidePanel, type PanelTab } from "./sidepanel";
 import { CommentsPanel } from "./commentspanel";
 import { FootnotesPanel, type DetachedRow } from "./footnotespanel";
+import { ImagesPanel, type ImageRow, type ImagesView } from "./imagespanel";
+import { imageLine } from "./images";
 import { findAnnotation, insertFootnote } from "./footnotes";
 import { askAnnotation } from "./annotationdialog";
 import { inclusionsOf } from "./inclusions";
@@ -72,6 +74,7 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     preview.show(tabs.activeIsWork ? tabs.active : null);
     commentsPanel.render();
     footnotesPanel.workChanged();
+    imagesPanel.workChanged();
     historyPanel.workChanged();
     showModViews();
     rememberSoon();
@@ -115,9 +118,14 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
   },
   addComment: (id) => startComment(id),
   footnote: (id) => footnoteIn(id),
+  insertImage: (id) => insertImage(id),
+  dropPictures: (id, files, pos) => dropPictures(id, files, pos),
   annotation: (id, _at, annotation, owner) => openAnnotation(id, annotation, owner),
   selectionMenu: (id, x, y) => showMenu(x, y, selectionMenu(id)),
-  historyGrew: (id) => historyPanel.grew(id),
+  historyGrew: (id) => {
+    historyPanel.grew(id);
+    imagesPanel.changed(id);
+  },
   textHistory: (id) => textHistory(id),
   notices: (count) => {
     $("panel-tab-history").textContent = count > 0 ? `History (${count})` : "History";
@@ -386,18 +394,160 @@ function annotationsChanged(id: string) {
   footnotesPanel.edited(id);
 }
 
+// ---- Images (ADR 0021) ----
+
+/** A picture kept in the Work, ready to be given to an Image (vault/images.rs `KeptPicture`). */
+type KeptPicture = { hash: string; name: string; kind: string; size: number; clash: string | null; otherName: string; same: boolean };
+
+// The Images tab: offered only while the Work in front (or a Work it includes) has an Image.
+const imagesPanel = new ImagesPanel($("images-list"), {
+  work: () => (tabs.activeIsWork ? tabs.active : null),
+  go: (work, at) => {
+    const view = tabs.viewOf(work);
+    if (!view) return;
+    phone.toWrite();
+    view.dispatch({ selection: { anchor: Math.min(at, view.state.doc.length) }, scrollIntoView: true });
+    view.focus();
+  },
+  insert: (work) => insertImage(work),
+  replace: (work, image) => replaceImage(work, image),
+  rename: (work, image) => renameImage(work, image),
+  remove: (work, image) => deleteImage(work, image),
+  openPast: (work) => act(() => invoke("open_past_pictures", { id: work })),
+  openWork: (work) => act(() => openWork(work)),
+  pictures: (work, pictures) => tabs.setPictures(work, pictures),
+  available: (has, now) => {
+    panel.setAvailable("images", has, now);
+    const button = $("phone-images");
+    if (has || now || phone.screen !== "images") button.hidden = !has;
+    if (!has && now && phone.screen === "images") phone.show("write");
+  },
+  error: showError,
+});
+
+/** After an Image changed: the pages, the Images tab and the editor's pictures follow. */
+async function imagesChanged(id: string) {
+  await tabs.settled(id);
+  imagesPanel.changed(id);
+  preview.edited(id);
+}
+
+/**
+ * Gives a kept picture to an Image of the Work `id` (asking first if one has its name: replace
+ * it, or keep both), and writes it in on a line of its own at `pos` (else the cursor). Returns
+ * where the text it wrote ends; undefined if the Author cancelled.
+ */
+async function placeImage(id: string, kept: KeptPicture, pos: number | null): Promise<number | undefined> {
+  if (!tabs.viewOf(id)) return undefined;
+  let name = kept.name;
+  let set = true;
+  if (kept.clash && kept.same) {
+    name = kept.clash; // that very picture: nothing to replace
+    set = false;
+  } else if (kept.clash) {
+    $("image-clash-text").textContent = `This Work has an Image called “${kept.clash}” already. Replace its picture (every place that uses it shows the new one), or keep both, calling the new one “${kept.otherName}”?`;
+    const choice = await ask($<HTMLDialogElement>("image-clash"));
+    if (choice === "replace") name = kept.clash;
+    else if (choice === "both") name = kept.otherName;
+    else return undefined;
+  }
+  const view = tabs.viewOf(id);
+  if (!view) return undefined;
+  if (set) tabs.image(id, { op: "setImage", name, hash: kept.hash });
+  const at = Math.min(pos ?? view.state.selection.main.head, view.state.doc.length);
+  const line = imageLine(view.state.doc, at, name);
+  view.dispatch({ changes: { from: line.from, insert: line.insert }, selection: { anchor: line.cursor }, scrollIntoView: true, userEvent: "input.paste" });
+  view.focus();
+  await imagesChanged(id);
+  return line.cursor;
+}
+
+/** Its key (Ctrl+Alt+I at first), the toolbar's Image, or "Insert Image…": a picture file, picked, at the cursor. */
+function insertImage(id: string) {
+  act(async () => {
+    if (tabs.includedSelectionOf(id)) throw new Error("An Image can't go in an Inclusion's text: that's changed in its own Work.");
+    const kept = await invoke<KeptPicture | null>("pick_image", { id });
+    if (kept) await placeImage(id, kept, null);
+  });
+}
+
+/** Picture files dragged from the system onto the text: each an Image, written in one after another there. */
+function dropPictures(id: string, files: File[], pos: number) {
+  act(async () => {
+    let at = pos;
+    for (const file of files) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const kept = await invoke<KeptPicture>("keep_image_bytes", bytes, { headers: { work: encodeURIComponent(id), name: encodeURIComponent(file.name) } });
+      const after = await placeImage(id, kept, at);
+      if (after !== undefined) at = after;
+    }
+  });
+}
+
+/** Replace…: a new picture for an Image. One of another kind renames it (its uses too), as its name says its kind. */
+function replaceImage(id: string, image: ImageRow) {
+  act(async () => {
+    const kept = await invoke<KeptPicture | null>("pick_replacement", { id });
+    if (!kept) return;
+    await tabs.settled(id);
+    if (kept.kind === image.kind) {
+      tabs.image(id, { op: "setImage", name: image.name, hash: kept.hash });
+    } else {
+      const name = `${image.name.replace(/\.[^.]+$/, "")}${kept.name.slice(kept.name.lastIndexOf("."))}`;
+      const view = await invoke<ImagesView>("get_images", { id });
+      if (view.own.some((r) => r.name.toLowerCase() === name.toLowerCase())) {
+        throw new Error(`The new picture is a ${kept.kind}, so “${image.name}” would become “${name}”, but there's an Image called that already. Rename one of them first.`);
+      }
+      const yes = await confirmAsk(`The new picture is a ${kept.kind}, so “${image.name}” becomes “${name}”, and every place in the text that uses it is renamed too.`, "Replace and rename");
+      if (!yes) return;
+      tabs.image(id, { op: "renameImage", from: image.name, to: name });
+      tabs.image(id, { op: "setImage", name, hash: kept.hash });
+    }
+    await imagesChanged(id);
+  });
+}
+
+/** Rename…: the Image and every place in the text that uses it, as one action. */
+function renameImage(id: string, image: ImageRow) {
+  act(async () => {
+    const uses = image.uses.length;
+    const also = uses === 0 ? "No place in the text uses it." : uses === 1 ? "The place in the text that uses it is renamed too." : `The ${uses} places in the text that use it are renamed too.`;
+    const extension = image.name.slice(image.name.lastIndexOf("."));
+    const to = await askText(`Rename “${image.name}”? ${also} Undo takes it all back.`, image.name, "Rename", `It's a ${image.kind}, so its name ends in ${extension}.`);
+    if (!to || to.trim() === image.name) return;
+    await tabs.settled(id);
+    tabs.image(id, { op: "renameImage", from: image.name, to: to.trim() });
+    await imagesChanged(id);
+  });
+}
+
+/** Delete: the Image goes (undo brings it back); text still using its name shows a grey box. */
+function deleteImage(id: string, image: ImageRow) {
+  act(async () => {
+    const uses = image.uses.length;
+    const where = uses === 0 ? "" : uses === 1 ? " The place in the text that uses it will show a grey box." : ` The ${uses} places in the text that use it will show a grey box.`;
+    if (!(await confirmAsk(`Delete the Image “${image.name}”?${where} Its picture is kept as a Past picture, and undo brings it back.`, "Delete"))) return;
+    await tabs.settled(id);
+    tabs.image(id, { op: "deleteImage", name: image.name });
+    await imagesChanged(id);
+  });
+}
+
 // Shown or not, and which tab, are remembered on this Device. The pages only compile while
 // their tab is showing, and the History only loads while its tab is.
 const panel = new SidePanel(
   $("side-panel"),
-  [$("panel-tab-pages"), $("panel-tab-comments"), $("panel-tab-footnotes"), $("panel-tab-history")],
-  { pages: $("preview"), comments: $("comments-pane"), footnotes: $("footnotes-pane"), history: $("history-pane") },
+  [$("panel-tab-pages"), $("panel-tab-comments"), $("panel-tab-footnotes"), $("panel-tab-images"), $("panel-tab-history")],
+  { pages: $("preview"), comments: $("comments-pane"), footnotes: $("footnotes-pane"), images: $("images-pane"), history: $("history-pane") },
   $("panel-toggle"),
   (pagesInView, inView) => {
     preview.setOpen(pagesInView);
     historyPanel.setVisible(inView === "history");
     // (Not while the panel is being made: the Footnotes tab asks it what's offered.)
-    queueMicrotask(() => footnotesPanel.setVisible(inView === "footnotes"));
+    queueMicrotask(() => {
+      footnotesPanel.setVisible(inView === "footnotes");
+      imagesPanel.setVisible(inView === "images");
+    });
   },
 );
 
@@ -526,6 +676,7 @@ function selectionMenu(id: string): MenuItem[] {
   return [
     { label: withKey("Add Comment", "addComment"), run: () => startComment(id) },
     { label: withKey("Insert footnote", "footnote"), run: () => footnoteIn(id) },
+    { label: withKey("Insert Image…", "insertImage"), run: () => insertImage(id) },
     { label: withKey("History of this text", "textHistory"), run: () => textHistory(id) },
     { label: withKey("Find and replace…", "find"), run: () => findBar.open(false) },
     "separator",
@@ -1144,7 +1295,7 @@ $("toolbar-view").addEventListener("click", () => setFormatted(!tabs.formatted))
 /** Shown with a tab in front; Comments, the History and the views are a Work's only. */
 function showToolbar() {
   toolbar.hidden = tabs.active === null;
-  for (const id of ["addComment", "footnote", "textHistory"]) {
+  for (const id of ["addComment", "footnote", "insertImage", "textHistory"]) {
     toolbar.querySelector<HTMLButtonElement>(`[data-command="${id}"]`)!.disabled = !tabs.activeIsWork;
   }
   $<HTMLButtonElement>("toolbar-view").disabled = !tabs.activeIsWork;

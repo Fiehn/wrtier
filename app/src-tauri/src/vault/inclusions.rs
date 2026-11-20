@@ -10,7 +10,7 @@
 //! records on the same rule as Styles: just before a Device's first edit in a sitting, and before
 //! any Export.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use serde::Serialize;
@@ -194,6 +194,20 @@ pub struct Shown {
     /// The Annotations printed in the included text (ADR 0020), by the Works around it, places
     /// in `plain` (UTF-16), in the order they print.
     pub notes: Vec<NoteShown>,
+    /// The Images the included text can show (ADR 0021): the included Work's, as of the version
+    /// shown, and its own Inclusions'. Its text names them under `images::INCLUDED`.
+    pub images: Vec<IncludedImage>,
+}
+
+/// An Image of an included Work, as `typst` names it.
+#[derive(Clone, Debug)]
+pub struct IncludedImage {
+    /// The path the included text names it by, without the leading `/` and in lowercase:
+    /// `.included/<key>/map.png`.
+    pub path: String,
+    pub value: wrtier::images::ImageValue,
+    /// The included Work's History, which holds the picture (or its Past pictures folder does).
+    pub db: PathBuf,
 }
 
 /// What working out Inclusions reads from.
@@ -286,7 +300,7 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
     let mut s = Shown {
         at, index, target: Target::of(including, at), name: None, label: "An Inclusion".into(), chapter: None,
         missing: None, plain: String::new(), typst: String::new(), version: None, language: String::new(), elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), in_typst: Vec::new(), author: String::new(), split: None,
-        all_runs: Vec::new(), notes: Vec::new(),
+        all_runs: Vec::new(), notes: Vec::new(), images: Vec::new(),
     };
     let result = (|| {
         let target = s.target.clone().ok_or("This Inclusion has lost what it includes.")?;
@@ -359,6 +373,26 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
         let mut placed: Vec<(&Ann, Vec<usize>, usize)> = Vec::new();
         let nested: Vec<&Shown> = all_nested.iter().filter(|n| n.index >= from && n.index < to).collect();
         let (mut plain, mut typst) = (String::new(), String::new());
+        // Where the included text names an Image of its own (a name with no `/`): it's named in
+        // that Work's folder instead (`images::INCLUDED`), so it never meets the including Work's.
+        let key = wrtier::images::included_key(&target.work);
+        let folder = format!("{}{key}/", wrtier::images::INCLUDED);
+        let image_names: HashSet<usize> = {
+            let text: String = chars[from..to].iter().collect();
+            let starts: HashSet<usize> = wrtier::images::named_in(&text).into_iter()
+                .filter(|r| !text[r.clone()].contains('/') && !r.is_empty())
+                .map(|r| r.start)
+                .collect();
+            let mut byte = 0;
+            let mut found = HashSet::new();
+            for (k, c) in text.chars().enumerate() {
+                if starts.contains(&byte) {
+                    found.insert(from + k);
+                }
+                byte += c.len_utf8();
+            }
+            found
+        };
         let mut plain_len = 0; // in characters
         let mut runs: Vec<(usize, usize, usize)> = Vec::new();
         let mut in_typst: Vec<(usize, usize, usize)> = Vec::new(); // UTF-16
@@ -384,6 +418,10 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
                     next.next();
                 }
                 _ => {
+                    if image_names.contains(&i) {
+                        typst_u16 += folder.encode_utf16().count();
+                        typst.push_str(&folder);
+                    }
                     match runs.last_mut() {
                         Some((p, b, len)) if *p + *len == plain_len && *b + *len == i => *len += 1,
                         _ => runs.push((plain_len, i, 1)),
@@ -456,6 +494,10 @@ fn shown(ctx: &mut Ctx, including: &Doc, at: CharId, index: usize, stack: &mut V
         }
         s.elements = elements;
         s.language = preamble.language;
+        s.images = wrtier::images::images_of(&doc).into_iter()
+            .map(|value| IncludedImage { path: format!("{}{key}/{}", &wrtier::images::INCLUDED[1..], value.name.to_lowercase()), value, db: located.db.clone() })
+            .chain(nested.iter().flat_map(|n| n.images.clone()))
+            .collect();
         Ok(())
     })();
     if let Err(why) = result {
@@ -887,6 +929,7 @@ impl Vault {
         let Ok(shown) = self.shown_in(id, true) else { return };
         if let Some(work) = self.works.get_mut(&key) {
             work.inclusions = expansions(&shown);
+            work.included_images = super::images::included_copies(&shown);
         }
     }
 
@@ -1944,7 +1987,7 @@ mod tests {
             at, index: 2, target: None, name: None, label: "Rain".into(), chapter: None, missing: None,
             plain: "Rain.".into(), typst: "#[\nRain.\n]".into(), version: None, language: String::new(),
             elements: Vec::new(), title: None, starts: 0, runs: Vec::new(), comments: Vec::new(), in_typst: Vec::new(), author: String::new(), split: None,
-            all_runs: Vec::new(), notes: Vec::new(),
+            all_runs: Vec::new(), notes: Vec::new(), images: Vec::new(),
         };
         let (body, blocks) = typst_body(&format!("A\n{INCLUSION}\nB"), &[s]);
         assert!(body.starts_with("A\n// ---- Included by wrtier") && body.ends_with("\nB"), "{body}");

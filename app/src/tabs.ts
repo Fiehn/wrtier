@@ -15,7 +15,8 @@ import { toggleMarkup } from "./shortcuts";
 import { dragToMove } from "./dragging";
 import { completions } from "./completion";
 import { commentClasses, commentHighlights, pendingRange, rangesOf, setHighlights, setPending, type CommentOptions } from "./comments";
-import type { CommentOp, HistoryOp, CommentHighlight } from "./sync";
+import type { CommentOp, HistoryOp, ImageOp, CommentHighlight } from "./sync";
+import { imageWidgets, pictureDrops, pictures, type Pictures } from "./images";
 import { bindings, COMMANDS, withKey, type CommandId } from "./keys";
 import { chaptersIn, type IncludedEntry, type MoveOp } from "./chapters";
 import { sessionTints, setTints } from "./sessiontints";
@@ -61,6 +62,10 @@ export type TabEvents = {
   addComment(id: string): void;
   /** Its key (Ctrl+Alt+F at first), or "Insert footnote" in the menu. */
   footnote(id: string): void;
+  /** Its key (Ctrl+Alt+I at first), or "Insert Image…": a picture file to add at the cursor. */
+  insertImage(id: string): void;
+  /** Picture files dragged from the system were dropped at `pos` in the text of the Work `id`. */
+  dropPictures(id: string, files: File[], pos: number): void;
   /** An Annotation's number clicked in an Inclusion (at `at`): its own Work's (`owner`) Annotation `annotation`. */
   annotation(id: string, at: number, annotation: string, owner: string): void;
   /** Right-click inside a selection: the app's own menu, at (x, y). */
@@ -91,7 +96,7 @@ const historyCompartment = new Compartment();
 /** The Formatted view, or the Raw view's Typst colouring. */
 const viewCompartment = new Compartment();
 /** What goes in it: in the Raw view, Inclusions are their one `#inclusion(…)` line too. (The Reading panel's too.) */
-export const viewExtension = (formatted: boolean) => (formatted ? formattedView() : [typstColouring(false), rawInclusions.of(true)]);
+export const viewExtension = (formatted: boolean) => (formatted ? [formattedView(), imageWidgets()] : [typstColouring(false), rawInclusions.of(true)]);
 /** Line numbers and the shaded cursor line (settings). */
 const linesCompartment = new Compartment();
 /** The Story elements the Work has (from its Preamble and the Style library). */
@@ -102,6 +107,8 @@ const commentsCompartment = new Compartment();
 const keysCompartment = new Compartment();
 /** What the Work's Mods add to its editor (those in use on this Device). */
 const modsCompartment = new Compartment();
+/** The Work's Images' pictures, for the Formatted view (images.ts). */
+const picturesCompartment = new Compartment();
 
 export type EditorOptions = { lineNumbers: boolean; highlightLine: boolean };
 
@@ -283,6 +290,9 @@ class Tab {
           dropCursor(),
           // A Work dragged in from the Vault browser is included where it's dropped.
           workDrops((work, pos) => tabs.events.dropWork(this.id, work, pos)),
+          // A picture file dragged in from the system is added as an Image there (ADR 0021).
+          pictureDrops((files, pos) => tabs.events.dropPictures(this.id, files, pos)),
+          picturesCompartment.of(pictures({ known: false, byName: new Map() })),
           dragToMove(),
           completions({ work: () => this.sync.id, settled: () => this.sync.idle() }),
           elementsCompartment.of(storyElements([])),
@@ -437,6 +447,10 @@ class Tab {
         tabs.events.footnote(this.id);
         return true;
       },
+      insertImage: () => {
+        tabs.events.insertImage(this.id);
+        return true;
+      },
       textHistory: () => {
         tabs.events.textHistory(this.id);
         return true;
@@ -545,6 +559,18 @@ export class Tabs {
   history(id: string, op: HistoryOp) {
     const tab = this.find(id);
     if (tab?.isWork) tab.sync.history(op);
+  }
+
+  /** Changes one of a Work's Images, in order with its typing (ADR 0021). */
+  image(id: string, op: ImageOp) {
+    const tab = this.find(id);
+    if (tab?.isWork) tab.sync.history(op);
+  }
+
+  /** The pictures a Work's Formatted view shows for its Images. */
+  setPictures(id: string, value: Pictures) {
+    const tab = this.find(id);
+    if (tab?.isWork) tab.view.dispatch({ effects: picturesCompartment.reconfigure(pictures(value)) });
   }
 
   /** Does something to a Work's Comments, in order with its typing. */

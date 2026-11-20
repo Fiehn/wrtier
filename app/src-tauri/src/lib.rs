@@ -5,6 +5,7 @@ pub mod colouring;
 pub mod device;
 pub mod docx;
 pub mod folders;
+pub mod images;
 pub mod library;
 pub mod patch;
 pub mod preamble;
@@ -1293,6 +1294,107 @@ async fn install_update(handle: AppHandle, version: String) -> Result<Installed,
     .map_err(|e| e.to_string())?
 }
 
+// ---- Images (ADR 0021) ----
+
+/// The extensions of the pictures an Image can hold, for the file picker.
+const PICTURES: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "pdf"];
+
+/// A picked picture's name and bytes. On the desktop it's a path; Android's picker gives a
+/// content address, which the fs plugin reads.
+fn read_picture(handle: &AppHandle, file: tauri_plugin_dialog::FilePath) -> Result<(String, Vec<u8>), String> {
+    use tauri_plugin_fs::FsExt;
+    let name = match &file {
+        tauri_plugin_dialog::FilePath::Path(path) => path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        tauri_plugin_dialog::FilePath::Url(url) => content_name(url.as_str()),
+    };
+    let bytes = handle.fs().read(file).map_err(|e| format!("Couldn't read that picture: {e}"))?;
+    Ok((name, bytes))
+}
+
+/// `%XX` escapes decoded (as `encodeURIComponent` and content addresses write them).
+fn percent_decoded(text: &str) -> String {
+    let raw = text.as_bytes();
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (raw[i], raw.get(i + 1).copied().and_then(hex), raw.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(a), Some(b)) => {
+                bytes.push((a * 16 + b) as u8);
+                i += 3;
+            }
+            (b, _, _) => {
+                bytes.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The file name at the end of a content address ("…/document/primary%3APictures%2Fmap.png").
+fn content_name(url: &str) -> String {
+    let decoded = percent_decoded(url.rsplit('/').next().unwrap_or(url));
+    decoded.rsplit(['/', ':']).next().unwrap_or(&decoded).to_string()
+}
+
+/// Insert Image…: picks a picture and keeps it in the Work `id`, ready for `Op::SetImage`.
+/// None if the Author cancelled.
+#[tauri::command]
+async fn pick_image(handle: AppHandle, id: String) -> Result<Option<vault::KeptPicture>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let picked = handle.dialog().file().set_title("Insert Image").add_filter("Pictures", PICTURES).blocking_pick_file();
+        let Some(file) = picked else { return Ok(None) };
+        let (name, bytes) = read_picture(&handle, file)?;
+        with_app(&handle.state::<AppState>(), |app| open_vault_of(app)?.keep_picture(&id, &name, &bytes)).map(Some)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Replace…: picks a new picture for an Image (the interface checks its kind matches, or renames).
+/// None if the Author cancelled.
+#[tauri::command]
+async fn pick_replacement(handle: AppHandle, id: String) -> Result<Option<vault::KeptPicture>, String> {
+    pick_image(handle, id).await
+}
+
+/// A picture file dragged onto the text from the system (desktop), kept like a picked one. Its
+/// bytes come as the request's body (not JSON), with the Work and the file's name in headers
+/// (URI-encoded).
+#[tauri::command]
+async fn keep_image_bytes(handle: AppHandle, request: tauri::ipc::Request<'_>) -> Result<vault::KeptPicture, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("No picture came.".into()) };
+    let header = |key: &str| -> Result<String, String> {
+        let value = request.headers().get(key).and_then(|v| v.to_str().ok()).ok_or_else(|| format!("No {key} came."))?;
+        Ok(percent_decoded(value))
+    };
+    let (id, name, bytes) = (header("work")?, header("name")?, bytes.clone());
+    off_main(handle, move |app| open_vault_of(app)?.keep_picture(&id, &name, &bytes)).await
+}
+
+/// The Images of the Work `id` and of the Works it includes, for the Images tab.
+#[tauri::command]
+async fn get_images(handle: AppHandle, id: String) -> Result<vault::ImagesView, String> {
+    off_main(handle, move |app| open_vault_of(app)?.images(&id)).await
+}
+
+/// An Image's picture, as bytes (for its thumbnail): of the Work `id`, or of `work`, which it includes.
+#[tauri::command]
+async fn image_picture(handle: AppHandle, id: String, name: String, work: Option<String>) -> Result<tauri::ipc::Response, String> {
+    let (bytes, _) = off_main(handle, move |app| open_vault_of(app)?.image_picture(&id, &name, work.as_deref())).await?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Opens the Work's Past pictures folder in the system's file manager (made if it isn't there).
+#[tauri::command]
+fn open_past_pictures(handle: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let folder = with_app(&state, |app| open_vault_of(app)?.past_pictures_folder(&id))?;
+    std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    handle.opener().open_path(folder.display().to_string(), None::<&str>).map_err(|e| e.to_string())
+}
+
 /// "What's new": the release's page on GitHub, in the browser.
 #[tauri::command]
 fn open_release_page(handle: AppHandle, version: String) -> Result<(), String> {
@@ -1306,6 +1408,7 @@ fn open_release_page(handle: AppHandle, version: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // Device state lives outside the Vault, in this Device's local app data.
@@ -1336,6 +1439,12 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             startup,
+            pick_image,
+            pick_replacement,
+            keep_image_bytes,
+            get_images,
+            image_picture,
+            open_past_pictures,
             pick_folder,
             list_folders,
             app_hidden,

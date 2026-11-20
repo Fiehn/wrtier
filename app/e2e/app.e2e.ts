@@ -774,6 +774,34 @@ test("a Footnote is written at the cursor, folds to its number, and lists in the
   await expect(app.locator(".cm-tp-footnote")).toHaveText("In the rain.");
 });
 
+test("an Image is inserted on a line of its own, shown as its picture, and listed in the Images tab", async ({ app }) => {
+  await endOf(app, "She walked home.");
+  // No Images yet: no tab for them.
+  await expect(app.locator("#panel-tab-images")).toBeHidden();
+  await app.keyboard.press("Control+Alt+i");
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.texts.Rain)).toContain('She walked home.\n#image("map.png")\n');
+  // While the cursor's on it, the markup; once it leaves, the picture with its name.
+  await app.keyboard.press("Control+Home");
+  await expect(app.locator(".cm-image-block img")).toHaveCount(1);
+  await expect(app.locator(".cm-image-name")).toHaveText("map.png");
+  // The Images tab is offered now, and lists it, used once.
+  await app.locator("#panel-toggle").click();
+  await app.locator("#panel-tab-images").click();
+  await expect(app.locator(".image-row .image-title")).toHaveText("map.png");
+  await expect(app.locator(".image-row .image-facts")).toContainText("used once");
+  // Clicking low down on the picture puts the cursor on its line (not on the line the click
+  // would hit if the picture weren't there): its markup shows.
+  const box = (await app.locator(".cm-image-block img").boundingBox())!;
+  await app.mouse.click(box.x + box.width / 2, box.y + box.height - 5);
+  await expect(app.locator(".cm-image-block")).toHaveCount(0);
+  await expect(app.locator(".cm-line").filter({ hasText: '#image("map.png")' })).toHaveCount(1);
+  await app.keyboard.press("Control+Home");
+  await expect(app.locator(".cm-image-block img")).toHaveCount(1);
+  // "Go to" puts the cursor in its name: the markup shows again.
+  await app.locator(".image-row").getByRole("button", { name: "Go to" }).click();
+  await expect(app.locator(".cm-image-block")).toHaveCount(0);
+});
+
 test("included text is annotated: the note is kept here and numbered in the text", async ({ app }) => {
   await endOf(app, "She walked home.");
   await app.locator("#works li.work-entry", { hasText: "Zampanò" }).click({ button: "right" });

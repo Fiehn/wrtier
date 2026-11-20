@@ -192,6 +192,8 @@ pub(crate) struct Laid {
     pub notes: Vec<Note>,
     /// Plain styles, and only italic and bold on runs (see `make_plain`).
     pub plain: bool,
+    /// The pictures the runs show (`Run::picture`).
+    pub pictures: Vec<crate::measure::Picture>,
 }
 
 impl Laid {
@@ -401,7 +403,7 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
     }
 
     // The styles, Normal first, each after the style it's based on.
-    let mut laid = Laid { styles: Vec::new(), paras: Vec::new(), notes: Vec::new(), plain: false };
+    let mut laid = Laid { styles: Vec::new(), paras: Vec::new(), notes: Vec::new(), plain: false, pictures: Vec::new() };
     // A style's name in Word, its kind, and its name after its target where that differs.
     let name_of = |key: &Key| -> (String, Kind, Option<String>) {
         let (name, kind, alias) = match key.target {
@@ -564,7 +566,7 @@ pub(crate) fn lay_out(units: &[Unit], targets: &[Target], setup: &Setup) -> Laid
             // The rest of the paragraph from the page before: join the line it was cut at.
             let joins = kept[i - 1].unit.ends_hyphenated || para.runs.last().is_some_and(|r| crate::measure::wraps_after(&r.text));
             if !joins {
-                para.runs.push(Run { text: "\n".into(), ..u.runs.first().cloned().unwrap_or_else(|| para.runs[0].clone()) });
+                para.runs.push(Run { text: "\n".into(), picture: None, ..u.runs.first().cloned().unwrap_or_else(|| para.runs[0].clone()) });
             }
             para.runs.extend(u.runs.iter().cloned());
             continue;

@@ -5793,7 +5793,9 @@ dependencies = [
 name = "typst-docx"
 version = "0.1.0"
 dependencies = [
+ "image",
  "kurbo",
+ "resvg",
  "roxmltree 0.21.2",
  "skrifa",
  "typst",
@@ -7166,6 +7168,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tauri-plugin-fs",
  "tauri-plugin-opener",
  "tempfile",
  "typst",

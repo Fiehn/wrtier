@@ -13,7 +13,7 @@
 use super::history::{is_word, is_word_char, Did, Effect};
 use super::Doc;
 use crate::fugue::FixedOrder;
-use crate::change::{is_library_copy, PREAMBLE_RECORD};
+use crate::change::{is_library_copy, IMAGE_PREFIX, PREAMBLE_RECORD};
 use crate::ids::{ChangeId, CharId};
 use crate::layout::Layout;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -315,7 +315,8 @@ impl Doc {
         let fields = effect.fields.iter().filter_map(|&(change, set, by)| {
             let Did::Field { record, field } = self.made.get(&change)?.did() else { return None };
             let library = is_library_copy(record);
-            if record != PREAMBLE_RECORD && !library {
+            // The Preamble's settings, its Images (ADR 0021) and the library copies it recorded.
+            if record != PREAMBLE_RECORD && !record.starts_with(IMAGE_PREFIX) && !library {
                 return None;
             }
             let replaces = self.values_of(record, field)?.iter().find(|v| v.id == change)?.replaces;
@@ -806,5 +807,15 @@ mod tests {
         assert!(undone[0].taken_back);
         assert_eq!(undone[0].change, retitled.id);
         assert_eq!(undone[0].by, revert.id);
+    }
+
+    #[test]
+    fn an_image_change_is_a_line_too() {
+        let mut doc = Doc::new(DeviceId(1));
+        let added = doc.set_field_local(&crate::change::image_record("map.png"), crate::change::IMAGE_FIELD, "png 77 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa map.png", 1_000);
+        let lines = doc.snippets(&[added.id]).fields;
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].library);
+        assert_eq!((lines[0].record.as_str(), lines[0].before.as_deref()), ("image/map.png", None));
     }
 }

@@ -54,7 +54,7 @@ CREATE TABLE deletions (
 
 /// The newest storage version this app writes. A file with a higher one was written by a newer
 /// app, which may store things this one doesn't understand, so it isn't touched.
-pub const STORAGE_VERSION: i64 = 10;
+pub const STORAGE_VERSION: i64 = 11;
 
 /// What a `.db` file is, for listing a Vault.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -363,6 +363,24 @@ fn migrate_to(conn: &Connection, target: i64) -> Result<()> {
         PRAGMA user_version = 10;
         COMMIT;
         ")?;
+    }
+    if version < 11 && 11 <= target {
+        // The bytes of the Work's Images' current pictures (ADR 0021), once per picture. Not
+        // Changes: a Change says which picture an Image got; replaced ones leave for the
+        // Past pictures folder beside the Work.
+        conn.execute_batch("
+        BEGIN;
+        CREATE TABLE pictures (
+            hash  TEXT PRIMARY KEY,  -- SHA-256 of the bytes, as hex
+            bytes BLOB NOT NULL
+        );
+        PRAGMA user_version = 11;
+        COMMIT;
+        ")?;
+        // A picture moved out to the Past pictures folder must give its space back, or the file
+        // never shrinks: that takes incremental vacuuming, which an existing file only gets with
+        // one full VACUUM (outside any transaction).
+        conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")?;
     }
     Ok(())
 }
@@ -975,8 +993,64 @@ fn merge_attached(conn: &Connection) -> Result<()> {
     }
     let columns = "hash, version, device, written, time";
     tx.execute(&format!("INSERT OR IGNORE INTO main.text_files ({columns}) SELECT {columns} FROM other.text_files"), [])?;
+    // Pictures too, so the copy's Images have theirs; any no longer needed then leave for the
+    // Past pictures folder (`images::settle`).
+    tx.execute("INSERT OR IGNORE INTO main.pictures (hash, bytes) SELECT hash, bytes FROM other.pictures", [])?;
     tx.commit()?;
     Ok(())
+}
+
+// ---- Pictures (ADR 0021) ----
+
+/// Keeps a picture's bytes in the History file, under `hash` (`images::hash_of` them). Keeping
+/// one already there does nothing.
+pub fn put_picture(db: &Path, hash: &str, bytes: &[u8]) -> Result<()> {
+    let conn = Connection::open(db)?;
+    migrate(&conn)?;
+    conn.execute("INSERT OR IGNORE INTO pictures (hash, bytes) VALUES (?1, ?2)", params![hash, bytes])?;
+    Ok(())
+}
+
+/// A picture's bytes, if the History file holds them. Read-only.
+pub fn picture(db: &Path, hash: &str) -> Result<Option<Vec<u8>>> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    if !has_pictures(&conn)? {
+        return Ok(None);
+    }
+    Ok(conn.query_row("SELECT bytes FROM pictures WHERE hash = ?1", [hash], |r| r.get(0)).optional()?)
+}
+
+/// The pictures the History file holds, by hash. Read-only.
+pub fn picture_hashes(db: &Path) -> Result<Vec<String>> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    if !has_pictures(&conn)? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare("SELECT hash FROM pictures ORDER BY hash")?;
+    let hashes = stmt.query_map([], |r| r.get(0))?.collect::<std::result::Result<Vec<String>, _>>()?;
+    Ok(hashes)
+}
+
+/// Drops pictures from the History file and gives their space back. Only for pictures kept
+/// elsewhere now (written to the Past pictures folder first).
+pub fn drop_pictures(db: &Path, hashes: &[String]) -> Result<()> {
+    if hashes.is_empty() {
+        return Ok(());
+    }
+    let mut conn = Connection::open(db)?;
+    migrate(&conn)?;
+    let tx = conn.transaction()?;
+    for hash in hashes {
+        tx.execute("DELETE FROM pictures WHERE hash = ?1", [hash])?;
+    }
+    tx.commit()?;
+    conn.execute_batch("PRAGMA incremental_vacuum;")?;
+    Ok(())
+}
+
+/// Does this (read-only) connection's file have the pictures table yet?
+fn has_pictures(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pictures')", [], |r| r.get(0))?)
 }
 
 // ---- The Text file ----
@@ -1042,7 +1116,9 @@ pub fn expanded_text(doc: &Doc, inclusions: &Expansions) -> String {
 /// `write_text_file`, with the Work's Inclusions written out as `inclusions` says.
 pub fn write_text_file_with(db: &Path, text_file: &Path, doc: &Doc, header: &str, inclusions: &Expansions, now_ms: u64) -> Result<()> {
     // The header, the text, then the line naming the version it was written from (ADR 0010).
-    let text = crate::text_file::with_header_and_marker(header, &expanded_text(doc, inclusions), &doc.version());
+    // The text's Images are named in the folder beside the file, which holds copies of them.
+    let body = crate::images::into_folder(&expanded_text(doc, inclusions), &images_folder(text_file));
+    let text = crate::text_file::with_header_and_marker(header, &body, &doc.version());
     let conn = Connection::open(db)?;
     migrate(&conn)?;
     conn.execute(
@@ -1058,6 +1134,13 @@ pub fn write_text_file_with(db: &Path, text_file: &Path, doc: &Doc, header: &str
     std::fs::write(&partial, &text)?;
     std::fs::rename(&partial, text_file)?;
     Ok(())
+}
+
+/// The folder beside a Text file holding copies of its Work's Images, as the file names it:
+/// `<Work>.images` (see `images::images_dir`).
+fn images_folder(text_file: &Path) -> String {
+    let stem = text_file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    format!("{stem}.images")
 }
 
 /// What reading a Text file found.
@@ -1095,6 +1178,7 @@ pub fn read_text_file(db: &Path, text_file: &Path, doc: &mut Doc, now_ms: u64) -
     // and neither is an Inclusion's block, which goes back to being the Inclusion's character.
     let (_, text) = crate::text_file::split_header(&text);
     let (text, named) = crate::text_file::collapse_inclusions(&text);
+    let text = crate::images::out_of_folder(&text, &images_folder(text_file));
     let base = match marked {
         Some(version) => {
             let seen: HashMap<DeviceId, u32> = doc.version().into_iter().collect();
@@ -1891,7 +1975,7 @@ mod test {
         save(&b, &[clone.insert_local(0, "theirs", 1000)], &clone).unwrap();
         // Storage version 9: before Comments.
         Connection::open(&b).unwrap().execute_batch(
-            "DROP TABLE comments; DROP TABLE comment_pieces; DROP TABLE replies; PRAGMA user_version = 9;").unwrap();
+            "DROP TABLE comments; DROP TABLE comment_pieces; DROP TABLE replies; DROP TABLE pictures; PRAGMA user_version = 9;").unwrap();
         let before = std::fs::read(&b).unwrap();
 
         let err = merge(&a, &b).unwrap_err();

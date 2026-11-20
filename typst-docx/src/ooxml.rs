@@ -492,6 +492,14 @@ fn para_content(laid: &Laid, p: usize, resolved: &[Props], marks: &BTreeMap<Plac
     let mut content = String::new();
     for (r, run) in para.runs.iter().enumerate() {
         let chars: Vec<char> = run.text.chars().collect();
+        // A picture: Word's own, in line with the text.
+        if let Some(i) = run.picture.filter(|i| *i < laid.pictures.len()) {
+            for (_, xml) in marks.range((p, r, 0)..=(p, r, chars.len())) {
+                content.push_str(xml);
+            }
+            content.push_str(&picture_xml(i, &laid.pictures[i]));
+            continue;
+        }
         let mark = match run.note {
             Some(_) if para.note.is_some() => Some("<w:footnoteRef/>".to_string()),
             Some(n) if notes.contains(&n) => Some(format!("<w:footnoteReference w:id=\"{}\"/>", footnote_id(n))),
@@ -515,6 +523,69 @@ fn para_content(laid: &Laid, p: usize, resolved: &[Props], marks: &BTreeMap<Plac
         run_xml(&mut content, &chars[from..].iter().collect::<String>(), &props);
     }
     content
+}
+
+/// English Metric Units in a point: what drawings are measured in.
+const EMU_PER_PT: f64 = 12_700.0;
+
+/// The relationship naming picture `i`'s file (and its SVG's, with "Svg").
+fn picture_rel(i: usize) -> String {
+    format!("rIdPicture{i}")
+}
+
+/// Picture `i`, in line with the text, at the size it was set. An SVG's own file is named
+/// alongside its PNG (Word 2016 and later show the SVG).
+fn picture_xml(i: usize, picture: &crate::measure::Picture) -> String {
+    let (cx, cy) = ((picture.width * EMU_PER_PT).round() as i64, (picture.height * EMU_PER_PT).round() as i64);
+    let id = i + 1;
+    let svg = match &picture.data {
+        crate::measure::PictureData::Svg { .. } => format!(
+            "<a:extLst><a:ext uri=\"{{96DAC541-7B7A-43D3-8B79-37D633B846F1}}\">\
+             <asvg:svgBlip xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\" r:embed=\"{}Svg\"/></a:ext></a:extLst>",
+            picture_rel(i)),
+        _ => String::new(),
+    };
+    format!(
+        "<w:r><w:drawing><wp:inline xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">\
+         <wp:extent cx=\"{cx}\" cy=\"{cy}\"/><wp:docPr id=\"{id}\" name=\"Picture {id}\"/>\
+         <wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" noChangeAspect=\"1\"/></wp:cNvGraphicFramePr>\
+         <a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">\
+         <pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><pic:nvPicPr><pic:cNvPr id=\"{id}\" name=\"Picture {id}\"/><pic:cNvPicPr/></pic:nvPicPr>\
+         <pic:blipFill><a:blip r:embed=\"{rel}\">{svg}</a:blip><a:stretch><a:fillRect/></a:stretch></pic:blipFill>\
+         <pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr>\
+         </pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>",
+        rel = picture_rel(i),
+    )
+}
+
+/// The pictures' files, and the relationships naming them (one per picture; pictures that are
+/// the same share a file), and the content types their kinds need.
+fn picture_parts(pictures: &[crate::measure::Picture]) -> (Vec<(String, Vec<u8>)>, String, String) {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut rels = String::new();
+    let mut kinds: std::collections::BTreeSet<(&str, &str)> = std::collections::BTreeSet::new();
+    // Each file once: the same bytes are the same file.
+    let file_for = |bytes: &[u8], extension: &str, files: &mut Vec<(String, Vec<u8>)>| -> String {
+        if let Some((path, _)) = files.iter().find(|(_, b)| b == bytes) {
+            return path.trim_start_matches("word/").to_string();
+        }
+        let name = format!("media/picture{}.{extension}", files.len() + 1);
+        files.push((format!("word/{name}"), bytes.to_vec()));
+        name
+    };
+    for (i, picture) in pictures.iter().enumerate() {
+        let (extension, content_type) = picture.data.kind();
+        kinds.insert((extension, content_type));
+        let target = file_for(picture.data.bytes(), extension, &mut files);
+        let _ = write!(rels, "<Relationship Id=\"{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"{target}\"/>", picture_rel(i));
+        if let crate::measure::PictureData::Svg { svg, .. } = &picture.data {
+            kinds.insert(("svg", "image/svg+xml"));
+            let target = file_for(svg, "svg", &mut files);
+            let _ = write!(rels, "<Relationship Id=\"{}Svg\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"{target}\"/>", picture_rel(i));
+        }
+    }
+    let types = kinds.into_iter().map(|(e, t)| format!("<Default Extension=\"{e}\" ContentType=\"{t}\"/>")).collect();
+    (files, rels, types)
 }
 
 /// Paragraph `p`'s properties: its style (unless Normal) and what it has of its own.
@@ -847,7 +918,7 @@ fn core_xml(m: &Metadata) -> String {
         esc(&m.title), esc(&m.author))
 }
 
-fn content_types(comments: bool, furniture: &[(String, String, &str)], fonts: bool, numbering: bool, footnotes: bool) -> String {
+fn content_types(comments: bool, furniture: &[(String, String, &str)], fonts: bool, numbering: bool, footnotes: bool, pictures: &str) -> String {
     let footnotes = if footnotes {
         "<Override PartName=\"/word/footnotes.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml\"/>"
     } else {
@@ -875,7 +946,7 @@ fn content_types(comments: bool, furniture: &[(String, String, &str)], fonts: bo
     format!(
         "{HEAD}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
          <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
-         <Default Extension=\"xml\" ContentType=\"application/xml\"/>{fonts}\
+         <Default Extension=\"xml\" ContentType=\"application/xml\"/>{pictures}{fonts}\
          <Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\
          <Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>\
          <Override PartName=\"/word/settings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml\"/>\
@@ -889,7 +960,7 @@ const PACKAGE_RELS: &str = "<Relationships xmlns=\"http://schemas.openxmlformats
     <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/>\
     </Relationships>";
 
-fn document_rels(comments: bool, furniture: &[(String, String, &str)], fonts: bool, numbering: bool, footnotes: bool) -> String {
+fn document_rels(comments: bool, furniture: &[(String, String, &str)], fonts: bool, numbering: bool, footnotes: bool, pictures: &str) -> String {
     let footnotes = if footnotes {
         "<Relationship Id=\"rIdFootnotes\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes\" Target=\"footnotes.xml\"/>"
     } else {
@@ -917,7 +988,7 @@ fn document_rels(comments: bool, furniture: &[(String, String, &str)], fonts: bo
         "{HEAD}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
          <Relationship Id=\"rIdStyles\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>\
          <Relationship Id=\"rIdSettings\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings\" Target=\"settings.xml\"/>\
-         {comments}{furniture}{fonts}{numbering}{footnotes}</Relationships>")
+         {comments}{furniture}{fonts}{numbering}{footnotes}{pictures}</Relationships>")
 }
 
 /// The parts of the package, by name, and a note for each comment that couldn't be placed.
@@ -1001,13 +1072,14 @@ pub(crate) fn parts(laid: &Laid, setups: &Setups, meta: &Metadata, comments: &[C
     // Numbered as the first footnote's reference showed it.
     let format = footnote_ids.first().and_then(|n| laid.paras.iter().filter(|p| p.note.is_none()).flat_map(|p| &p.runs).find(|r| r.note == Some(*n)))
         .map(|r| footnote_format(&r.text));
+    let (picture_files, picture_rels, picture_types) = picture_parts(&laid.pictures);
     let mut parts: Vec<(String, String)> = vec![
-        ("[Content_Types].xml".to_string(), content_types(any, &furniture_parts, embedded, numbering.is_some(), footnotes.is_some())),
+        ("[Content_Types].xml".to_string(), content_types(any, &furniture_parts, embedded, numbering.is_some(), footnotes.is_some(), &picture_types)),
         ("_rels/.rels".to_string(), format!("{HEAD}{PACKAGE_RELS}")),
         ("word/document.xml".to_string(), document_xml(laid, setups, &marks, &sections, &footnote_ids)),
         ("word/styles.xml".to_string(), styles_xml(laid, setup, furniture, hands, footnotes.is_some())),
         ("word/settings.xml".to_string(), settings_xml(setup, laid.plain, odd_and_even, embedded, format)),
-        ("word/_rels/document.xml.rels".to_string(), document_rels(any, &furniture_parts, embedded, numbering.is_some(), footnotes.is_some())),
+        ("word/_rels/document.xml.rels".to_string(), document_rels(any, &furniture_parts, embedded, numbering.is_some(), footnotes.is_some(), &picture_rels)),
         ("docProps/core.xml".to_string(), core_xml(meta)),
     ];
     if let Some(footnotes) = footnotes {
@@ -1033,6 +1105,7 @@ pub(crate) fn parts(laid: &Laid, setups: &Setups, meta: &Metadata, comments: &[C
     }
     let mut parts: Vec<(String, Vec<u8>)> = parts.into_iter().map(|(name, xml)| (name, xml.into_bytes())).collect();
     parts.extend(files);
+    parts.extend(picture_files);
     if furniture.simplified {
         notes.push(Note { style: None, origin: None, what: What::FurnitureSimplified });
     }

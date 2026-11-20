@@ -61,6 +61,8 @@ pub struct Vault {
     identities: HashMap<PathBuf, (Option<std::time::SystemTime>, Option<String>)>,
     /// Included Works read from disk (see `inclusions::DocCache`).
     included_docs: inclusions::DocCache,
+    /// Pictures read for compiles lately, by hash (see `images::PictureCache`).
+    pictures: images::PictureCache,
     /// The Style library, read once until it changes.
     shelves: preamble::ShelfCache,
     /// The last walk of the Vault and its trash, while it holds (see `walked`).
@@ -175,6 +177,7 @@ const DEFAULTS_RECORD: &str = "defaults";
 mod colours;
 mod find;
 mod hidden;
+mod images;
 mod marks;
 mod history;
 mod inclusions;
@@ -191,6 +194,7 @@ pub use find::TextForFinding;
 pub use reading::{Reading, ReadingSource};
 pub use inclusions::{ChapterChoice, InclusionView, Target, SCOPE_END, SCOPE_START};
 pub use annotations::{note_with_body, DetachedView, NoteShown};
+pub use images::{ImagesView, ImageRow, KeptPicture};
 pub use history::{ComparisonView, HistoryView, RestorePreview, ReturnPreview, RevertPreview, SnippetsView};
 pub use mods::Mods;
 pub use moves::{TrashedWork, TRASH};
@@ -364,6 +368,7 @@ impl Vault {
             defaults_problem: None,
             identities: HashMap::new(),
             included_docs: inclusions::DocCache::default(),
+            pictures: images::PictureCache::default(),
             shelves: preamble::ShelfCache::new(root),
             walked: None,
             probes: HashMap::new(),
@@ -747,6 +752,8 @@ impl Vault {
             problems.push(problem);
         }
         let mut header_dropped = false;
+        // Pictures beside the Text file changed in another program while the app was closed.
+        let mut pictures_taken: Vec<String> = Vec::new();
         // The History, and the Changes this Device made in it (see `OpenWork::mine`).
         // Changes made while opening that couldn't be saved: the open Work keeps them to save again.
         let mut unsaved: Vec<Change> = Vec::new();
@@ -787,8 +794,17 @@ impl Vault {
                     header_dropped = !storage::wrote_text(&db, &contents).unwrap_or(true) && in_file.is_some_and(|h| h != header);
                 }
                 // Its Inclusions are written out at the versions it recorded (ADR 0015).
-                let expansions = inclusions::expansions(&self.shown_in_doc(&doc));
+                let shown = self.shown_in_doc(&doc);
+                let expansions = inclusions::expansions(&shown);
                 mine.extend(storage::sync_text_file_with(&db, &typ, &mut doc, &header, &expansions, now_ms).map_err(err)?);
+                // Its Images (ADR 0021): copies changed in another program meanwhile are taken
+                // in, the History file keeps just the current pictures, and the copies are
+                // written for the Text file.
+                let taken = crate::images::take_in_copies(&db, &mut doc, now_ms)?;
+                pictures_taken = taken.names;
+                mine.extend(taken.changes);
+                wrtier::images::settle(&db, &doc).map_err(err)?;
+                crate::images::write_copies(&db, &doc, &images::included_copies(&shown))?;
                 if mine.len() > saved_before {
                     record_name(&db, &mut doc, device_name.as_deref(), now_ms)?;
                 }
@@ -825,6 +841,11 @@ impl Vault {
         if header_dropped {
             let line = format!("Edits to the Preamble at the top of {name}.typ were dropped: it's made from the Work's History. \
                 Change it with Preamble… on the Work.");
+            notice = Some(notice.map_or(line.clone(), |n| format!("{n} {line}")));
+        }
+        if !pictures_taken.is_empty() {
+            let quoted: Vec<String> = pictures_taken.iter().map(|n| format!("\"{n}\"")).collect();
+            let line = format!("Took in {} changed in another program: {}.", if quoted.len() == 1 { "a picture" } else { "pictures" }, quoted.join(", "));
             notice = Some(notice.map_or(line.clone(), |n| format!("{n} {line}")));
         }
         let recovery = Recovery::for_work(&self.recovery_dir, &self.root, id);
@@ -1097,12 +1118,29 @@ impl Vault {
     pub fn typeset_input(&mut self, id: &str, look: Option<&str>, now_ms: u64) -> Result<(String, preamble::Header, Vec<Block>), String> {
         let shelf = self.shelf();
         let shown = self.shown_in(id, false)?;
-        self.with_work(id, now_ms, |w, _| {
+        let (body, mut header, blocks) = self.with_work(id, now_ms, |w, _| {
             let uses = preamble::uses_plus(&w.doc, &shelf, Version::Library, &inclusions::elements_of(&shown));
             let (body, places) = inclusions::typst_body(&w.text(), &shown);
             let blocks = Block::all(&body, &places);
             Ok((body, preamble::header(&w.doc, uses, look), blocks))
-        })
+        })?;
+        let work = self.works.get(&self.current_id(id)).ok_or_else(|| format!("{id} isn't open."))?;
+        header.images = images::image_files(&mut self.pictures, self.device, &work.db, &work.doc, None, &shown);
+        Ok((body, header, blocks))
+    }
+
+    /// The pictures a compile of `doc` (the Work `id` at a Milestone, or not open) can use:
+    /// those it had, with the Work as it is now standing in for any that are gone.
+    fn image_files_of(&mut self, id: &str, doc: &Doc, shown: &[inclusions::Shown]) -> crate::images::Files {
+        let Ok((db, _)) = self.paths(id) else { return crate::images::Files::default() };
+        let key = self.current_id(id);
+        match self.works.get(&key) {
+            Some(open) => images::image_files(&mut self.pictures, self.device, &open.db, doc, Some(&open.doc), shown),
+            None => {
+                let now = storage::load(&db, self.device).ok().map(|(_, d)| d);
+                images::image_files(&mut self.pictures, self.device, &db, doc, now.as_ref(), shown)
+            }
+        }
     }
 
     /// A Work's Milestones, oldest first. The Work needn't be open.
@@ -1181,7 +1219,9 @@ impl Vault {
         let shown = self.shown_in_doc(&doc);
         let (body, places) = inclusions::typst_body(&doc.committed_text(), &shown);
         let blocks = Block::all(&body, &places);
-        Ok((body, preamble::header(&doc, uses, look), blocks))
+        let mut header = preamble::header(&doc, uses, look);
+        header.images = self.image_files_of(id, &doc, &shown);
+        Ok((body, header, blocks))
     }
 
     /// What an Export of a Work as it was at a Milestone needs: exactly what it showed then,
@@ -1191,8 +1231,9 @@ impl Vault {
         let doc = self.at_milestone(id, milestone, now_ms)?;
         let named: ChangeId = milestone.parse().map_err(|_| format!("Not a Milestone: {milestone}"))?;
         let date_ms = self.milestone_time(id, named, now_ms)?;
-        let (header, made) = look.header(&doc, &self.shelf());
+        let (mut header, made) = look.header(&doc, &self.shelf());
         let shown = self.shown_in_doc(&doc);
+        header.images = self.image_files_of(id, &doc, &shown);
         let missing: Vec<String> = shown.iter().filter_map(|s| s.missing.as_ref().map(|m| format!("{}: {m}", s.label))).collect();
         let committed = doc.committed_text();
         let (text, inclusions) = inclusions::typst_body(&committed, &shown);
@@ -1220,7 +1261,7 @@ impl Vault {
         let shelf = self.shelf();
         let generation = self.library_generation;
         let typeset = |doc: &Doc| (doc.committed_text(), look.header(doc, &shelf), Preamble::of(doc));
-        let (db, (text, (header, made), preamble), shown, own) = if self.works.contains_key(&self.current_id(id)) {
+        let (db, (text, (mut header, made), preamble), shown, own) = if self.works.contains_key(&self.current_id(id)) {
             // The versions of the included Works it shows now go in first (ADR 0015).
             self.with_work(id, now_ms, |w, _| {
                 if !w.has_cut() {
@@ -1253,6 +1294,15 @@ impl Vault {
             let shown = self.shown_in_doc(&doc);
             let own = if look.comments { self.named_comments(&doc) } else { Vec::new() };
             (db, typeset(&doc), shown, own)
+        };
+        // Exactly the pictures of the version exported (the Work itself, as it is now, stands
+        // in for any that are gone).
+        header.images = match self.works.get(&self.current_id(id)) {
+            Some(work) => images::image_files(&mut self.pictures, self.device, &work.db, &work.doc, None, &shown),
+            None => {
+                let doc = storage::load(&db, self.device).map_err(err)?.1;
+                images::image_files(&mut self.pictures, self.device, &db, &doc, None, &shown)
+            }
         };
         let missing: Vec<String> = shown.iter().filter_map(|s| s.missing.as_ref().map(|m| format!("{}: {m}", s.label))).collect();
         let comments = if look.comments { self.comments_for_export(&text, shown.clone(), own) } else { Vec::new() };

@@ -193,7 +193,9 @@ pub fn report(notes: &[Note], lines: &[Option<TextLine>], made: &Made, plain: bo
 fn not_carried(what: Uncarried, at: Option<&[TextLine]>) -> String {
     let many = at.is_some_and(|a| a.len() > 1);
     let (one, all, fate) = match what {
-        Uncarried::Image => ("An image", "Images", if many { "are left out" } else { "is left out" }),
+        // Pictures are carried (ADR 0021), except those Word can't take: a PDF page, or one in a footnote.
+        Uncarried::Image => ("A picture Word can't show (a PDF, or one in a footnote)", "Pictures Word can't show (PDFs, or ones in footnotes)", if many { "are left out" } else { "is left out" }),
+        Uncarried::PlacedImage => ("A picture placed apart from the text", "Pictures placed apart from the text", if many { "are kept in line with it" } else { "is kept in line with it" }),
         Uncarried::Drawing => ("A drawn line or shape", "Drawn lines and shapes", if many { "are left out" } else { "is left out" }),
         Uncarried::Equation => ("An equation", "Equations", if many { "are kept as plain text, without their layout" } else { "is kept as plain text, without its layout" }),
         Uncarried::Table => ("A table", "Tables", if many { "are kept as their cells' text, a paragraph for each" } else { "is kept as its cells' text, a paragraph for each" }),
@@ -286,7 +288,7 @@ mod tests {
         ];
         let lines = [at(12, false), at(4, true), at(3, false), at(12, false), None, None, None];
         assert_eq!(report(&notes, &lines, &made, false), [
-            Line { text: "Images on lines 3 and 12 are left out.".into(), open: None },
+            Line { text: "Pictures Word can't show (PDFs, or ones in footnotes) on lines 3 and 12 are left out.".into(), open: None },
             Line { text: "An equation on line 4 (in included text) is kept as plain text, without its layout.".into(), open: None },
             Line { text: "A table a Style adds is kept as its cells' text, a paragraph for each.".into(), open: Some("styles/elements/epigraph.typ".into()) },
             Line { text: "A drawn line or shape a Style adds is left out.".into(), open: Some("styles/Paperback.look".into()) },
@@ -294,7 +296,7 @@ mod tests {
         ]);
         let many: Vec<Option<TextLine>> = (1..=12).map(|l| at(l, false)).collect();
         let notes: Vec<Note> = (0..12).map(|_| note(Uncarried::Image, None)).collect();
-        assert_eq!(report(&notes, &many, &made, false)[0].text, "Images on lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 2 more are left out.");
+        assert_eq!(report(&notes, &many, &made, false)[0].text, "Pictures Word can't show (PDFs, or ones in footnotes) on lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 2 more are left out.");
     }
 
     #[test]

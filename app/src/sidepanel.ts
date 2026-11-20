@@ -6,8 +6,8 @@
 // (CONTEXT.md). Open when its last one goes, it stays until another tab is picked, so writing a
 // Footnote and deleting it again doesn't make it come and go.
 
-export type PanelTab = "pages" | "comments" | "footnotes" | "history";
-const TABS: PanelTab[] = ["pages", "comments", "footnotes", "history"];
+export type PanelTab = "pages" | "comments" | "footnotes" | "images" | "history";
+const TABS: PanelTab[] = ["pages", "comments", "footnotes", "images", "history"];
 
 export type PanelState = { shown: boolean; tab: PanelTab };
 
@@ -25,7 +25,7 @@ export class SidePanel {
   shown = false;
   tab: PanelTab = "pages";
   /** Tabs not offered just now (the Footnotes tab, in a Work without any). */
-  private unavailable = new Set<PanelTab>(["footnotes"]);
+  private unavailable = new Set<PanelTab>(["footnotes", "images"]);
 
   /**
    * `changed` runs after every change, with whether the Page preview is in view (it only

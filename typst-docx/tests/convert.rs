@@ -51,6 +51,9 @@ fn parts(bytes: &[u8]) -> std::collections::HashMap<String, String> {
         if file.name().unwrap().ends_with(".odttf") {
             continue; // an embedded font (see `fonts_are_embedded_whole_as_truetype`)
         }
+        if file.name().unwrap().starts_with("word/media/") {
+            continue; // a picture (ADR 0021)
+        }
         let mut xml = String::new();
         file.read_to_string(&mut xml).unwrap();
         let name = file.name().unwrap().to_string();
@@ -757,13 +760,17 @@ fn what_isnt_carried_is_reported_where_it_is() {
     }).collect();
     let line_of = |text: &str| line(full.find(text).unwrap());
     use typst_docx::Uncarried::*;
-    assert_eq!(found, [(Equation, line_of("Some $")), (Table, line_of("#table")), (Equation, line_of("$ sum")), (Image, line_of("#image")), (Drawing, line_of("#line"))],
-        "one item each, at its line; underline and strike-through are carried");
+    assert_eq!(found, [(Equation, line_of("Some $")), (Table, line_of("#table")), (Equation, line_of("$ sum")), (Drawing, line_of("#line"))],
+        "one item each, at its line; underline and strike-through are carried, and so is the picture (ADR 0021)");
     // Their text is kept: an equation's in a row, without breaking its line; a table's cells
     // as paragraphs of their own.
-    let paras = paragraphs(&parts(&docx.bytes)["word/document.xml"]);
+    let parts = parts(&docx.bytes);
+    let paras = paragraphs(&parts["word/document.xml"]);
     let texts: Vec<&str> = paras.iter().map(|(_, t)| t.as_str()).collect();
-    assert_eq!(texts, ["One", "Some 𝑥2+1 inline, under and struck.", "a", "b", "c", "d", "∑𝑛𝑖=1𝑖", "After."]);
+    // The picture is a paragraph of its own, holding Word's drawing of it.
+    assert_eq!(texts, ["One", "Some 𝑥2+1 inline, under and struck.", "a", "b", "c", "d", "∑𝑛𝑖=1𝑖", "", "After."]);
+    assert_eq!(parts["word/document.xml"].matches("<w:drawing>").count(), 1);
+    assert!(parts["word/_rels/document.xml.rels"].contains("Target=\"media/picture1.png\""));
 }
 
 #[test]

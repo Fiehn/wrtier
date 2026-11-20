@@ -123,11 +123,13 @@ impl Fonts {
     }
 }
 
-/// One Work, as Typst sees it: a single in-memory main file and the fonts.
+/// One Work, as Typst sees it: a single in-memory main file, the fonts, and its Images'
+/// pictures (ADR 0021).
 struct WorkWorld {
     library: LazyHash<Library>,
     fonts: Arc<Fonts>,
     main: Source,
+    images: crate::images::Files,
 }
 
 impl World for WorkWorld {
@@ -143,8 +145,20 @@ impl World for WorkWorld {
     fn source(&self, id: FileId) -> FileResult<Source> {
         if id == self.main.id() { Ok(self.main.clone()) } else { Err(FileError::AccessDenied) }
     }
-    fn file(&self, _id: FileId) -> FileResult<Bytes> {
-        Err(FileError::AccessDenied) // images come in v2
+    /// A picture, by the path the text names it by. A picture name no Image has gets a
+    /// placeholder, so the Work still typesets (and a warning says so); anything else, such as
+    /// `read("notes.txt")`, is refused: a Work is its text.
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        let path = id.get();
+        if !matches!(path.root(), VirtualRoot::Project) {
+            return Err(FileError::AccessDenied);
+        }
+        let name = path.vpath().get_without_slash();
+        match self.images.get(name) {
+            Some(file) => Ok(file.bytes.clone()),
+            None if crate::images::Kind::of_name(name).is_some() => Ok(crate::images::placeholder(name)),
+            None => Err(FileError::AccessDenied),
+        }
     }
     fn font(&self, index: usize) -> Option<Font> {
         self.fonts.store.font(index)
@@ -157,6 +171,14 @@ impl World for WorkWorld {
 impl typst_ide::IdeWorld for WorkWorld {
     fn upcast(&self) -> &dyn World {
         self
+    }
+
+    /// The Work's own Images, so `image("` completes their names.
+    fn files(&self) -> Vec<FileId> {
+        self.images.own()
+            .filter_map(|f| VirtualPath::new(&f.name).ok())
+            .map(|path| FileId::new(RootedPath::new(VirtualRoot::Project, path)))
+            .collect()
     }
 }
 
@@ -215,6 +237,32 @@ impl Block {
 
 
 impl Preview {
+    /// Where the text names a picture no Image has, or one whose picture was deleted and is
+    /// stood in for (ADR 0021): warnings, never errors, as the Work still typesets.
+    fn image_problems(&self, header: &Header) -> Vec<Problem> {
+        let source = self.world.main.text();
+        let start = header.text.len();
+        let mut found = Vec::new();
+        for range in wrtier::images::named_in(&source[start..]) {
+            let name = &source[start..][range.clone()];
+            let (byte, end) = (start + range.start, start + range.end);
+            let (shown, whose) = match name.strip_prefix(crate::images::INCLUDED) {
+                Some(rest) => (rest.split_once('/').map_or(rest, |(_, n)| n), "the included Work"),
+                None => (name, "this Work"),
+            };
+            let message = match self.world.images.get(name) {
+                None if crate::images::Kind::of_name(name).is_none() => format!(
+                    "\"{shown}\" isn't an Image's name: an Image's name ends in .png, .jpg, .gif, .webp, .svg or .pdf."),
+                None => format!("No Image called \"{shown}\" in {whose}: a grey box stands in for it."),
+                Some(file) if file.stand_in => format!(
+                    "The picture \"{shown}\" had here was deleted from its Past pictures: it shows the one on hand instead."),
+                Some(_) => continue,
+            };
+            found.push(Problem { message, hints: Vec::new(), from: self.to_text(byte), to: self.to_text(end), line: self.line_of(byte) });
+        }
+        found
+    }
+
     /// A place in the Work's text (UTF-16), as a byte offset in the compiled source.
     fn to_source(&self, at: usize) -> Option<usize> {
         let shift: usize = self.blocks.iter().take_while(|b| b.at < at).map(|b| b.len.saturating_sub(1)).sum();
@@ -428,6 +476,7 @@ impl Typesetter {
                 library: LazyHash::new(Library::default()),
                 fonts,
                 main: Source::new(main_id(), String::new()),
+                images: crate::images::Files::default(),
             },
             last_good: None,
             header: Header::default(),
@@ -436,6 +485,7 @@ impl Typesetter {
             blocks: Vec::new(),
         });
         preview.world.main.replace(&format!("{}{text}", header.text));
+        preview.world.images = header.images.clone();
         preview.blocks = blocks.to_vec();
         if preview.header != *header {
             preview.header = header.clone();
@@ -516,6 +566,7 @@ impl Typesetter {
                 warnings.extend(header.missing.iter().map(|m| Problem {
                     message: format!("In the Preamble: {m}"), hints: Vec::new(), from: None, to: None, line: None,
                 }));
+                warnings.extend(preview.image_problems(header));
                 match warned.output {
                     Ok(document) => {
                         let device_fonts = fonts_from_device(&fonts, &document);

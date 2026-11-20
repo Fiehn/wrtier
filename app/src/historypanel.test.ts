@@ -38,6 +38,14 @@ describe("the History tab", () => {
     expect(fieldLine({ ...f, field: "raw", takenBack: true })).toBe("Taken back: Raw Typst edited");
   });
 
+  it("says what an Image Change did", () => {
+    const f = { by: "a", change: "a", record: "image/map.png", field: "picture", value: "png 77 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Map.png", before: null, takenBack: false, library: false, inEffect: true };
+    expect(fieldLine(f)).toBe("Added the Image “Map.png”");
+    expect(fieldLine({ ...f, before: "jpg 90 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Map.png" })).toBe("New picture for the Image “Map.png”");
+    expect(fieldLine({ ...f, value: "", before: "png 77 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Map.png" })).toBe("Deleted the Image “Map.png”");
+    expect(fieldLine({ ...f, takenBack: true })).toBe("Taken back: Added the Image “Map.png”");
+  });
+
   it("says what a Replace all did, as one line", () => {
     const r = { find: "rain", with: "snow", count: 14, changes: ["a", "b"], inEffect: true, revertedBy: null };
     expect(replacementLine(r)).toBe("Replaced “rain” with “snow” (14)");
@@ -85,6 +93,9 @@ describe("the History tab", () => {
     expect(noticeLine(notice("externalEdit", "eased", null))).toMatch(/^The Text file was edited outside the app \(on Laptop\).*Check what it wrote: “eased”$/);
     expect(noticeLine(notice("preamble", ""))).toMatch(/^The Preamble's raw Typst was edited on Phone and on Laptop without/);
     expect(noticeLine(notice("preamble", "", "Laptop"))).toContain("edited twice on Laptop");
+    expect(noticeLine(notice("image", "map.png"))).toBe(
+      "The Image “map.png” was changed on Phone and on Laptop without either seeing the other's change. Laptop's, the later one, is used; the other picture is kept as a Past picture (Images tab, Past pictures…).",
+    );
   });
 
   it("steps \"Show me\" through a notice's places", () => {

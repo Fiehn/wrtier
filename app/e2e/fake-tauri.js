@@ -36,6 +36,8 @@
     misspelt: ["Teh", "teh", "Kvothe"],
     /** The Vault's folders, besides those its Works are in (none unless a test adds some). */
     vaultFolders: [],
+    /** Each Work's Images (ADR 0021), by name in lowercase. */
+    images: {},
     /** The colours of Works and folders (vault/colours.rs). */
     colours: { works: {}, folders: {} },
     /** Vault themes: file → { name, dark, css }. A test adds some before the page loads. */
@@ -108,6 +110,12 @@
           body: op.body, resolved: false, quote: "", timeMs: now, replies: [], otherBody: null,
         });
         break;
+      case "setImage":
+        (fake.images[id] ??= {})[op.name.toLowerCase()] = { name: op.name, kind: "PNG", size: 77, hash: op.hash };
+        return false;
+      case "deleteImage":
+        delete fake.images[id]?.[op.name.toLowerCase()];
+        return false;
       case "include": {
         // The Inclusion character the paste just put at `at`: the k-th one in the text.
         const k = [...t.slice(0, op.at)].filter((c) => c === "￼").length;
@@ -297,6 +305,24 @@
       return null;
     },
     detached_annotations: () => [],
+    get_images: ({ id }) => {
+      const text = fake.texts[id] ?? "";
+      const own = Object.values(fake.images[id] ?? {}).map((image) => {
+        const uses = [];
+        for (const m of text.matchAll(/image\(\s*"([^"\n]*)"/g)) {
+          if (m[1].toLowerCase() === image.name.toLowerCase()) uses.push(m.index + m[0].indexOf('"') + 1);
+        }
+        return { ...image, uses, past: 0, pastSize: 0, standIn: false };
+      });
+      return { own, included: [], pastFolder: "" };
+    },
+    // Insert Image's file picker: always the same small picture, "map.png".
+    pick_image: ({ id }) => {
+      const had = fake.images[id]?.["map.png"];
+      return { hash: "a".repeat(64), name: "map.png", kind: "PNG", size: 77, clash: had ? had.name : null, otherName: "map 2.png", same: had?.hash === "a".repeat(64) };
+    },
+    // A red 300×200 PNG: tall enough to click its lower part.
+    image_picture: () => Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAASwAAADICAIAAADdvUsCAAACRUlEQVR4nO3TMQEAIAzAMEDI/EtBFjJ6kCjo031nFtA5dQD8zoQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcRMCDETQsyEEDMhxEwIMRNCzIQQMyHETAgxE0LMhBAzIcQe3acClC+A44kAAAAASUVORK5CYII="), (c) => c.charCodeAt(0)).buffer,
     comment_in: ({ work, ops }) => {
       for (const op of ops) {
         const c = (fake.includedComments[work] ?? []).find((x) => x.id === op.comment);

@@ -16,6 +16,10 @@ skrifa = "0.42"
 write-fonts = { version = "0.48", features = ["read"] }
 kurbo = "0.13"
 roxmltree = "0.21"  # reading hand-written translations (the same as the app's)
+# Pictures Word can't take as they are: WebP and raw pixels made PNG, and an SVG's PNG fallback
+# drawn (the versions Typst itself already uses).
+image = { version = "0.25", default-features = false, features = ["png"] }
+resvg = { version = "0.47", default-features = false }
 
 [dev-dependencies]
 typst-kit = { workspace = true, features = ["embedded-fonts"] }  # Typst's bundled fonts, for tests

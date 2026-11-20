@@ -38,7 +38,7 @@ export type SessionRow = {
 export type MilestoneRow = { id: string; name: string; timeMs: number; deleted: boolean; device: string };
 export type NoticeView = {
   key: string;
-  kind: "overlap" | "loop" | "externalEdit" | "preamble" | "annotation";
+  kind: "overlap" | "loop" | "externalEdit" | "preamble" | "annotation" | "image";
   device: string;
   timeMs: number;
   otherDevice: string | null;
@@ -172,8 +172,21 @@ const FIELD_NAMES: Record<string, string> = {
   raw: "Raw Typst",
 };
 
-/** A Preamble edit as a line ("Title: The Rain (was Rain)"). Library copies are summed up apart. */
+/** An Image's record value (`images::ImageValue`), "png 10423 <hash> map.png": its name; null if deleted. */
+function imageName(value: string | null): string | null {
+  const parts = value?.split(" ") ?? [];
+  return parts.length >= 4 ? parts.slice(3).join(" ") : null;
+}
+
+/** A Preamble edit as a line ("Title: The Rain (was Rain)"), or an Image's ("Added the Image “map.png”"). Library copies are summed up apart. */
 export function fieldLine(f: FieldView): string {
+  if (f.record.startsWith("image/")) {
+    const [now, was] = [imageName(f.value), imageName(f.before)];
+    const line = now === null ? `Deleted the Image “${was ?? f.record.slice(6)}”`
+      : was === null ? `Added the Image “${now}”`
+      : `New picture for the Image “${now}”`;
+    return f.takenBack ? `Taken back: ${line}` : line;
+  }
   const name = FIELD_NAMES[f.field] ?? f.field;
   const shown = (v: string | null) => (v === null || v.trim() === "" ? "none" : v.split("\n").map((s) => s.trim()).filter(Boolean).join(", "));
   const line = f.field === "raw"
@@ -244,6 +257,10 @@ export function noticeLine(n: NoticeView): string {
     case "annotation": {
       const who = n.otherDevice === null || n.otherDevice === n.device ? `twice on ${n.device}` : `on ${n.otherDevice} and on ${n.device}`;
       return `An Annotation was changed ${who} without either seeing the other's change. ${n.device}'s, the later one, is used. The other version read: “${n.quote}”`;
+    }
+    case "image": {
+      const who = n.otherDevice === null || n.otherDevice === n.device ? `twice on ${n.device}` : `on ${n.otherDevice} and on ${n.device}`;
+      return `The Image ${quote} was changed ${who} without either seeing the other's change. ${n.device}'s, the later one, is used; the other picture is kept as a Past picture (Images tab, Past pictures…).`;
     }
   }
 }
