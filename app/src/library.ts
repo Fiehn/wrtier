@@ -29,6 +29,8 @@ export type NewElement = { title: string; shownAs: string; docx: string; descrip
 export type LibraryHooks = {
   /** Opens a library file in a tab. */
   open(path: string, title: string): Promise<void>;
+  /** The plus on a group's line: asks for and makes a new one of that kind. */
+  create(kind: Kind): void;
   /** Right-click on a file: what can be done with it (rename, remove), at (x, y). */
   menu(item: LibraryItem, x: number, y: number): void;
   /** Shows a default's two versions; the Author's choice, or null if they just closed it. */
@@ -40,10 +42,10 @@ export type LibraryHooks = {
   error(message: string): void;
 };
 
-const GROUPS: { kind: Kind; label: string }[] = [
-  { kind: "look", label: "Looks" },
-  { kind: "style", label: "Styles" },
-  { kind: "storyElement", label: "Story elements" },
+const GROUPS: { kind: Kind; label: string; one: string }[] = [
+  { kind: "look", label: "Looks", one: "Look" },
+  { kind: "style", label: "Styles", one: "Style" },
+  { kind: "storyElement", label: "Story elements", one: "Story element" },
 ];
 
 /** Which groups are open (Device state, in local storage): closed at first. */
@@ -94,7 +96,7 @@ export class LibraryPanel {
       const count = document.createElement("span");
       count.className = "library-count";
       count.textContent = String(items.length);
-      summary.append(" ", count);
+      summary.append(" ", count, this.newButton(group.kind, group.one));
       // A problem inside a closed group still shows.
       if (items.some((i) => i.problems.length > 0)) {
         summary.classList.add("has-problem");
@@ -112,6 +114,22 @@ export class LibraryPanel {
       details.append(summary, ul);
       this.list.append(details);
     }
+  }
+
+  /** The box with a plus at the right of a group's line, for making a new one of its kind. */
+  private newButton(kind: Kind, one: string): HTMLButtonElement {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "library-add";
+    b.title = `New ${one}…`;
+    b.setAttribute("aria-label", `New ${one}…`);
+    b.dataset.kind = kind;
+    b.addEventListener("click", (e) => {
+      e.preventDefault(); // the group stays open or closed as it is
+      e.stopPropagation();
+      this.hooks.create(kind);
+    });
+    return b;
   }
 
   private setOpen(kind: Kind, open: boolean) {

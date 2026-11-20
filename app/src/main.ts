@@ -738,6 +738,7 @@ function remember() {
 
 const library: LibraryPanel = new LibraryPanel($("library-list"), $("library-conflicts"), $("library-offers"), {
   open: (path, title) => openLibraryFile(path, title),
+  create: (kind) => act(() => preambleActions.newItem(kind)),
   menu: (item, x, y) => libraryMenu(item, x, y),
   compare: compareDefault,
   settle: () => tabs.idle(),

@@ -1158,6 +1158,25 @@ test("the Style library and the trash are pinned under the Works, above the Chap
   expect(await app.locator("#sidebar-shelf").boundingBox()).toEqual(before);
 });
 
+test("each Style library group has a plus box on its line for making a new one", async ({ app }, info) => {
+  await app.locator("#library > summary").click();
+  const styles = app.locator("#library .library-group", { has: app.locator("summary", { hasText: "Styles" }) });
+  const plus = styles.locator("summary .library-add");
+  await expect(app.locator("#library .library-add")).toHaveCount(3);
+  // At the right end of the group's line.
+  const line = (await styles.locator("summary").boundingBox())!;
+  const box = (await plus.boundingBox())!;
+  expect(line.x + line.width - (box.x + box.width)).toBeLessThan(8);
+  await app.locator("#library").screenshot({ path: info.outputPath("library.png") });
+  // It asks for the new one's name, and the group stays as it was.
+  const open = await styles.evaluate((d) => (d as HTMLDetailsElement).open);
+  await plus.click();
+  await expect(app.locator("#ask-text")).toBeVisible();
+  await expect(app.locator("#ask-text-question")).toHaveText("What's the new Style called?");
+  expect(await styles.evaluate((d) => (d as HTMLDetailsElement).open)).toBe(open);
+  await app.keyboard.press("Escape");
+});
+
 // ---- The Reading panel (reading.ts) ----
 
 const reading = (page: Page) => page.locator("#reading-panel");

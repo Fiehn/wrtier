@@ -1,13 +1,13 @@
 // What's done to a Work as a whole, from the Vault browser, the History tab or the Page
 // preview: its Preamble, its Exports (PDF and .docx), naming a Milestone, and the Story elements
-// its editor offers. Also the Style library's buttons for making something new or putting the
-// defaults back.
+// its editor offers. Also making something new in the Style library (its plus boxes) and putting
+// the defaults back.
 
 import { invoke } from "@tauri-apps/api/core";
 import type { WorkState } from "./sync";
 import type { Tabs } from "./tabs";
 import type { PagePreview } from "./preview";
-import type { LibraryItem, LibraryPanel } from "./library";
+import type { Kind, LibraryItem, LibraryPanel } from "./library";
 import type { PreambleDialog, Preamble } from "./preambledialog";
 import type { ReadingPanel } from "./reading";
 import type { ElementInfo } from "./elements";
@@ -68,33 +68,12 @@ export function restoredLine(restored: string[]): string {
 
 export class PreambleActions {
   constructor(private deps: PreambleDeps) {
-    const { preview, library } = deps;
+    const { preview } = deps;
     $("preview-pdf").addEventListener("click", () => act(async () => {
       if (preview.shown) await this.exportPdf(preview.shown, preview.shownMilestone);
     }));
     $("preview-docx").addEventListener("click", () => act(async () => {
       if (preview.shown) await this.exportDocx(preview.shown, preview.shownMilestone);
-    }));
-    $("new-style").addEventListener("click", () => act(async () => {
-      const name = await askText("What's the new Style called?", "", "Create", "One small thing it does, e.g. Drop caps or Large print.");
-      if (name !== null) await library.create("style", name);
-    }));
-    $("new-look").addEventListener("click", () => act(async () => {
-      const name = await askText("What's the new Look called?", "", "Create", "What it's for, e.g. Hardback or Large print.");
-      if (name !== null) await library.create("look", name);
-    }));
-    $("new-element").addEventListener("click", () => act(async () => {
-      const field = (id: string) => $<HTMLInputElement>(id);
-      for (const id of ["element-name", "element-title", "element-description"]) field(id).value = "";
-      const answer = ask($<HTMLDialogElement>("ask-element"));
-      field("element-name").focus();
-      if ((await answer) !== "ok") return;
-      await library.create("storyElement", field("element-name").value.trim(), {
-        title: field("element-title").value,
-        shownAs: $<HTMLSelectElement>("element-shown").value,
-        docx: $<HTMLSelectElement>("element-docx").value,
-        description: field("element-description").value,
-      });
     }));
     $("restore-defaults").addEventListener("click", () => act(async () => {
       const yes = await confirmAsk(
@@ -106,6 +85,30 @@ export class PreambleActions {
       await deps.tabs.idle(); // anything typed in a library file's tab is saved first, then trashed with it
       showInfo(restoredLine(await invoke<string[]>("restore_library_defaults")));
     }));
+  }
+
+  /** The Style library's plus on a group's line: asks what the new one is called, then makes and opens it. */
+  async newItem(kind: Kind) {
+    const { library } = this.deps;
+    if (kind === "style") {
+      const name = await askText("What's the new Style called?", "", "Create", "One small thing it does, e.g. Drop caps or Large print.");
+      if (name !== null) await library.create("style", name);
+    } else if (kind === "look") {
+      const name = await askText("What's the new Look called?", "", "Create", "What it's for, e.g. Hardback or Large print.");
+      if (name !== null) await library.create("look", name);
+    } else {
+      const field = (id: string) => $<HTMLInputElement>(id);
+      for (const id of ["element-name", "element-title", "element-description"]) field(id).value = "";
+      const answer = ask($<HTMLDialogElement>("ask-element"));
+      field("element-name").focus();
+      if ((await answer) !== "ok") return;
+      await library.create("storyElement", field("element-name").value.trim(), {
+        title: field("element-title").value,
+        shownAs: $<HTMLSelectElement>("element-shown").value,
+        docx: $<HTMLSelectElement>("element-docx").value,
+        description: field("element-description").value,
+      });
+    }
   }
 
   async editPreamble(id: string) {

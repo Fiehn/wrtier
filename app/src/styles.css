@@ -748,9 +748,29 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
-#library .library-group > summary.has-problem::after {
-  content: " ⚠";
-  color: var(--warn-text);
+/* The box with a plus at the right of a group's line: a new Look, Style or Story element. The plus
+   is drawn, not typed: a font's "+" sits on its own line, never quite in the middle of the box. */
+#library .library-add {
+  float: right;
+  box-sizing: border-box;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  margin-right: 4px;
+  color: var(--muted);
+  background-color: transparent;
+  background-image: linear-gradient(currentColor, currentColor), linear-gradient(currentColor, currentColor);
+  background-position: center;
+  background-size: 7px 1px, 1px 7px;
+  background-repeat: no-repeat;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+#library .library-add:hover,
+#library .library-add:focus-visible {
+  color: var(--text);
+  background-color: var(--chip);
 }
 
 #library ul {
