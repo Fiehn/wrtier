@@ -968,6 +968,8 @@ main > :not(#panes) {
 }
 
 #view-mode,
+#preamble-open,
+#mods-open,
 #panel-toggle {
   margin-bottom: 6px;
   white-space: nowrap;
@@ -3785,9 +3787,12 @@ body.phone .setting-row {
   grid-template-columns: 1fr 5.5em;
 }
 
-/* No keyboard keys to show on the phone; the toolbar does what they do. */
+/* No keyboard keys to show on the phone; the toolbar does what they do. The Preamble and Mods
+   are in the Work's menu in the Vault browser: the tab row has no room for them. */
 body.phone kbd,
-body.phone #view-mode {
+body.phone #view-mode,
+body.phone #preamble-open,
+body.phone #mods-open {
   display: none;
 }
 

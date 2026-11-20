@@ -1177,6 +1177,27 @@ test("each Style library group has a plus box on its line for making a new one",
   await app.keyboard.press("Escape");
 });
 
+test("a Work's Preamble… and Mods… are in the tab row and its menu, not on the Work when hovered", async ({ app }, info) => {
+  const rain = app.locator("#works li.work-entry", { hasText: "Rain" });
+  await rain.hover();
+  await expect(rain.locator("button", { hasText: /Preamble…|Mods…/ })).toHaveCount(0);
+  // In the tab row, beside Find, Raw view and the panel's button, for the Work in front.
+  const row = await app.evaluate(() => [...document.querySelectorAll("#tabrow > button:not([hidden])")].map((b) => b.id));
+  expect(row).toEqual(["sidebar-toggle", "find-open", "view-mode", "preamble-open", "mods-open", "panel-toggle"]);
+  await app.locator("#tabrow").screenshot({ path: info.outputPath("tabrow.png") });
+  await app.locator("#preamble-open").click();
+  await expect(app.locator("#preamble")).toBeVisible();
+  await app.keyboard.press("Escape");
+  await expect(app.locator("#preamble")).toBeHidden();
+  await app.locator("#mods-open").click();
+  await expect(app.locator("#mods")).toBeVisible();
+  await app.locator("#mods button[value=done]").click();
+  // And in the Work's right-click menu.
+  await rain.locator(".entry-name").click({ button: "right" });
+  await expect(app.locator("#menu button", { hasText: "Preamble…" })).toBeVisible();
+  await expect(app.locator("#menu button", { hasText: "Mods…" })).toBeVisible();
+});
+
 // ---- The Reading panel (reading.ts) ----
 
 const reading = (page: Page) => page.locator("#reading-panel");

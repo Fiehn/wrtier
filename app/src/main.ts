@@ -68,6 +68,8 @@ const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $(
     // A library file is plain Typst: no Formatted view, and no pages of its own.
     $("view-mode").hidden = !tabs.activeIsWork;
     $("panel-toggle").hidden = !tabs.activeIsWork;
+    $("preamble-open").hidden = !tabs.activeIsWork;
+    $("mods-open").hidden = !tabs.activeIsWork;
     $("find-open").hidden = tabs.active === null;
     findBar.attach();
     showToolbar();
@@ -1300,6 +1302,9 @@ try {
   setFormatted(true);
 }
 $("view-mode").addEventListener("click", () => setFormatted(!tabs.formatted));
+// The Work in front's Preamble and Mods (any Work's are also in its right-click menu in the Vault browser).
+$("preamble-open").addEventListener("click", () => act(() => preambleActions.editPreamble(tabs.active!)));
+$("mods-open").addEventListener("click", () => act(() => editMods(tabs.active!)));
 
 // ---- The phone's toolbar under the text: each button does what its key does ----
 

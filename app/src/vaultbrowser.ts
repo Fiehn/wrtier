@@ -1,7 +1,7 @@
 // The Vault browser: the Vault's Works and folders in the sidebar, what can be done with them,
 // and the trash under them. Folders fold in and out (which are open is remembered on this
-// Device, per Vault), Works are shaded pills whose Preamble… and Mods… show on hover, and a
-// right-click gives everything else. Works selected with Ctrl+click become a Collection.
+// Device, per Vault), Works are shaded pills, and a right-click gives what can be done with one
+// (its Preamble… and Mods… are also in the tab row, for the Work in front). Works selected with Ctrl+click become a Collection.
 
 import { invoke } from "@tauri-apps/api/core";
 import type { Tabs, Layout, OpenedWork } from "./tabs";
@@ -11,7 +11,6 @@ import { showMenu, type MenuItem } from "./menu";
 import { colourOf, COLOURS } from "./reviewers";
 import { vaultModInUse, type ModsState } from "./mods";
 import { endWorkDrag, startWorkDrag } from "./inclusions";
-import { withKey } from "./keys";
 import { browseForVault, ensureFilesAccess, onAndroid } from "./android";
 import type { ReadingPanel, ReadingPlace } from "./reading";
 import type { LibraryPanel } from "./library";
@@ -273,12 +272,7 @@ export class VaultBrowser {
     }
     const actions = document.createElement("span");
     actions.className = "entry-actions";
-    if (entry.kind === "work") {
-      actions.append(
-        actionButton("Preamble…", withKey(`Looks, Styles, Story elements and settings of ${entry.id}`, "preamble"), () => this.deps.preamble.editPreamble(entry.id)),
-        actionButton("Mods…", withKey(`Optional features of ${entry.id}, such as spellcheck`, "mods"), () => this.deps.editMods(entry.id)),
-      );
-    } else if (entry.kind === "leftover") {
+    if (entry.kind === "leftover") {
       actions.append(actionButton("Delete it", "Delete the leftover Text file", () => this.deleteLeftover(entry.id)));
     }
     if (actions.childElementCount > 0) pill.append(actions);
