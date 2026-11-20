@@ -193,6 +193,13 @@
   box-sizing: border-box;
 }
 
+/* The top row of each column: one height, so together they read as the window's title bar
+   (windowframe.ts). The window's own buttons take --window-controls at its top-right corner. */
+:root {
+  --top-row: 40px;
+  --window-controls: 138px;
+}
+
 html,
 body {
   margin: 0;
@@ -319,21 +326,23 @@ kbd {
   margin-top: 6px;
 }
 
-/* The top part: the Vault's name (to open another) and Settings, the sync line under them. */
+/* The top part: the Vault's name (to open another) and Settings in the top row, the sync line
+   under them. The room between the two moves the window. */
 #sidebar-top {
   flex: none;
-  padding: 12px 12px 10px;
-  border-bottom: 1px solid var(--line);
 }
 
 #vault-bar {
   display: flex;
   align-items: center;
   gap: 6px;
+  height: var(--top-row);
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--line);
 }
 
 #choose-vault {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -365,6 +374,7 @@ kbd {
 /* A symbol like ☰ (#sidebar-toggle). */
 #open-settings {
   flex: none;
+  margin-left: auto;
   display: flex;
   padding: 6px;
   border: none;
@@ -955,7 +965,6 @@ main {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
-  padding-top: 12px;
 }
 
 main > :not(#panes) {
@@ -976,21 +985,21 @@ main > :not(#panes) {
   height: 100%;
 }
 
+/* ☰, the tabs on one line, room to move the window by, ⌄, the panel's symbol. */
 #tabrow {
+  flex: none;
   display: flex;
   align-items: flex-end;
   gap: 8px;
+  height: var(--top-row);
+  padding: 0 8px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 14px;
 }
 
-#tab-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  align-items: flex-end;
-  column-gap: 8px;
-  min-width: 0;
+main > #tabrow {
+  margin-left: 0;
+  margin-right: 0;
 }
 
 #sidebar-toggle {
@@ -1008,18 +1017,49 @@ main > :not(#panes) {
   background: var(--chip);
 }
 
+/* The tabs: as wide as their names up to a point, narrower as more open, then scrolling
+   sideways (the wheel too, main.ts); the one in front is scrolled into view. */
 #tabbar {
   display: flex;
-  flex-wrap: wrap;
+  align-self: stretch;
+  align-items: flex-end;
   gap: 2px;
-  flex: 1;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
 }
 
-#view-mode,
-#preamble-open,
-#mods-open {
-  margin-bottom: 6px;
-  white-space: nowrap;
+#tabbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* However many tabs, this much of the row is left to move the window by. */
+#tab-gap {
+  flex: 1 0 40px;
+  align-self: stretch;
+}
+
+/* What to do with the tab in front: a plain symbol like the panel's. */
+#tab-menu {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  padding: 6px;
+  margin-bottom: 3px;
+  color: var(--muted);
+}
+
+#tab-menu[hidden] {
+  display: none;
+}
+
+#tab-menu:hover {
+  color: var(--text);
+  background: var(--chip);
 }
 
 /* The panel's symbol: a plain symbol like ☰ (#sidebar-toggle), not a boxed blue button, and
@@ -1071,12 +1111,38 @@ main > :not(#panes) {
   display: none;
 }
 
+/* Only the tabs: the rest of the row moves the window (the panel hides with its symbol in the
+   tab row, or Ctrl+Shift+P). */
 .panel-tabs {
+  flex: none;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 12px 0;
-  border-bottom: 1px solid var(--line);
+  align-items: flex-end;
+  gap: 8px;
+  height: var(--top-row);
+  padding: 0 12px;
+  /* The line as a shadow, inside the row: the tabs below scroll sideways, which would cut off the
+     chosen tab's underline if it hung over a border. */
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+
+/* Too many for the panel's width (the window's buttons take some of it): they scroll sideways. */
+.panel-tabs > [role="tablist"] {
+  display: flex;
+  align-self: stretch;
+  align-items: flex-end;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.panel-tabs > [role="tablist"]::-webkit-scrollbar {
+  display: none;
+}
+
+.panel-tabs > [role="tablist"] > [role="tab"] {
+  flex: none;
+  margin-bottom: 0;
 }
 
 .panel-tabs [role="tab"],
@@ -1133,10 +1199,12 @@ main > :not(#panes) {
 }
 
 .reading-header {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  height: var(--top-row);
+  padding: 0 12px;
   border-bottom: 1px solid var(--line);
   font-size: 13px;
 }
@@ -1516,12 +1584,28 @@ main > :not(#panes) {
 }
 
 .tab {
+  flex: 0 1 auto;
+  min-width: 80px;
+  max-width: 200px;
   display: flex;
   align-items: center;
   border: 1px solid transparent;
   border-bottom: none;
   border-radius: 6px 6px 0 0;
   color: var(--muted);
+}
+
+.tab .tab-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.tab .tab-close {
+  flex: none;
 }
 
 .tab.active {
@@ -2266,11 +2350,6 @@ dialog#settings[open] {
 #find-note {
   margin: 0 0 0 2.6em;
   font-size: 0.9em;
-}
-
-#find-open {
-  margin-bottom: 6px;
-  white-space: nowrap;
 }
 
 .cm-find-match {
@@ -3624,6 +3703,11 @@ button.sync-status {
   cursor: pointer;
 }
 
+/* The line under the Vault bar: in from the sidebar's edge, as the Works are. */
+#sync-status {
+  margin: 8px 12px 0;
+}
+
 button.sync-status:hover {
   color: var(--text);
 }
@@ -3816,23 +3900,32 @@ body.phone main > :not(#panes) {
 
 body.phone #tabrow {
   align-items: center;
+  height: auto;
+  padding: 0;
   margin-bottom: 8px;
-}
-
-body.phone #tabbar {
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  scrollbar-width: none;
 }
 
 body.phone #tabbar .tab {
   flex: none;
+  max-width: none;
+  min-width: 0;
 }
 
-body.phone #chapters-open,
-body.phone #find-open,
-body.phone #view-mode {
+body.phone #tab-menu {
   margin-bottom: 0;
+}
+
+/* Each phone screen has its own top row: with the app's frame, the window's buttons get a strip
+   across the top instead, which moves the window too. */
+body.phone.custom-frame #app {
+  padding-top: var(--top-row);
+}
+
+body.phone #window-controls {
+  left: 0;
+  justify-content: flex-end;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
 }
 
 /* The Chapter list as a sheet over the writing. */
@@ -3887,12 +3980,8 @@ body.phone .setting-row {
   grid-template-columns: 1fr 5.5em;
 }
 
-/* No keyboard keys to show on the phone; the toolbar does what they do. The Preamble and Mods
-   are in the Work's menu in the Vault browser: the tab row has no room for them. */
-body.phone kbd,
-body.phone #view-mode,
-body.phone #preamble-open,
-body.phone #mods-open {
+/* No keyboard keys to show on the phone; the toolbar does what they do. */
+body.phone kbd {
   display: none;
 }
 
@@ -4342,4 +4431,66 @@ body.phone #write-toolbar button:disabled {
 .image-thumb.small {
   width: 48px;
   height: 36px;
+}
+
+/* ---- The window's frame (windowframe.ts) ---- */
+
+/* The row at the window's top-right corner leaves room for the window's buttons. (#tabrow
+   named too: its own padding rule, by id, would win over a class.) */
+body.custom-frame:not(.phone) .frame-room,
+body.custom-frame:not(.phone) #tabrow.frame-room {
+  padding-right: calc(var(--window-controls) + 8px);
+}
+
+#window-controls {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 6;
+  display: flex;
+  height: var(--top-row);
+}
+
+#window-controls[hidden] {
+  display: none;
+}
+
+#window-controls button {
+  display: grid;
+  place-items: center;
+  width: calc(var(--window-controls) / 3);
+  height: calc(var(--top-row) - 1px); /* the row's line under it stays */
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  color: var(--text);
+  cursor: default;
+}
+
+#window-controls button:hover {
+  background: var(--chip-hover);
+}
+
+#window-controls #window-close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+
+#window-maximize .when-maximized,
+body.window-maximized #window-maximize .when-normal {
+  display: none;
+}
+
+body.window-maximized #window-maximize .when-maximized {
+  display: block;
+}
+
+#frame-setting {
+  margin: 12px 0;
+}
+
+#frame-setting .setting-note {
+  margin: 4px 0 0;
+  font-size: 12px;
 }

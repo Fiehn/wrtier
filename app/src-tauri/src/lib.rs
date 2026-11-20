@@ -1141,12 +1141,28 @@ struct AppInfo {
     version: String,
     /// The app removes itself here (Windows: the portable exe has no system uninstaller).
     can_uninstall: bool,
+    /// The window has a frame to choose (not on Android, which fills the screen).
+    can_choose_frame: bool,
+    /// The system's own frame from the next start (Device state); what the window has now is
+    /// what it had when it opened.
+    native_frame: bool,
 }
 
-/// The installed App version, shown in Settings, and whether Settings offers "Uninstall…".
+/// The installed App version, shown in Settings, whether Settings offers "Uninstall…", and the
+/// window frame this Device chose.
 #[tauri::command]
-fn app_info(handle: AppHandle) -> AppInfo {
-    AppInfo { version: handle.package_info().version.to_string(), can_uninstall: cfg!(windows) }
+fn app_info(handle: AppHandle, state: State<AppState>) -> Result<AppInfo, String> {
+    let native_frame = with_app(&state, |app| Ok(app.device.native_frame))?;
+    Ok(AppInfo { version: handle.package_info().version.to_string(), can_uninstall: cfg!(windows), can_choose_frame: cfg!(desktop), native_frame })
+}
+
+/// The window's frame from the next start: the system's own, or the app's (Device state).
+#[tauri::command]
+fn set_window_frame(state: State<AppState>, native: bool) -> Result<(), String> {
+    with_app(&state, |app| {
+        app.device.native_frame = native;
+        app.device.save()
+    })
 }
 
 #[derive(Serialize)]
@@ -1430,11 +1446,18 @@ pub fn run() {
             // The window where it was last time (if that's still on a screen, the system keeps it so).
             // Desktop only: on Android the app always fills the screen.
             #[cfg(desktop)]
-            if let (Some(place), Some(window)) = (device.window, app.get_webview_window("main")) {
-                let _ = window.set_size(tauri::PhysicalSize::new(place.width, place.height));
-                let _ = window.set_position(tauri::PhysicalPosition::new(place.x, place.y));
-                if place.maximized {
-                    let _ = window.maximize();
+            if let Some(window) = app.get_webview_window("main") {
+                // The window opens without the system's frame (tauri.conf.json): the app draws its
+                // own title bar. A Device that chose the system's frame gets it back here.
+                if device.native_frame {
+                    let _ = window.set_decorations(true);
+                }
+                if let Some(place) = device.window {
+                    let _ = window.set_size(tauri::PhysicalSize::new(place.width, place.height));
+                    let _ = window.set_position(tauri::PhysicalPosition::new(place.x, place.y));
+                    if place.maximized {
+                        let _ = window.maximize();
+                    }
                 }
             }
             app.manage(AppState(Mutex::new(App { device, vault: None, recovery_dir: local.join("recovery") })));
@@ -1574,6 +1597,7 @@ pub fn run() {
             trash_library,
             forget_preview,
             app_info,
+            set_window_frame,
             uninstall_check,
             uninstall,
             check_update,

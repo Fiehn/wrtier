@@ -118,12 +118,7 @@ export class AppKeys {
   /** Everything that names a key says the current one. */
   showKeys() {
     $("open-switcher").title = withKey("Open a Work", "quickSwitcher");
-    $("find-open").title = withKey("Find and replace", "find");
     $("open-find-in-vault").title = withKey("Find some text in every Work", "findInVault");
-    $("view-mode").title = withKey("Switch between the Formatted and the Raw view", "toggleView");
-    $("preamble-open").title = withKey("The Work's Looks, Styles, Story elements and settings", "preamble");
-    $("mods-open").title = withKey("The Work's optional features, such as spellcheck", "mods");
-    $("panel-close").title = withKey("Hide the panel", "togglePanel");
     $("empty").textContent = emptyLine(keyLabel("quickSwitcher"));
     $("sidebar-toggle").title = withKey(this.deps.sidebarHidden() ? "Show the Works" : "Hide the Works", "toggleWorks");
     this.deps.tabs.keysChanged();

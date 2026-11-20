@@ -40,6 +40,7 @@ import { VaultBrowser, type Entry } from "./vaultbrowser";
 import { MovingWorks } from "./movingworks";
 import { AppKeys } from "./appkeys";
 import { SettingsDialog } from "./settingsdialog";
+import { WindowFrame } from "./windowframe";
 
 // ---- Messages and dialogs (ui.ts) ----
 
@@ -59,20 +60,16 @@ const findBar = new FindBar({
     await tabs.reveal(work, at, at); // also when it was open already
   }),
 });
-// The tab row's Find opens the bar, and closes it again if it's open there.
-$("find-open").addEventListener("click", () => (findBar.openInFront ? findBar.close() : findBar.open(false)));
 
 // ---- Tabs ----
 
 const tabs = new Tabs($("tabbar"), $("panes"), { notice: $("notice"), status: $("status"), moved: $("moved"), style: $("style-notice") }, {
   changed: () => {
     $("empty").hidden = tabs.active !== null;
-    // A library file is plain Typst: no Formatted view, and no pages of its own.
-    $("view-mode").hidden = !tabs.activeIsWork;
+    // A library file is plain Typst: no pages of its own (and no Formatted view, in the ⌄ menu).
     $("panel-toggle").hidden = !tabs.activeIsWork;
-    $("preamble-open").hidden = !tabs.activeIsWork;
-    $("mods-open").hidden = !tabs.activeIsWork;
-    $("find-open").hidden = tabs.active === null;
+    $("tab-menu").hidden = tabs.active === null;
+    tabs.bar.querySelector(".tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
     findBar.attach();
     showToolbar();
     preview.show(tabs.activeIsWork ? tabs.active : null);
@@ -725,7 +722,6 @@ function selectionMenu(id: string): MenuItem[] {
 }
 
 $("panel-toggle").addEventListener("click", () => panel.toggle());
-$("panel-close").addEventListener("click", () => panel.setShown(false));
 
 /** The tabs (and cursors) are remembered for next time, a moment after they change. */
 let rememberTimer: number | undefined;
@@ -1289,7 +1285,6 @@ new PanelSizes({
 function setFormatted(on: boolean) {
   tabs.setFormatted(on);
   readingPanel.setFormatted(on);
-  $("view-mode").textContent = on ? "Raw view" : "Formatted view";
   $("toolbar-view").textContent = on ? "Raw" : "Formatted";
   try {
     localStorage.setItem("view", on ? "formatted" : "raw");
@@ -1303,10 +1298,47 @@ try {
 } catch {
   setFormatted(true);
 }
-$("view-mode").addEventListener("click", () => setFormatted(!tabs.formatted));
-// The Work in front's Preamble and Mods (any Work's are also in its right-click menu in the Vault browser).
-$("preamble-open").addEventListener("click", () => act(() => preambleActions.editPreamble(tabs.active!)));
-$("mods-open").addEventListener("click", () => act(() => editMods(tabs.active!)));
+
+// ---- The tab row's ⌄: what can be done with the tab in front ----
+
+/** Its items: Find for any tab; the view, the Preamble and the Mods for a Work's (any Work's
+ *  Preamble and Mods are also in its right-click menu in the Vault browser); on the phone, the
+ *  Chapter list's sheet. The phone has no keys to show. */
+function tabMenuItems(): MenuItem[] {
+  const named = (text: string, command: CommandId) => (phone.active ? text : withKey(text, command));
+  const items: MenuItem[] = [];
+  if (phone.chaptersShown) items.push({ label: "Chapters", run: () => phone.openChapters() });
+  if (tabs.active !== null) items.push({ label: named("Find and replace", "find"), run: () => findBar.open(false) });
+  if (tabs.activeIsWork) {
+    items.push(
+      { label: named(tabs.formatted ? "Raw view" : "Formatted view", "toggleView"), run: () => setFormatted(!tabs.formatted) },
+      { label: named("Preamble…", "preamble"), run: () => act(() => preambleActions.editPreamble(tabs.active!)) },
+      { label: named("Mods…", "mods"), run: () => act(() => editMods(tabs.active!)) },
+    );
+  }
+  return items;
+}
+
+// A press outside the menu closes it before the click arrives: pressing ⌄ again only closes it.
+let tabMenuWasOpen = false;
+window.addEventListener("pointerdown", (e) => {
+  if ($("tab-menu").contains(e.target as Node)) tabMenuWasOpen = document.getElementById("menu") !== null;
+}, true);
+$("tab-menu").addEventListener("click", () => {
+  if (tabMenuWasOpen) {
+    tabMenuWasOpen = false;
+    return;
+  }
+  const box = $("tab-menu").getBoundingClientRect();
+  showMenu(box.left, box.bottom + 2, tabMenuItems());
+});
+
+// Many tabs scroll sideways, with the mouse wheel too.
+$("tabbar").addEventListener("wheel", (e) => {
+  if (e.deltaY === 0 || e.deltaX !== 0) return;
+  e.preventDefault();
+  $("tabbar").scrollLeft += e.deltaY;
+}, { passive: false });
 
 // ---- The phone's toolbar under the text: each button does what its key does ----
 
@@ -1370,10 +1402,26 @@ onUpdatesAsked(() => updates.open());
 $("check-updates").addEventListener("click", () => act(() => updates.open()));
 const uninstaller = new UninstallDialog(saveEverything);
 $("open-uninstall").addEventListener("click", () => act(() => uninstaller.open()));
-invoke<{ version: string; canUninstall: boolean }>("app_info").then(
+
+// ---- The window's frame and title (windowframe.ts) ----
+
+const frame = WindowFrame.start();
+
+/** The window's title follows the tab in front and the open Vault (their names as shown). */
+function showTitle() {
+  const vault = browser.name;
+  void frame.then((f) => f.title(tabs.activeName, vault));
+}
+const titleWatch = new MutationObserver(showTitle);
+titleWatch.observe($("tabbar"), { subtree: true, childList: true, characterData: true, attributeFilter: ["class"] });
+titleWatch.observe($("vault-name"), { subtree: true, childList: true, characterData: true });
+showTitle();
+
+invoke<{ version: string; canUninstall: boolean; canChooseFrame: boolean; nativeFrame: boolean }>("app_info").then(
   (info) => {
     $("app-version").textContent = `Wrtier ${info.version}`;
     $("open-uninstall").hidden = !info.canUninstall;
+    void frame.then((f) => f.showSetting(info.canChooseFrame, info.nativeFrame));
   },
   () => {},
 );

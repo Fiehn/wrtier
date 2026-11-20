@@ -4,7 +4,7 @@
 // side panel's tabs, each a whole screen. Any narrow window gets it, so
 // it can be tried at phone width on desktop and in the tests.
 //
-// The Chapter list (a Mod) opens as a sheet from a button above the text. The bar hides while
+// The Chapter list (a Mod) opens as a sheet from the tab row's ⌄ menu. The bar hides while
 // the keyboard is open: on Android, MainActivity.kt sets `keyboard-open` on <html>.
 
 import type { PanelTab, SidePanel } from "./sidepanel";
@@ -25,21 +25,26 @@ export class PhoneLayout {
   private readonly chapters = $<HTMLDetailsElement>("chapters");
   private readonly chaptersHome = this.chapters.parentElement!;
   private readonly sheet = $<HTMLDialogElement>("chapters-sheet");
-  private readonly sheetButton = $<HTMLButtonElement>("chapters-open");
   /** The side panel as it was on the wide layout, to go back to. */
   private wide: { shown: boolean; tab: PanelTab } | null = null;
 
   constructor(private readonly panel: SidePanel) {
     for (const button of this.buttons) button.addEventListener("click", () => this.show(button.dataset.screen as Screen));
-    this.sheetButton.addEventListener("click", () => this.sheet.showModal());
     // A Chapter tapped in the sheet goes there (chapterlist.ts), so the sheet closes.
     this.sheet.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest("#chapters-list li")) this.sheet.close();
     });
-    // The button shows only while the Work in front has the Chapter list here.
-    new MutationObserver(() => this.updateSheetButton()).observe(this.chapters, { attributes: true, attributeFilter: ["hidden"] });
     this.query.addEventListener("change", () => this.apply());
     this.apply();
+  }
+
+  /** The ⌄ menu offers the Chapter list's sheet: on the phone, while the Work in front has the Mod here. */
+  get chaptersShown(): boolean {
+    return this.active && !this.chapters.hidden;
+  }
+
+  openChapters() {
+    this.sheet.showModal();
   }
 
   /** The phone layout is on. */
@@ -76,7 +81,6 @@ export class PhoneLayout {
         this.wide = null;
       }
     }
-    this.updateSheetButton();
   }
 
   private render() {
@@ -88,9 +92,5 @@ export class PhoneLayout {
     // The panel's tabs are screens here: the pages compile, and the History loads, only while showing.
     if (this.screen === "works" || this.screen === "write" || this.screen === "read") this.panel.setShown(false);
     else this.panel.setTab(this.screen);
-  }
-
-  private updateSheetButton() {
-    this.sheetButton.hidden = !this.active || this.chapters.hidden;
   }
 }

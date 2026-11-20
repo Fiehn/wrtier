@@ -1,4 +1,4 @@
-//! Device state: what this Device remembers only for itself and never syncs. It lives in the
+//! Device state: what this Device keeps only for itself and never syncs. It lives in the
 //! app's local data folder (not the roaming one on Windows, which could carry the Device ID to
 //! another computer), never in the Vault.
 
@@ -20,6 +20,9 @@ pub struct DeviceState {
     /// Syncthing's address and API key, if set by hand (on Android, or when its settings file
     /// isn't in a usual place). Otherwise the app reads them from Syncthing's settings file.
     pub syncthing: Option<crate::syncthing::Connection>,
+    /// The window has the system's own frame (title bar and borders) instead of the app's. Read
+    /// when the window opens, so a change shows from the next start. Desktop only.
+    pub native_frame: bool,
 }
 
 /// The tabs open in a Vault, which one is in front, and where the cursor was in each Work.
@@ -69,6 +72,8 @@ struct Stored {
     window: Option<WindowPlace>,
     #[serde(default)]
     syncthing: Option<crate::syncthing::Connection>,
+    #[serde(default)]
+    native_frame: bool,
 }
 
 impl DeviceState {
@@ -82,14 +87,14 @@ impl DeviceState {
                 .and_then(|s| Ok((s.device_id.parse::<DeviceId>()?, s)));
             match parsed {
                 Ok((device, s)) => {
-                    return Ok(DeviceState { dir: dir.to_path_buf(), device, last_vault: s.last_vault, layouts: s.layouts, window: s.window, syncthing: s.syncthing });
+                    return Ok(DeviceState { dir: dir.to_path_buf(), device, last_vault: s.last_vault, layouts: s.layouts, window: s.window, syncthing: s.syncthing, native_frame: s.native_frame });
                 }
                 Err(_) => {
                     let _ = std::fs::rename(&path, dir.join(format!("{FILE}.damaged")));
                 }
             }
         }
-        let state = DeviceState { dir: dir.to_path_buf(), device: new_device_id()?, last_vault: None, layouts: HashMap::new(), window: None, syncthing: None };
+        let state = DeviceState { dir: dir.to_path_buf(), device: new_device_id()?, last_vault: None, layouts: HashMap::new(), window: None, syncthing: None, native_frame: false };
         state.save()?;
         Ok(state)
     }
@@ -103,6 +108,7 @@ impl DeviceState {
             layouts: self.layouts.clone(),
             window: self.window,
             syncthing: self.syncthing.clone(),
+            native_frame: self.native_frame,
         };
         let json = serde_json::to_string_pretty(&stored).map_err(|e| e.to_string())?;
         let (path, partial) = (self.dir.join(FILE), self.dir.join(format!("{FILE}.writing")));
@@ -156,13 +162,16 @@ mod tests {
         std::fs::write(dir.path().join(FILE), r#"{ "device_id": "0000002a", "last_vault": null }"#).unwrap();
         let mut state = DeviceState::load_or_create(dir.path()).unwrap();
         assert_eq!(state.device, DeviceId(42));
+        assert!(!state.native_frame, "the app's own frame unless chosen otherwise");
         let layout = Layout { tabs: vec!["Rain".into()], active: Some("Rain".into()), cursors: [("Rain".to_string(), 12)].into(), reading: Some(ReadingPlace { work: "Ash".into(), identity: Some("ab12".into()), top: 40 }) };
         state.layouts.insert("C:/Writing".into(), layout.clone());
         state.window = Some(WindowPlace { x: 10, y: 20, width: 1200, height: 800, maximized: false });
+        state.native_frame = true;
         state.save().unwrap();
         let again = DeviceState::load_or_create(dir.path()).unwrap();
         assert_eq!(again.layouts["C:/Writing"], layout);
         assert_eq!(again.window, state.window);
+        assert!(again.native_frame);
     }
 
     #[test]

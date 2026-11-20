@@ -808,6 +808,11 @@ export class Tabs {
     return this.front?.id ?? null;
   }
 
+  /** The tab in front's name, as its tab shows it. */
+  get activeName(): string | null {
+    return this.front?.name ?? null;
+  }
+
   has(id: string) {
     return this.open.some((tab) => tab.id === id);
   }

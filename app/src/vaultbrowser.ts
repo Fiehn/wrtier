@@ -103,6 +103,11 @@ export class VaultBrowser {
   vaultMods: ModsState | null = null;
   private root = "";
   private openFolders = new Set<string>();
+
+  /** The open Vault's name (its folder's), as the Vault bar shows it; null before one is open. */
+  get name(): string | null {
+    return this.root ? vaultName(this.root) : null;
+  }
   /** The Works selected for a new Collection, in the order they were picked. */
   private picked: string[] = [];
 
