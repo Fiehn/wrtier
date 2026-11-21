@@ -1,0 +1,51 @@
+diff --git a/src/linting/lint_group/mod.rs b/src/linting/lint_group/mod.rs
+index 9268186..f4e06df 100644
+--- a/src/linting/lint_group/mod.rs
++++ b/src/linting/lint_group/mod.rs
+@@ -416,8 +416,8 @@ impl LintGroup {
+             linters: BTreeMap::new(),
+             chunk_expr_linters: BTreeMap::new(),
+             sentence_expr_linters: BTreeMap::new(),
+-            chunk_expr_cache: LruCache::new(NonZero::new(1000).unwrap()),
+-            sentence_expr_cache: LruCache::new(NonZero::new(1000).unwrap()),
++            chunk_expr_cache: LruCache::new(NonZero::new(64).unwrap()), // WRTIER PATCH: was 1000
++            sentence_expr_cache: LruCache::new(NonZero::new(64).unwrap()), // WRTIER PATCH: was 1000
+             hasher_builder: RandomState::default(),
+             clashing_linter_names: None,
+         }
+diff --git a/src/spell/fst_dictionary.rs b/src/spell/fst_dictionary.rs
+index f28df67..6e061e3 100644
+--- a/src/spell/fst_dictionary.rs
++++ b/src/spell/fst_dictionary.rs
+@@ -25,8 +25,30 @@ pub struct FstDictionary {
+ const EXPECTED_DISTANCE: u8 = 3;
+ const TRANSPOSITION_COST_ONE: bool = true;
+ 
++// WRTIER PATCH: share the curated MutableDictionary (already a static) instead of cloning it
++// and building a second copy of every entry. Only the FST index is new.
+ static DICT: LazyLock<Arc<FstDictionary>> =
+-    LazyLock::new(|| Arc::new((*MutableDictionary::curated()).clone().into()));
++    LazyLock::new(|| Arc::new(FstDictionary::sharing(MutableDictionary::curated())));
++
++impl FstDictionary {
++    /// An FST over the words of `mutable_dict`, which is kept and shared, not copied.
++    fn sharing(mutable_dict: Arc<MutableDictionary>) -> Self {
++        let word_map = {
++            let mut words: Vec<&[char]> = mutable_dict.words_iter().collect();
++            words.sort_unstable();
++            words.dedup();
++            let mut builder = fst::MapBuilder::memory();
++            for word_chars in words {
++                let word = word_chars.iter().collect::<String>();
++                builder
++                    .insert(word, CanonicalWordId::from_word_chars(word_chars).into())
++                    .expect("Insertion not in lexicographical order!");
++            }
++            FstMap::new(builder.into_inner().unwrap()).expect("Unable to build FST map.")
++        };
++        FstDictionary { mutable_dict, word_map }
++    }
++}
+ 
+ thread_local! {
+     // Builders are computationally expensive and do not depend on the word, so we store a

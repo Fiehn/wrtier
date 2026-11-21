@@ -1,8 +1,23 @@
 # Spike: Harper for grammar, word types and spelling
 
-Throwaway code to see how `harper-core` 3.2.0 behaves before planning spellbook + Harper.
+Throwaway code to see how `harper-core` 3.2.0 behaves before planning spellbook + Harper
+([ADR 0023](../../docs/adr/0023-grammar-and-word-types-come-from-a-patched-harper.md)).
+
+Harper is patched the way the app will patch it: `patches/harper-core+3.2.0.patch`, applied by
+[`patch-crate`](https://github.com/mokeyish/cargo-patch-crate) (`cargo install patch-crate`).
+Run `cargo patch-crate` once before building, again after `cargo clean`, and with `--force` after
+changing the patch. Without it, Cargo stops with "patch location … does not contain packages
+matching `harper-core`". To measure the published crate, comment out `[package.metadata.patch]` and
+`[patch.crates-io]` in `Cargo.toml`.
+
+`lean-fst-unpatched.txt` holds the published crate's lints per rule on the novel, with SpellCheck on.
+After an upgrade, `lean <novel> fst` must write an identical `lean-fst.txt`.
 
 - `cargo run --release -- <novel.txt>`: everything (`results.txt`, with memory counted).
+- `cargo run --release --bin lean -- <novel.txt> fst`: the novel a paragraph at a time, lints per rule
+  to `lean-fst.txt`, and memory as it goes (`NO_SPELL=1` turns SpellCheck off).
+- `cargo run --release --bin dictsize`: where the dictionary's memory goes.
+- `cargo run --release --bin automaton`: the repro for SpellCheck's per-thread distance-4 builder.
 - `cargo run --release --no-default-features --features thesaurus -- <novel.txt>`: the same timings
   without the counting allocator (`results-nocount.txt`). The times below come from this run.
 - `cargo run --release --bin memory -- <novel.txt> <harper|spellbook>`: memory in a fresh
@@ -64,9 +79,9 @@ Total in the paragraph-at-a-time run: **308 MB** heap above start.
 
 ## Where the memory goes, and what fixes it
 
-`vendor/harper-core` is harper-core 3.2.0 with two changes, each marked `SPIKE PATCH`. The
-`[patch.crates-io]` entry in `Cargo.toml` uses it; remove that entry to measure the published
-crate. The vendored folder also includes the 3 MB dictionary file and model files.
+`patches/harper-core+3.2.0.patch` makes two changes, each marked `WRTIER PATCH` in the code. Both were
+measured from a full copy of the crate in `vendor/` first. That copy is gone now; the same changes
+applied from the patch file give the same figures and the same lints.
 
 | Cost | Size | Cause | Fix |
 |---|---|---|---|

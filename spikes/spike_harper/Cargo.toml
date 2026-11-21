@@ -19,7 +19,11 @@ lto = true
 opt-level = 3
 strip = true
 
-# The one-change copy of harper-core 3.2.0 in vendor/ (see the SPIKE PATCH in fst_dictionary.rs).
-# Remove this to measure the published crate.
+# harper-core with patches/harper-core+3.2.0.patch applied (ADR 0023). `cargo patch-crate` writes it
+# to target/patch/ and must run before building. Comment out both sections to measure the
+# published crate.
+[package.metadata.patch]
+crates = ["harper-core"]
+
 [patch.crates-io]
-harper-core = { path = "vendor/harper-core" }
+harper-core = { path = "./target/patch/harper-core-3.2.0" }

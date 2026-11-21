@@ -48,6 +48,7 @@ Someone=2
 SomewhatSomething=2
 SoonToBe=1
 Spaces=5
+SpellCheck=1844
 SplitWords=21
 ThatThan=1
 TheirToTheyre=13
