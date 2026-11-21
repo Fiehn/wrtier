@@ -1,0 +1,20 @@
+[package]
+name = "spike_harper"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+harper-core = { version = "=3.2.0", default-features = false, features = ["concurrent"] }
+spellbook = "=0.4.2"   # the one the app uses, to compare against
+
+[features]
+default = ["count-memory", "thesaurus"]
+count-memory = []
+thesaurus = ["harper-core/thesaurus"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true

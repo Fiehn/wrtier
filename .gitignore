@@ -3,6 +3,7 @@
 # Added by cargo
 
 /target
+spikes/*/target/
 # Written by `cargo run --example sample_db`
 /sample.db
 /sample.sync-conflict.db

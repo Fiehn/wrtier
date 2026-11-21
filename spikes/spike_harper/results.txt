@@ -1,0 +1,394 @@
+
+## 1. Start-up
+
+curated dictionary: 457.7 ms , heap +124.1 MB
+LintGroup (British): 139.8 ms , heap +11.5 MB
+rules in the curated group: 971
+rules enabled by default: 959
+first Document (loads tagger + chunker): 13.1 ms , heap +4.6 MB
+first lint: 2.5 ms
+heap after start-up: 140.3 MB (peak 160.0 MB)
+Dialect::try_from_bcp47("en-GB") = Some(British)
+Dialect::try_from_bcp47("en-US") = Some(American)
+
+## 2. British vs American
+
+  > The colour of the organisation's flag was grey.
+      GB: (nothing)
+      US: [SpellCheck] “colour” (4..10): Did you mean to spell `colour` this way?  → “color”, → “cloud”, → “collar”
+          [SpellCheck] “organisation's” (18..32): Did you mean to spell `organisation's` this way?  → “organization's”, → “organizations”
+          [SpellCheck] “grey” (42..46): Did you mean to spell `grey` this way?  → “gray”, → “grew”, → “grep”
+  > The color of the organization's flag was gray.
+      GB: [SpellCheck] “color” (4..9): Did you mean to spell `color` this way?  → “colour”, → “colon”, → “clog”
+          [SpellCheck] “gray” (41..45): Did you mean to spell `gray` this way?  → “grey”, → “gay”, → “grab”
+      US: (nothing)
+  > She will realise it soon, and he realized it yesterday.
+      GB: (nothing)
+      US: [SpellCheck] “realise” (9..16): Did you mean to spell `realise` this way?  → “realize”, → “realism”, → “realist”
+  > I need a licence to drive, so I must license the car.
+      GB: (nothing)
+      US: [SpellCheck] “licence” (9..16): Did you mean to spell `licence` this way?  → “license”, → “licensee”, → “licensed”
+  > I need a license to drive.
+      GB: (nothing)
+      US: (nothing)
+  > You should practise the piano; practice makes perfect.
+      GB: (nothing)
+      US: [SpellCheck] “practise” (11..19): Did you mean to spell `practise` this way?  → “practice”, → “praise”, → “precise”
+  > He was travelling to the theatre with his neighbour.
+      GB: (nothing)
+      US: [SpellCheck] “travelling” (7..17): Did you mean to spell `travelling` this way?  → “traveling”, → “travailing”, → “travelings”
+          [SpellCheck] “theatre” (25..32): Did you mean to spell `theatre` this way?  → “theater”, → “they're”, → “there”
+          [SpellCheck] “neighbour” (42..51): Did you mean to spell `neighbour` this way?  → “neighbor”, → “neighbors”
+  > He was traveling to the theater with his neighbor.
+      GB: [SpellCheck] “traveling” (7..16): Did you mean to spell `traveling` this way?  → “travelling”, → “travelings”, → “graveling”
+          [SpellCheck] “theater” (24..31): Did you mean to spell `theater` this way?  → “theatre”, → “theatres”, → “threader”
+          [SpellCheck] “neighbor” (41..49): Did you mean to spell `neighbor` this way?  → “neighbour”, → “neighbours”
+      US: (nothing)
+  > We analysed the programme and the catalogue.
+      GB: (nothing)
+      US: [SpellCheck] “analysed” (3..11): Did you mean to spell `analysed` this way?  → “analyzed”, → “analysis”, → “analyst”
+          [SpellCheck] “programme” (16..25): Did you mean to spell `programme` this way?  → “programmed”, → “programmer”, → “programmes”
+          [SpellCheck] “catalogue” (34..43): Did you mean to spell `catalogue` this way?  → “catalog's”, → “catalog”, → “cataloged”
+  > I'll ring you from the lift in the flat.
+      GB: (nothing)
+      US: (nothing)
+  > She put the tyres in the boot of the car.
+      GB: (nothing)
+      US: [SpellCheck] “tyres” (12..17): Did you mean to spell `tyres` this way?  → “tares”, → “tires”, → “tykes”
+
+## 3. Added and Allowed words
+
+without extra words:
+  > Kvothe walked to Imre with Denna. Kvothe's lute was old. KVOTHE shouted.
+      [SpellCheck] “Kvothe” (0..6): Did you mean to spell `Kvothe` this way?  → “Clothe”, → “Soothe”, → “Vote”
+      [SpellCheck] “Imre” (17..21): Did you mean to spell `Imre` this way?  → “Ire”, → “I've”, → “Ice”
+      [SpellCheck] “Denna” (27..32): Did you mean to spell `Denna` this way?  → “Deana”, → “Deanna”, → “Deena”
+      [SpellCheck] “Kvothe's” (34..42): Did you mean `Vote's`?  → “Vote's”
+      [SpellCheck] “KVOTHE” (57..63): Did you mean to spell `KVOTHE` this way?  → “Clothe”, → “Soothe”, → “Vote”
+merged dictionary built in 0.0 ms, new LintGroup in 10.1 ms
+with Kvothe, Imre, Denna added (default metadata):
+  > Kvothe walked to Imre with Denna. Kvothe's lute was old. KVOTHE shouted.
+      [SpellCheck] “Kvothe's” (34..42): Did you mean to spell `Kvothe's` this way?  → “Kvothe”, → “Vote's”
+      [SpellCheck] “KVOTHE” (57..63): Did you mean to spell `KVOTHE` this way?  → “Kvothe”, → “Clothe”, → “Soothe”
+lower-case use of an added name:
+  > the kvothe was here.
+      [SpellCheck] “kvothe” (4..10): Did you mean to spell `kvothe` this way?  → “Kvothe”, → “clothe”, → “soothe”
+1,000 added words: dictionary + LintGroup rebuilt in 11.9 ms
+group has the names, Document parsed with the curated dictionary only:
+  > Kvothe walked to Imre with Denna. Kvothe's lute was old. KVOTHE shouted.
+      [SpellCheck] “Kvothe” (0..6): Did you mean to spell `Kvothe` this way?  → “Kvothe”, → “Clothe”, → “Soothe”
+      [SpellCheck] “Imre” (17..21): Did you mean to spell `Imre` this way?  → “Imre”, → “Ire”, → “I've”
+      [SpellCheck] “Denna” (27..32): Did you mean to spell `Denna` this way?  → “Denna”, → “Deana”, → “Deanna”
+      [SpellCheck] “Kvothe's” (34..42): Did you mean to spell `Kvothe's` this way?  → “Kvothe”, → “Vote's”
+      [SpellCheck] “KVOTHE” (57..63): Did you mean to spell `KVOTHE` this way?  → “Kvothe”, → “Clothe”, → “Soothe”
+spelling suggestions (British):
+      recieve: [SpellCheck] “recieve” (2..9): Did you mean to spell `recieve` this way?  → “receive”, → “relieve”, → “recipe” (2.5 ms)
+      teh: [SpellCheck] “teh” (2..5): Did you mean to spell `teh` this way?  → “the”, → “tea”, → “tech” | [The] “teh” (2..5): Did you mean the definite article?  → “the” (2.1 ms)
+      colur: [SpellCheck] “colur” (2..7): Did you mean to spell `colur` this way?  → “colour”, → “cloud”, → “club” (2.0 ms)
+      realy: [SpellCheck] “realy” (2..7): Did you mean to spell `realy` this way?  → “really”, → “ready”, → “real” (2.3 ms)
+      definately: [SpellCheck] “definately” (2..12): Did you mean to spell `definately` this way?  → “definitely”, → “defiantly”, → “delicately” (2.8 ms)
+      thier: [SpellCheck] “thier” (2..7): Did you mean to spell `thier` this way?  → “their”, → “thief”, → “trier” (2.3 ms)
+
+## 4. Word types
+
+dictionary: curated
+  I/PRON* will/AUX record/VERB a/DET* record/NOUN*
+  They/PRON* saw/VERB the/DET saw/NOUN on/ADP the/DET* table/NOUN*
+  Time/NOUN* flies/NOUN* like/ADP an/DET arrow/PROPN* fruit/NOUN* flies/NOUN* like/ADP a/DET* banana/NOUN*
+  Kvothe's/UNKNOWN colour/NOUN* faded/VERB as/ADP the/DET fast/ADJ ships/NOUN* sailed/VERB fast/ADJ
+  She/PRON* can/AUX can/AUX fish/VERB in/ADP a/DET can/AUX
+  Running/VERB is/AUX what/PRON* the/DET running/VERB man/NOUN* does/AUX when/ADV running/VERB out/ADP
+dictionary: with names
+  I/PRON* will/AUX record/VERB a/DET* record/NOUN*
+  They/PRON* saw/VERB the/DET saw/NOUN on/ADP the/DET* table/NOUN*
+  Time/NOUN* flies/NOUN* like/ADP an/DET arrow/PROPN* fruit/NOUN* flies/NOUN* like/ADP a/DET* banana/NOUN*
+  Kvothe's/UNKNOWN colour/NOUN* faded/VERB as/ADP the/DET fast/ADJ ships/NOUN* sailed/VERB fast/ADJ
+  She/PRON* can/AUX can/AUX fish/VERB in/ADP a/DET can/AUX
+  Running/VERB is/AUX what/PRON* the/DET running/VERB man/NOUN* does/AUX when/ADV running/VERB out/ADP
+  (* = in a noun phrase, from the chunker)
+
+## 5. Offsets
+
+  [ItsContraction] chars 8..11 = “Its”; UTF-16 8..11 = “Its”; raw char span read as UTF-16 = “Its”
+  [SpellCheck] chars 35..38 = “teh”; UTF-16 36..39 = “teh”; raw char span read as UTF-16 = “ te”
+  [SpellCheck] chars 44..51 = “Ünïcode”; UTF-16 45..52 = “Ünïcode”; raw char span read as UTF-16 = “ Ünïcod”
+  [SpellCheck] chars 52..55 = “teh”; UTF-16 53..56 = “teh”; raw char span read as UTF-16 = “ te”
+  [The] chars 35..38 = “teh”; UTF-16 36..39 = “teh”; raw char span read as UTF-16 = “ te”
+  [The] chars 52..55 = “teh”; UTF-16 53..56 = “teh”; raw char span read as UTF-16 = “ te”
+
+## 6. Grammar: typical mistakes (British)
+
+  > She bought a apple and an banana.
+      [AnA] “a” (11..12): Incorrect indefinite article.  → “an”
+      [AnA] “an” (23..25): Incorrect indefinite article.  → “a”
+  > Their going to the market over there.
+      [TheirToTheyre] “Their” (0..5): Did you mean `they're`?  → “They're”, → “They're ”
+  > I could of done it better.
+      [ModalOf] “could of” (2..10): Use `have` rather than `of` here.  → “could have”
+  > The dog wagged it's tail.
+      [ItsPossessive] “it's” (15..19): Use the possessive pronoun `its` (without an apostrophe) to show ownership. The word `it's` (with an apostrophe) is a contraction of 'it is' or 'it has' and should not be used to indicate possession.  → “its”
+  > Its going to rain.
+      (nothing)
+  > He is taller then his brother.
+      [ThenThan] “then” (13..17): Did you mean `than`?  → “than”
+  > I don't want to loose the game.
+      [ToLoseTooLoose] “to loose” (13..21): For `not to win`, use `to lose`. For `not tight enough`, use `too loose`.  → “to lose”, → “too loose”
+  > The weather will effect our plans.
+      [NounVerbConfusion] “effect” (17..23): `effect` is a noun, the verb should be `affect`.  → “affect”
+  > Your going to love this.
+      (nothing)
+  > She walked to the the door.
+      [RepeatedWords] “the the” (14..21): Did you mean to repeat this word?  → “the”
+  > He go to school every day.
+      [PronounVerbAgreement] “go” (3..5): The form of the verb must agree in grammatical number with the pronoun.  → “goes”
+  > The children was playing outside.
+      (nothing)
+  > Me and him went to the shop.
+      (nothing)
+  > I seen him yesterday.
+      (nothing)
+  > There is many reasons for this.
+      (nothing)
+  > She don't like it.
+      [PronounVerbAgreement] “don't” (4..9): The form of the verb must agree in grammatical number with the pronoun.  → “doesn't”
+  > He should have went home.
+      [SimplePastToPastParticiple] “went” (15..19): Use the past participle `gone` instead of `went` when using compound tenses or passive voice.  → “gone”
+  > Who's book is this?
+      (nothing)
+  > I am going to the shop , and then home.
+      [CommaFixes] “ ” (22..23): Don't use a space before a comma.  remove
+  > This is a sentence.This is another.
+      (nothing)
+  > irregardless of the outcome, we tried.
+      [SpellCheck] “irregardless” (0..12): Did you mean `regardless`?  → “regardless”
+  > We need to discuss about the plan.
+      [Discuss] “discuss about” (11..24): `About` is redundant  → “discuss”
+  > Between you and I, it's fine.
+      (nothing)
+  > Less people came than expected.
+      (nothing)
+  > He did it on accident.
+      [ByAccident] “on” (10..12): Did you mean `by accident`?  → “by”
+  > Alot of people agree.
+      [OpenCompounds] “Alot” (0..4): `a lot` should be written as two words.  → “A lot”
+      [SpellCheck] “Alot” (0..4): Did you mean to spell `Alot` this way?  → “Allot”, → “Aloft”, → “Alt”
+  > I should of known.
+      [ModalOf] “should of” (2..11): Use `have` rather than `of` here.  → “should have”
+  > She lead the team last year.
+      [PronounVerbAgreement] “lead” (4..8): The form of the verb must agree in grammatical number with the pronoun.  → “leads”
+  > The principle of the school spoke.
+      (nothing)
+
+## 7. Grammar: clean fiction that should pass (British)
+
+  > “Go!” she said. “Now.”
+      (nothing)
+  > He paused — then laughed.
+      (nothing)
+  > Not now. Not ever.
+      (nothing)
+  > ‘I shan’t,’ said Mrs. Holm, ‘and neither will you.’
+      [SpellCheck] “Holm” (22..26): Did you mean to spell `Holm` this way?  → “Helm”, → “Hold”, → “Hole”
+  > The rain fell. And fell. And fell.
+      (nothing)
+  > Whatever. Fine.
+      (nothing)
+  > She had had enough of that.
+      [RepeatedWords] “had had” (4..11): Did you mean to repeat this word?  → “had”
+  > Mr. and Mrs. Dursley were proud to say that they were perfectly normal.
+      [SentenceCapitalization] “and” (4..7): This sentence does not start with a capital letter  → “And”
+      [SpellCheck] “Dursley” (13..20): Did you mean to spell `Dursley` this way?  → “Dorsey”, → “Dudley”, → “Parsley”
+  > It was the best of times, it was the worst of times.
+      (nothing)
+  > Yes, sir, I'll fetch the lorry and meet you at half nine.
+      (nothing)
+  > Ain't nobody got time for that, he muttered.
+      (nothing)
+  > Hmm. Well, I s'pose so.
+      [SpellCheck] “s'pose” (13..19): Did you mean to spell `s'pose` this way?  → “spoke”, → “spore”, → “spouse”
+  > The old man the boat.
+      (nothing)
+  > Buffalo buffalo Buffalo buffalo.
+      (nothing)
+  > They whispered, “Whither goest thou?”
+      [SpellCheck] “goest” (25..30): Did you mean to spell `goest` this way?  → “goes”, → “guest”, → “go's”
+  > He ran, he fell, he rose again.
+      (nothing)
+
+## 8. A whole novel
+
+2509 paragraphs, 127360 words, 719877 chars
+Document::new (tokenise + tag + chunk): 8325 ms, heap +53.3 MB (peak +70.3 MB)
+lint whole novel, first time: 31188 ms, heap +153.1 MB (peak +153.1 MB)
+lint whole novel again (chunk cache warm): 40495.1 ms
+throughput: parse 15k words/s, first lint 4k words/s
+lint whole novel, SpellCheck only: 3416.7 ms
+lint whole novel, everything but SpellCheck (cold cache): 27687.2 ms
+one paragraph (16 words): parse + lint 5.0 ms
+every paragraph as its own Document: 27573.8 ms (3316 lints)
+first Document on a new thread: 7.2 ms
+
+lints in the novel: 3320 (26.1 per 1,000 words)
+   1853  SpellCheck
+    551  LongSentences
+    442  Dashes
+    105  SentenceCapitalization
+     59  MissingPreposition
+     55  MassNouns
+     54  UnclosedQuotes
+     21  SplitWords
+     21  OxfordComma
+     14  Excellent
+     13  TheirToTheyre
+     10  PronounVerbAgreement
+      9  DisjointPrefixes
+      6  MissingTo
+      6  DiscourseMarkers
+      6  CompoundNouns
+      5  SimplePastToPastParticiple
+      5  ItsContraction
+      5  AnA
+      4  WouldNeverHave
+      4  WayTooAdjective
+      4  PronounContraction
+      3  WhomSubjectOfVerb
+      3  ToTwoToo
+      3  RepeatedWords
+      3  QuiteQuiet
+      3  PronounInflectionBe
+      3  FindOut
+      2  VerbToAdjective
+      2  ThisTypeOfThing
+
+samples (up to 4 per rule, top 25 rules):
+  [SpellCheck] “GEORGE” in “…[Illustration:  GEORGE ALLEN PUBLISHER  156 CHARING …” → “Gorge”, → “George”, → “Genre”
+  [SpellCheck] “ALLEN” in “…[Illustration:  GEORGE ALLEN PUBLISHER  156 CHARING CROSS …” → “Alien”, → “Alley”, → “Allen”
+  [SpellCheck] “CHARING” in “…  GEORGE ALLEN PUBLISHER  156 CHARING CROSS ROAD LONDON  RUSKIN HOU…” → “Caring”, → “Chafing”, → “Chairing”
+  [SpellCheck] “LONDON” in “…ISHER  156 CHARING CROSS ROAD LONDON  RUSKIN HOUSE ]  [Illustratio…” → “London”, → “Linden”, → “Loon”
+  [LongSentences] “To some the delightful freshness and humour of Northanger Abbey, its completeness, finish, and entrain, obscure the undoubted critical facts that its scale is small, and its scheme, after all, that of burlesque or parody, a kind in which the first rank is reached with difficulty.” in “…most every one of the novels. To some the delightful freshness and humour of Northanger Abbey, its completeness, finish, and entrain, obscure the undoubted critical facts that its scale is small, and its scheme, after all, that of burlesque or parody, a kind in which the first rank is reached with difficulty. Persuasion, relatively faint …” 
+  [LongSentences] “The catastrophe of Mansfield Park is admittedly theatrical, the hero and heroine are insipid, and the author has almost wickedly destroyed all romantic interest by expressly admitting that Edmund only took Fanny because Mary shocked him, and that Fanny might very likely have taken Crawford if he had been a little more assiduous; yet the matchless rehearsal-scenes and the characters of Mrs.” in “…quisite delicacy and keeping. The catastrophe of Mansfield Park is admittedly theatrical, the hero and heroine are insipid, and the author has almost wickedly destroyed all romantic interest by expressly admitting that Edmund only took Fanny because Mary shocked him, and that Fanny might very likely have taken Crawford if he had been a little more assiduous; yet the matchless rehearsal-scenes and the characters of Mrs. Norris and others have secure…” 
+  [LongSentences] “I suppose, however, that the majority of at least competent votes would, all things considered, be divided between Emma and the present book; and perhaps the vulgar verdict (if indeed a fondness for Miss Austen be not of itself a patent of exemption from any possible charge of vulgarity) would go for Emma.” in “…; but it does not want them.  I suppose, however, that the majority of at least competent votes would, all things considered, be divided between Emma and the present book; and perhaps the vulgar verdict (if indeed a fondness for Miss Austen be not of itself a patent of exemption from any possible charge of vulgarity) would go for Emma. It is the larger, the more va…” 
+  [LongSentences] “It is the larger, the more varied, the more popular; the author had by the time of its composition seen rather more of the world, and had improved her general, though not her most peculiar and characteristic dialogue; such figures as Miss Bates, as the Eltons, cannot but unite the suffrages of everybody.” in “…vulgarity) would go for Emma. It is the larger, the more varied, the more popular; the author had by the time of its composition seen rather more of the world, and had improved her general, though not her most peculiar and characteristic dialogue; such figures as Miss Bates, as the Eltons, cannot but unite the suffrages of everybody. On the other hand, I, for my …” 
+  [Dashes] “--” in “…George Allen.  CHISWICK PRESS:--CHARLES WHITTINGHAM AND CO. TO…” → “–”
+  [Dashes] “--” in “… to love them. And in the sect--fairly large and yet unusually…” → “–”
+  [Dashes] “--” in “…large and yet unusually choice--of Austenians or Janites, ther…” → “–”
+  [Dashes] “--” in “…priety. All the minor passages--the loves of Jane and Bingley,…” → “–”
+  [SentenceCapitalization] “and” in “…s Letters. Chap 34. ]  PRIDE. and PREJUDICE  by Jane Austen,  w…” → “And”
+  [SentenceCapitalization] “with” in “…d PREJUDICE  by Jane Austen,  with a Preface by George Saintsbur…” → “With”
+  [SentenceCapitalization] “and” in “…down to see the place” 2  Mr. and Mrs. Bennet 5  “I hope Mr. Bi…” → “And”
+  [SentenceCapitalization] “how” in “…ing for our girls!”  “How so? how can it affect them?”  “My dea…” → “How”
+  [MissingPreposition] “am ” in “…n affectionate smile” 385  “I am sure she did not listen” 393  …” 
+  [MissingPreposition] “was ” in “…hould persuade you at last. I was sure you loved your girls too …” 
+  [MissingPreposition] “sisters ” in “…easy, unaffected manners. His sisters were fine women, with an air o…” 
+  [MissingPreposition] “sisters ” in “…excessively handsome! and his sisters are charming women. I never in…” 
+  [MassNouns] “a fondness” in “…the vulgar verdict (if indeed a fondness for Miss Austen be not of its…” → “fondness”, → “some fondness”, → “a piece of fondness”
+  [MassNouns] “loosenesses” in “…t be hampered by any of those loosenesses of construction, which, somet…” → “looseness”
+  [MassNouns] “a disgust” in “…vening, till his manners gave a disgust which turned the tide of his …” → “disgust”, → “some disgust”, → “a piece of disgust”
+  [MassNouns] “every respect” in “…rank; and were, therefore, in every respect entitled to think well of the…” → “every piece of respect”
+  [UnclosedQuotes] ““” in “…h case is like that of Swift--“taller by the breadth of my na…” 
+  [UnclosedQuotes] “”” in “…ller by the breadth of my nail”--which impressed the half-rel…” 
+  [UnclosedQuotes] ““” in “… then read it aloud.  /* NIND “My dear friend, */  “If you ar…” 
+  [UnclosedQuotes] ““” in “… /* NIND “My dear friend, */  “If you are not so compassionat…” 
+  [SplitWords] “belectured” in “…lue stockings in that Fordyce-belectured generation. It is at any rate…” → “be lectured”
+  [SplitWords] “gentlemanlike” in “… Bingley was good-looking and gentlemanlike: he had a pleasant countenanc…” → “gentleman like”
+  [SplitWords] “overhearings” in “…e to nothing, you know.”  “My overhearings were more to the purpose than…” → “over hearings”
+  [SplitWords] “gentlemanlike” in “…ad never seen before, of most gentlemanlike appearance, walking with an o…” → “gentleman like”
+  [OxfordComma] “hero” in “…is admittedly theatrical, the hero and heroine are insipid, and …” + “,”
+  [OxfordComma] “real” in “…ore of some quality or other, real or imaginary. Vanity and prid…” + “,”
+  [OxfordComma] “Catherine” in “…e two youngest of the family, Catherine and Lydia, were particularly …” + “,”
+  [OxfordComma] “address” in “…g, the tone of her voice, her address and expressions, or the word …” + “,”
+  [Excellent] “very good” in “… courteous.  Lady Lucas was a very good kind of woman, not too clever…” → “excellent”
+  [Excellent] “very good” in “…selves, and the Lucases are a very good sort of girls, I assure you. …” → “excellent”
+  [Excellent] “very good” in “…is patroness, mingling with a very good opinion of himself, of his au…” → “excellent”
+  [Excellent] “very good” in “…east unwilling to think her a very good sort of girl. There can be no…” → “excellent”
+  [TheirToTheyre] “their” in “…en their studies, their ways, their conduct were subject to all t…” → “they're”, → “they're ”
+  [TheirToTheyre] “their” in “…hten her confidence in it. On their being joined by Mr. Bingley h…” → “they're”, → “they're ”
+  [TheirToTheyre] “their” in “…nce conveyed the assurance of their being all settled in London f…” → “they're”, → “they're ”
+  [TheirToTheyre] “their” in “…different doors, to recommend their being quick, as Lady Catherin…” → “they're”, → “they're ”
+  [PronounVerbAgreement] “open” in “… no other point of view is he open to any reproach, except for a…” → “opens”
+  [PronounVerbAgreement] “withdrew” in “…h, till, catching her eye, he withdrew his own, and coldly said, “Sh…” 
+  [PronounVerbAgreement] “keep” in “…lse friends. Why could not he keep on quarrelling with you, as h…” → “keeps”
+  [PronounVerbAgreement] “handsome” in “… of young lady is she? Is she handsome?”  “She is a most charming yo…” 
+  [DisjointPrefixes] “up strokes” in “… watch him laboriously piling up strokes in the hope of giving a compl…” → “upstrokes”
+  [DisjointPrefixes] “non-existent” in “…Mr. Collins was impossible or non-existent at the end of the eighteenth …” → “nonexistent”
+  [DisjointPrefixes] “over thinking” in “… daughters, she ought to give over thinking of her own beauty.”  “In such…” → “overthinking”
+  [DisjointPrefixes] “inter-marriage” in “… that when there has been one inter-marriage, she may have less trouble in…” → “intermarriage”
+  [MissingTo] “means” in “…hich that gentleman did by no means intend; for he would certainl…” + “ to”
+  [MissingTo] “means” in “…opportunity.”  “I would by no means suspend any pleasure of yours…” + “ to”
+  [MissingTo] “arranging” in “…lle, while Mrs. Jenkinson was arranging Miss De Bourgh’s footstool,--…” + “ to”
+  [MissingTo] “means” in “…d Mr. Bennet, who could by no means wish for so speedy a return, …” + “ to”
+  [DiscourseMarkers] “Indeed” in “…ow, they visit no new comers. Indeed you must go, for it will be i…” + “,”
+  [DiscourseMarkers] “Indeed” in “…et worse than she expected.  “Indeed I have, sir,” was her answer.…” + “,”
+  [DiscourseMarkers] “Indeed” in “…ow despise me if you dare.”  “Indeed I do not dare.”  Elizabeth, h…” + “,”
+  [DiscourseMarkers] “Indeed” in “…uce yourself to Mr. Darcy?”  “Indeed I am. I shall entreat his par…” + “,”
+  [CompoundNouns] “common sense” in “…elings of a man spoilt in the common sense, but not really injured in di…” → “commonsense”
+  [CompoundNouns] “red coat” in “…ember the time when I liked a red coat myself very well--and, indeed…” → “redcoat”
+  [CompoundNouns] “high road” in “… delight.  When they left the high road for the lane to Hunsford, eve…” → “highroad”
+  [CompoundNouns] “fair way” in “…. Darcy’s letter she was in a fair way of soon knowing by heart. She…” → “fairway”
+  [SimplePastToPastParticiple] “spoke” in “…he seemed very angry at being spoke to.”  “Miss Bingley told me,”…” → “spoken”
+  [SimplePastToPastParticiple] “forgot” in “… cannot last long. He will be forgot, and we shall all be as we we…” → “forgotten”
+  [SimplePastToPastParticiple] “ate” in “… liberal!  As soon as all had ate, and the elder ones paid, the…” → “eaten”
+  [SimplePastToPastParticiple] “broke” in “…away. I thought I should have broke my heart.”  “I am sure I shal…” → “broken”
+  [ItsContraction] “its” in “…sation, though it was only on its being a wet night, and on the…” → “it's”, → “it has”
+  [ItsContraction] “its” in “…ry cautious, I suppose, as to its being created?”  “I am,” said…” → “it's”, → “it has”
+  [ItsContraction] “its” in “… sense of her inferiority, of its being a degradation, of the f…” → “it's”, → “it has”
+  [ItsContraction] “its” in “…hen there was least danger of its being heard.  Elizabeth soon …” → “it's”, → “it has”
+  [AnA] “an” in “…ng, a composure of temper and an uniform cheerfulness of manne…” → “a”
+  [AnA] “an” in “…he other, told the girls what an honour they might expect, add…” → “a”
+  [AnA] “an” in “…swered all her wishes. It was an union that must have been to …” → “a”
+  [AnA] “An” in “…onnubial felicity really was. An union of a different tendency…” → “A”
+  [WouldNeverHave] “would never have” in “… piece of civility. Mr. Darcy would never have come so soon to wait upon me.…” → “never would have”
+  [WouldNeverHave] “would never have” in “…st be in love with you, or he would never have called on us in this familiar…” → “never would have”
+  [WouldNeverHave] “would never have” in “…the conviction that Mr. Darcy would never have hazarded such a proposal, if …” → “never would have”
+  [WouldNeverHave] “would never have” in “…ectly assured that your uncle would never have yielded, if we had not given …” → “never would have”
+  [WayTooAdjective] “to” in “…il, “My dear, do not give way to such gloomy thoughts. Let us …” → “too”
+  [WayTooAdjective] “to” in “…!”  “My dear, do not give way to such gloomy thoughts. Let us …” → “too”
+  [WayTooAdjective] “to” in “…y dear Lizzy, do not give way to such feelings as these. They …” → “too”
+  [WayTooAdjective] “to” in “…ring Lydia.  “Do not give way to useless alarm,” added he: “th…” → “too”
+  [PronounContraction] “were” in “…ng but three miles from them, were the first points of self-grat…” → “we're”, → “we are”
+  [PronounContraction] “were” in “…d who would make you so. Nay, were your friend Lady Catherine to…” → “we're”, → “we are”
+  [PronounContraction] “Were” in “…I have something to wish for. Were the whole arrangement complet…” → “We're”, → “We are”
+  [PronounContraction] “Were” in “…ry, such officious attention! Were the same fair prospect to ari…” → “We're”, → “We are”
+  [WhomSubjectOfVerb] “whom” in “…Miss de Bourgh--the former of whom was engaged in listening to L…” → “who”
+  [WhomSubjectOfVerb] “whom” in “…capable of the attempt.”  “Of whom does Jane ever think ill? And…” → “who”
+  [WhomSubjectOfVerb] “whom” in “… a father and mother, both of whom had been dead many years. It …” → “who”
+  [ToTwoToo] “too” in “… she is unexceptionable. Then too she is a perfectly natural gi…” → “to”
+  [ToTwoToo] “too” in “…hin a month; and as that left too short a period for them to go…” → “to”
+  [ToTwoToo] “too” in “… but, to say the truth, I was too cross to write. You supposed …” → “to”
+  [RepeatedWords] “had had” in “…nd the Boulanger----”  “If he had had any compassion for me,” cried…” → “had”
+  [RepeatedWords] “her her” in “…hat her being there may teach her her own insignificance. At any ra…” → “her”
+  [RepeatedWords] “had had” in “…was a very long time since he had had the pleasure of seeing her;” …” → “had”
+
+heap at the end: 585.1 MB above start (peak 605.0 MB)
+
+## 9. Cost per rule (first ~10k words)
+
+all rules together: 2223.7 ms
+no rules enabled (the group's own overhead): 38.8 ms
+sum of rules one at a time: 40418 ms (loop took 40620.6 ms)
+     449.0 ms  BoringWords
+     152.2 ms  SpellCheck
+      93.4 ms  AdNauseam
+      64.1 ms  USUniversities
+      54.4 ms  Regionalisms
+      53.4 ms  ShutdownVerb
+      53.0 ms  Holidays
+      50.7 ms  UpdatePlaceNames
+      49.8 ms  Countries
+      49.4 ms  PassedPast
+      49.2 ms  RallyToReally
+      49.1 ms  ExitedExcitedContext
+      48.7 ms  NationalCapitals
+      48.7 ms  WokVerbTypo
+      48.5 ms  TakeMedicine
+      48.5 ms  ImitateFrom
+      48.3 ms  Hijack
+      48.1 ms  PreferenceAsVerb
+      48.1 ms  NounVerbConfusion
+      47.8 ms  CapitalizeOn
+      47.8 ms  TheyToThem
+      47.5 ms  InHindsight
+      47.4 ms  WorseOrWorst
+      47.3 ms  BacklashBackslash
+      47.2 ms  ItsContraction
+  top 25 = 4% of the sum
