@@ -18,3 +18,8 @@ codegen-units = 1
 lto = true
 opt-level = 3
 strip = true
+
+# The one-change copy of harper-core 3.2.0 in vendor/ (see the SPIKE PATCH in fst_dictionary.rs).
+# Remove this to measure the published crate.
+[patch.crates-io]
+harper-core = { path = "vendor/harper-core" }

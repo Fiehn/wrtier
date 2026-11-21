@@ -4,6 +4,7 @@
 
 /target
 spikes/*/target/
+spikes/*/vendor/
 # Written by `cargo run --example sample_db`
 /sample.db
 /sample.sync-conflict.db

@@ -61,3 +61,32 @@ about 960 rule-name keys. The cache size is fixed and there's no public way to c
 - A fresh `LintGroup` (134 ms, 11.5 MB) is the only way to reset it.
 
 Total in the paragraph-at-a-time run: **308 MB** heap above start.
+
+## Where the memory goes, and what fixes it
+
+`vendor/harper-core` is harper-core 3.2.0 with two changes, each marked `SPIKE PATCH`. The
+`[patch.crates-io]` entry in `Cargo.toml` uses it; remove that entry to measure the published
+crate. The vendored folder also includes the 3 MB dictionary file and model files.
+
+| Cost | Size | Cause | Fix |
+|---|---|---|---|
+| Second dictionary copy | 61 MB (98 MB peak while built) | `fst_dictionary.rs`: `static DICT = (*MutableDictionary::curated()).clone().into()`. The clone is rebuilt into a new `MutableDictionary` inside `FstDictionary::new`, and the original stays in its own static. Some rules (`MergeableWords`, used by CompoundNouns) call `FstDictionary::curated()` themselves, so passing a different dictionary doesn't avoid it. Master is unchanged. | Patch 1: build only the FST over the shared `Arc` (`FstDictionary::sharing`). The FST then costs 2.5 MB (8.9 MB peak). This is the same fix proposed in [harper#4071](https://github.com/Automattic/harper/issues/4071), which is open, labelled `perf` on 18 Nov, and has no PR. |
+| SpellCheck's distance-4 automaton | 65 MB, once per thread, never freed | SpellCheck retries at edit distance 2, 3, then 4. The first unknown word with nothing within 3 ("SAINTSBURY") builds a `LevenshteinAutomatonBuilder(4)` and keeps it in a thread-local. | Wrtier turns SpellCheck off, since spellbook does spelling. |
+| LintGroup caches | up to ~150 MB | Two LRU caches of 1,000 entries, each entry a map with about 960 rule names. | Patch 2: 64 entries each. |
+| Thesaurus | 0 MB heap, ~4.5 MB binary | — | `default-features = false` (keep `concurrent`). |
+
+The same ~127k-word novel, linted a paragraph at a time with SpellCheck off, both patches, and no
+thesaurus:
+
+- Heap **+73 MB** after load (dictionary 61, FST 2.5, rule set 11.5).
+- **+90 MB** at the end (peak 97.5), with 4.6 MB of that from the tagger and chunker.
+- 0.34 s load, 33.8 s for the whole novel on one thread.
+- Lints per rule identical to the unpatched crate (SpellCheck aside).
+
+Both patches change no output. Whole-novel lints per rule were compared before and after each one,
+including SpellCheck for patch 1.
+
+What remains is the word list itself: about 440 bytes for each of 138k words. The largest parts are a
+72-byte `DictWordMetadata`, an 80-byte inline `CharString` (a `SmallVec` of `char`), a `BTreeSet`
+(`DerivedFrom`) on 89k words, and two hash maps. Shrinking these would be upstream work and hasn't
+been tried.
