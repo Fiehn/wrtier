@@ -5,9 +5,10 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "node scripts/licenses.mjs && tsc && vite build",
-    "licenses": "node scripts/licenses.mjs",
+    "dev": "node scripts/patch.mjs && vite",
+    "build": "node scripts/patch.mjs && node scripts/licenses.mjs && tsc && vite build",
+    "patch": "node scripts/patch.mjs",
+    "licenses": "node scripts/patch.mjs && node scripts/licenses.mjs",
     "dictionaries": "node scripts/dictionaries.mjs",
     "release": "node scripts/release.mjs",
     "preview": "vite preview",

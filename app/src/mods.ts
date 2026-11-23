@@ -8,6 +8,7 @@
 
 import type { Extension } from "@codemirror/state";
 import { dialogueChecker, dialogueSettings } from "./dialoguemod";
+import { grammarChecker, grammarSettings } from "./grammarmod";
 import { spellcheckSettings, spellchecker } from "./spellmod";
 
 export type Mod = {
@@ -16,6 +17,8 @@ export type Mod = {
   name: string;
   /** One line saying what it does. */
   about: string;
+  /** What it can get wrong, said wherever it's offered (the Mods dialog, and Settings). */
+  caveat?: string;
   /** What it adds to a Work's editor while the Work has it. */
   editor?: (ctx: ModContext) => Extension;
   /** It makes Marks (marks.ts): the editor asks the Vault where its Dismissed ones are. */
@@ -59,6 +62,7 @@ export const MODS: Mod[] = [
     id: "spellcheck",
     name: "Spellchecker",
     about: "Marks words the Work's Dictionary doesn't know: red for a likely typo, blue for what looks like a name. Hover or click a Mark for suggestions, or to allow the word in this Work or add it to your dictionary.",
+    caveat: "It isn't perfect: it can miss a misspelt word or mark one that's right, and its suggestions aren't always the word you meant. It has only been tested on English.",
     editor: (ctx) => spellchecker(ctx),
     marks: true,
     settings: spellcheckSettings,
@@ -67,9 +71,19 @@ export const MODS: Mod[] = [
     id: "dialogue",
     name: "Dialogue checker",
     about: "Marks dialogue that breaks the rules of English dialogue punctuation and paragraphing, and offers to put it right: yellow for a rule broken, blue for one to check. Hover or click a Mark, or press F8 to go from one to the next. English Works only.",
+    caveat: "It isn't perfect: it can miss dialogue that breaks a rule or mark dialogue that's fine, so read a suggestion before accepting it. It has only been tested on English.",
     editor: (ctx) => dialogueChecker(ctx),
     marks: true,
     settings: dialogueSettings,
+  },
+  {
+    id: "grammar",
+    name: "Grammar checker",
+    about: "Marks grammar, punctuation and word choice that Harper's rules catch: red for a likely mistake, yellow for a rule broken, blue for one to check. Hover or click a Mark for suggestions, or to stop checking its rule in this Work. Spelling is the Spellchecker's. English Works only.",
+    caveat: "It isn't perfect: fiction breaks rules on purpose, in dialogue above all, and it can mark what's right or miss what's wrong. It loads the first time a Work with it opens, which takes a moment and about 80 MB of memory, and checking a long Work the first time can take half a minute.",
+    editor: (ctx) => grammarChecker(ctx),
+    marks: true,
+    settings: grammarSettings,
   },
 ];
 

@@ -73,6 +73,9 @@ export const markHooks = Facet.define<MarkHooks, MarkHooks | null>({ combine: (a
 
 export type MarkCounts = Record<MarkLevel, number>;
 
+/** How many of a Mark's Suggestions its card shows at first; the rest are under "See more". */
+export const SUGGESTIONS_SHOWN = 5;
+
 /** How long the typing must pause before the Mods look again. */
 const SETTLE_MS = 800;
 
@@ -314,8 +317,11 @@ export async function withSuggestions(view: EditorView, mark: Mark): Promise<Mar
 
 // ---- The card ----
 
-/** The card open on a Mark (by click, Ctrl+. or F8); `keys`: opened from the keyboard, so 1, 2, D and Esc act on it. */
-type Card = { mark: Mark; keys: boolean };
+/**
+ * The card open on a Mark (by click, Ctrl+. or F8); `keys`: opened from the keyboard, so 1, 2, M,
+ * D and Esc act on it; `more`: "See more" was chosen, so it shows all of its Suggestions.
+ */
+type Card = { mark: Mark; keys: boolean; more?: boolean };
 const openCard = StateEffect.define<Card>();
 const closeCard = StateEffect.define<null>();
 
@@ -338,11 +344,19 @@ const cardField = StateField.define<Card | null>({
   provide: (f) => showTooltip.from(f, (card): Tooltip | null => card && {
     pos: card.mark.from,
     above: false,
-    create: (view) => ({ dom: cardDom(view, card.mark, card.keys) }),
+    // "See more" opens the same card again with all of them, so 6–9 then accept too.
+    create: (view) => ({ dom: cardDom(view, card.mark, card.keys, card.more === true, () => view.dispatch({ effects: openCard.of({ ...card, more: true }) })) }),
   }),
 });
 
-function cardDom(view: EditorView, mark: Mark, keys: boolean): HTMLElement {
+/** How many Suggestions a card shows: the first few, or all once "See more" was chosen. */
+const shownOn = (mark: Mark, more: boolean) => (more ? mark.suggestions.length : Math.min(mark.suggestions.length, SUGGESTIONS_SHOWN));
+
+/**
+ * A Mark's card. `more`: all its Suggestions are shown. `showMore`: what "See more" does; without
+ * it (a hover card), the card shows the rest itself.
+ */
+function cardDom(view: EditorView, mark: Mark, keys: boolean, more = false, showMore?: () => void): HTMLElement {
   const dom = document.createElement("div");
   dom.className = `cm-mark-card cm-mark-card-${mark.level}`;
   const head = document.createElement("p");
@@ -353,22 +367,29 @@ function cardDom(view: EditorView, mark: Mark, keys: boolean): HTMLElement {
   dom.append(head);
   const suggestions = document.createElement("div");
   suggestions.className = "cm-mark-suggestions";
-  const fill = (m: Mark) => {
-    suggestions.replaceChildren(...m.suggestions.map((s, i) => {
+  const fill = (m: Mark, all: boolean) => {
+    const shown = shownOn(m, all);
+    suggestions.replaceChildren(...m.suggestions.slice(0, shown).map((s, i) => {
       const b = button(s.label, () => accept(view, m, i), "cm-mark-suggestion");
       if (keys && i < 9) b.prepend(keyHint(String(i + 1)));
       return b;
     }));
+    const rest = m.suggestions.length - shown;
+    if (rest > 0) {
+      const b = button(`See ${rest} more`, () => (showMore ? showMore() : fill(m, true)), "cm-mark-more");
+      if (keys) b.prepend(keyHint("M"));
+      suggestions.append(b);
+    }
   };
   if (mark.suggest) {
     // Asked for now; the card shows them when they come (a keyboard card is drawn again then).
     suggestions.append(line("cm-mark-looking", "Looking for suggestions…"));
     void withSuggestions(view, mark).then((m) => {
       if (!dom.isConnected) return;
-      fill(m);
+      fill(m, more);
       if (m.suggestions.length === 0) suggestions.append(line("cm-mark-looking", "No suggestions."));
     });
-  } else fill(mark);
+  } else fill(mark, more);
   dom.append(suggestions);
   const row = document.createElement("div");
   row.className = "cm-mark-row";
@@ -465,17 +486,26 @@ export function stepMark(view: EditorView, dir: 1 | -1, level?: MarkLevel): bool
   return true;
 }
 
-/** While a card opened from the keyboard is up: 1–9 accept, D dismisses, Esc closes. */
+/** While a card opened from the keyboard is up: 1–9 accept (those shown), M shows them all, D dismisses, Esc closes. */
 const cardKeys = Prec.highest(keymap.of([
   ...Array.from({ length: 9 }, (_, i) => ({
     key: String(i + 1),
     run: (view: EditorView) => {
       const card = view.state.field(cardField);
-      if (!card?.keys || !card.mark.suggestions[i]) return false;
+      if (!card?.keys || i >= shownOn(card.mark, card.more === true)) return false;
       accept(view, card.mark, i);
       return true;
     },
   })),
+  {
+    key: "m",
+    run: (view: EditorView) => {
+      const card = view.state.field(cardField);
+      if (!card?.keys || shownOn(card.mark, card.more === true) === card.mark.suggestions.length) return false;
+      view.dispatch({ effects: openCard.of({ ...card, more: true }) });
+      return true;
+    },
+  },
   {
     key: "d",
     run: (view: EditorView) => {

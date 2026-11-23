@@ -33,7 +33,7 @@
     /** The Vault Mods the Vault has (none unless a test adds one). */
     vaultMods: [],
     /** The words the fake Dictionary doesn't know. */
-    misspelt: ["Teh", "teh", "Kvothe"],
+    misspelt: ["Teh", "teh", "Kvothe", "recieve"],
     /** The Vault's folders, besides those its Works are in (none unless a test adds some). */
     vaultFolders: [],
     /** Each Work's Images (ADR 0021), by name in lowercase. */
@@ -160,6 +160,7 @@
 
   const handlers = {
     startup: () => ({ lastVault: fake.lastVault }),
+    vault_folder: () => ({ vault: true, files: 0 }),
     open_vault: ({ path }) => ({ status: "opened", root: path, deviceName: "Laptop", suggestedName: "Laptop" }),
     get_settings: () => settings,
     set_setting: ({ name, value, here }) => {
@@ -248,7 +249,10 @@
     },
     // The Spellchecker (spelling.rs): a British English Dictionary that knows every word but a few.
     spell_check: ({ words }) => words.filter((w) => fake.misspelt.includes(w)),
-    spell_suggest: ({ word }) => (word.toLowerCase() === "teh" ? ["the", "tea"] : []),
+    spell_suggest: ({ word }) => ({
+      teh: ["the", "tea"],
+      recieve: ["receive", "relieve", "deceive", "reprieve", "recede", "receiver", "recite"],
+    })[word.toLowerCase()] ?? [],
     dictionary_for: () => ({ code: "en-GB", name: "English (United Kingdom)", builtIn: true, insteadOf: null, offer: null }),
     list_dictionaries: () => ({
       inVault: [],

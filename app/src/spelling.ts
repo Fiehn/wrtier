@@ -135,13 +135,11 @@ export function capitalisedLike(typed: string, word: string): string {
   return word;
 }
 
-/** At most this many Suggestions on a spelling Mark. */
-export const MAX_SUGGESTIONS = 5;
-
 /**
  * The words to offer for `typed`: the Author's own one letter away first (they're this Work's
  * words), then the Dictionary's, best first, then the Author's own two letters away; each
- * capitalised as typed, at most five, none twice.
+ * capitalised as typed, none twice. All of them: the card shows the first few, and the rest
+ * under "See more" (marks.ts).
  */
 export function suggestionsFor(typed: string, dictionary: string[], own: string[]): string[] {
   const w = plain(typed);
@@ -150,7 +148,6 @@ export function suggestionsFor(typed: string, dictionary: string[], own: string[
   for (const s of [...near(1), ...dictionary, ...near(2)]) {
     const c = capitalisedLike(w, plain(s));
     if (c !== w && !out.some((o) => o.toLowerCase() === c.toLowerCase())) out.push(c);
-    if (out.length === MAX_SUGGESTIONS) break;
   }
   return out;
 }

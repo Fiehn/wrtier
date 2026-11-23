@@ -13,7 +13,7 @@
 
 import type { EditorView } from "@codemirror/view";
 import type { Text } from "@codemirror/state";
-import { accept, dismiss, markHooks, marksOf, runAction, showMark, stillShown, withSuggestions, type Mark, type MarkLevel } from "./marks";
+import { accept, dismiss, markHooks, marksOf, runAction, showMark, stillShown, SUGGESTIONS_SHOWN, withSuggestions, type Mark, type MarkLevel } from "./marks";
 
 const LEVELS: MarkLevel[] = ["mistake", "rule", "query"];
 const PLURAL: Record<MarkLevel, string> = { mistake: "Mistakes", rule: "Rule breaks", query: "Queries" };
@@ -62,6 +62,8 @@ export class MarksPanel {
   /** The kinds whose section is closed, and the repeated Marks whose places are open (this session). */
   private closed = new Set<MarkLevel>();
   private openGroups = new Set<string>();
+  /** The Marks whose Suggestions are all shown ("See more"), by where they are (this Work, until it changes). */
+  private allShown = new Set<string>();
   /** A kind to bring into view once the panel is next drawn (asked for while it was out of view). */
   private toShow: MarkLevel | null = null;
   /** Suggestions asked for as their place comes into view. */
@@ -82,6 +84,7 @@ export class MarksPanel {
 
   /** Another Work came to the front. */
   workChanged() {
+    this.allShown.clear();
     this.draw();
   }
 
@@ -201,11 +204,26 @@ export class MarksPanel {
     return b;
   }
 
-  /** A Mark's Suggestions: at once if it has them, else asked of its Mod when they come into view. */
+  /**
+   * A Mark's Suggestions: at once if it has them, else asked of its Mod when they come into view.
+   * The first few, and the rest under "See more", as on the editor's card.
+   */
   private suggestions(view: EditorView, doc: Text, mark: Mark): HTMLElement {
     const box = el("div", "mark-suggestions") as HTMLElement & { load?: () => void };
+    const key = `${mark.mod}/${mark.rule}/${mark.from}/${mark.to}`;
     const fill = (m: Mark) => {
-      box.replaceChildren(...m.suggestions.map((s, i) => this.button(s.label, "mark-suggestion", view, doc, mark, () => accept(view, m, i, false))));
+      const shown = this.allShown.has(key) ? m.suggestions.length : Math.min(m.suggestions.length, SUGGESTIONS_SHOWN);
+      box.replaceChildren(...m.suggestions.slice(0, shown).map((s, i) => this.button(s.label, "mark-suggestion", view, doc, mark, () => accept(view, m, i, false))));
+      const rest = m.suggestions.length - shown;
+      if (rest > 0) {
+        const more = el("button", "mark-more", `See ${rest} more`);
+        more.type = "button";
+        more.addEventListener("click", () => {
+          this.allShown.add(key);
+          fill(m);
+        });
+        box.append(more);
+      }
       if (m.suggestions.length === 0 && mark.suggest) box.append(el("p", "mark-looking", "No suggestions."));
     };
     if (!mark.suggest) {

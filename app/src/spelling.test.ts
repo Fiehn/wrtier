@@ -74,9 +74,9 @@ describe("spelling Suggestions", () => {
     expect(distance("a", "abcdef")).toBe(3);
   });
 
-  it("put the Author's own words one letter away first, at most five, none twice", () => {
+  it("put the Author's own words one letter away first, all of them, none twice", () => {
     expect(suggestionsFor("Zampano", ["Zamboni", "Campano"], ["Zampanò"])).toEqual(["Zampanò", "Zamboni", "Campano"]);
-    expect(suggestionsFor("teh", ["the", "The", "tea", "ten", "Tex", "eh", "meh"], [])).toEqual(["the", "tea", "ten", "Tex", "eh"]);
+    expect(suggestionsFor("teh", ["the", "The", "tea", "ten", "Tex", "eh", "meh"], [])).toEqual(["the", "tea", "ten", "Tex", "eh", "meh"]);
   });
 
   it("change only the letters that differ, leaving markup where it is", () => {

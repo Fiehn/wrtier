@@ -12,7 +12,7 @@
 // to it ("she said", "said the man"); a subject with any other verb after a closing quote is an
 // Action beat.
 
-import { BREAK, passagesOf, readPara, type Para } from "./prose";
+import { BREAK, passagesOf, preview, readPara, toSource, type Para, type ReadEdit } from "./prose";
 
 /** How sure a Mark is (CONTEXT.md): a Mistake (red), a Rule break (yellow) or a Query (blue). */
 export type Level = "mistake" | "rule" | "query";
@@ -275,46 +275,6 @@ class Checker {
 }
 
 // ---- Findings ----
-
-/** Builds a finding's Suggestion from edits to the paragraph as it reads. */
-type ReadEdit = { at: number; to: number; insert: string; shows?: string };
-
-function toSource(p: Para, e: ReadEdit): Edit {
-  if (e.at === e.to) {
-    const from = e.at >= p.text.length ? (p.to[p.text.length - 1] ?? p.start) : p.from[e.at];
-    return { from, to: from, insert: e.insert };
-  }
-  return { from: p.from[e.at], to: p.to[e.to - 1], insert: e.insert };
-}
-
-/** What the text around the edits reads like after them: `"Hi," she said.` */
-function preview(p: Para, edits: ReadEdit[]): string {
-  const lo = Math.min(...edits.map((e) => e.at));
-  const hi = Math.max(...edits.map((e) => e.to));
-  let from = lo;
-  let words = 0;
-  while (from > 0 && words < 4) {
-    from--;
-    if (/\s/.test(p.text[from]) && !/\s/.test(p.text[from + 1] ?? "")) words++;
-    if (p.text[from] === BREAK || (p.text[from] === "\n" && words > 0)) { from++; break; }
-  }
-  let to = hi;
-  words = 0;
-  while (to < p.text.length && words < 4) {
-    if (/\s/.test(p.text[to]) && !/\s/.test(p.text[to - 1] ?? "")) words++;
-    if (p.text[to] === BREAK || (words > 2 && /[.!?]/.test(p.text[to - 1]))) break;
-    to++;
-  }
-  let out = "";
-  let at = from;
-  for (const e of [...edits].sort((a, b) => a.at - b.at)) {
-    out += p.text.slice(at, e.at) + (e.shows ?? e.insert);
-    at = e.to;
-  }
-  out += p.text.slice(at, to);
-  const text = out.replace(/\n\n/g, " ¶ ").replace(/\s+/g, " ").trim();
-  return (from > 0 ? "…" : "") + text + (to < p.text.length ? "…" : "");
-}
 
 const swapCase = (c: string) => (isUpper(c) ? c.toLowerCase() : c.toUpperCase());
 

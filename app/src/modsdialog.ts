@@ -3,7 +3,7 @@
 // The Mods for new Works, and the Vault Mods, are in Settings (`fillNewWorkMods`, `fillVaultMods`).
 
 import { invoke } from "@tauri-apps/api/core";
-import { MODS, unknownMods, unknownVaultMods, VAULT_MODS, type ModSettings, type ModsState } from "./mods";
+import { MODS, unknownMods, unknownVaultMods, VAULT_MODS, type Mod, type ModSettings, type ModsState } from "./mods";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -21,6 +21,9 @@ function line(className: string, text: string): HTMLElement {
   p.textContent = text;
   return p;
 }
+
+/** What a Mod can get wrong, if it says, as a line under it. */
+const caveatOf = (mod: Mod): HTMLElement[] => (mod.caveat ? [line("muted mod-caveat", mod.caveat)] : []);
 
 /** Mods from a newer version of the app: listed greyed, never switched from here. */
 function unknownRows(ids: string[]): HTMLElement[] {
@@ -99,7 +102,7 @@ export async function openMods(id: string, name: string, language: string, chang
         checkbox(hidden, (v) => run(async () => ({ ...(await invoke<ModsState>("set_mod_hidden", { name: mod.id, hidden: v })), work: state.work }))),
         " Hide on this device",
       );
-      li.append(main, line("muted", mod.about), hide);
+      li.append(main, line("muted", mod.about), ...caveatOf(mod), hide);
       if (on && hidden) li.append(line("muted", "This Work has it, but this device hides it."));
       if (on && mod.settings) {
         const part = mod.settings(settings, "work", save, language);
@@ -167,7 +170,7 @@ export async function fillNewWorkMods(list: HTMLElement): Promise<void> {
         }),
         ` ${mod.name}`,
       );
-      li.append(label);
+      li.append(label, ...caveatOf(mod));
       if (mod.settings && state.newWorks.includes(mod.id)) li.append(mod.settings(settings, "newWorks", save));
       return li;
     });

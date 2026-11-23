@@ -19,11 +19,8 @@ lto = true
 opt-level = 3
 strip = true
 
-# harper-core with patches/harper-core+3.2.0.patch applied (ADR 0023). `cargo patch-crate` writes it
-# to target/patch/ and must run before building. Comment out both sections to measure the
-# published crate.
-[package.metadata.patch]
-crates = ["harper-core"]
-
+# harper-core as the app builds it: the repository's patches/harper-core+3.2.0.patch applied by
+# `cargo patch-crate` run in the repository's root, which writes it to the root's target/patch/
+# (ADR 0023). Run that before building. Comment this out to measure the published crate.
 [patch.crates-io]
-harper-core = { path = "./target/patch/harper-core-3.2.0" }
+harper-core = { path = "../../target/patch/harper-core-3.2.0" }

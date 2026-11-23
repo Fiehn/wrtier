@@ -1416,6 +1416,44 @@ test("the Spellchecker marks unknown words, suggests when asked, and allows a na
   await expect(app.locator(".cm-mark")).toHaveCount(0, { timeout: 5000 });
 });
 
+test("the Spellchecker says what it can get wrong, and shows five Suggestions with the rest under See more", async ({ app }) => {
+  const rain = app.locator("#works li.work-entry", { hasText: "Rain" });
+  await rain.locator(".entry-name").click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Mods…" }).click();
+  const row = app.locator("#mods-list li.mod-row", { hasText: "Spellchecker" });
+  await expect(row.locator(".mod-caveat")).toContainText("only been tested on English");
+  await expect(app.locator("#mods-list li.mod-row", { hasText: "Dialogue checker" }).locator(".mod-caveat")).toContainText("isn't perfect");
+  await row.locator("label", { hasText: "Spellchecker" }).locator("input").check();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.mods.Rain)).toContain("spellcheck");
+  await app.locator("#mods button[value=done]").click();
+
+  // From the keyboard: five, then M shows the other two, and 7 accepts the last.
+  await endOf(app, "She walked home.");
+  await app.keyboard.type(" I recieve it.");
+  const mark = app.locator(".cm-mark-mistake");
+  await expect(mark).toHaveCount(1, { timeout: 5000 });
+  await mark.click();
+  await app.keyboard.press("Escape");
+  await app.keyboard.press("Control+.");
+  const card = app.locator(".cm-mark-card");
+  await expect(card.locator(".cm-mark-suggestion")).toHaveCount(5);
+  await expect(card.locator(".cm-mark-more")).toHaveText(/See 2 more/);
+  await app.keyboard.press("m");
+  await expect(card.locator(".cm-mark-suggestion")).toHaveCount(7);
+  await expect(card.locator(".cm-mark-more")).toHaveCount(0);
+  await app.keyboard.press("7");
+  await expect.poll(() => textOf(app)).toContain("She walked home. I recite it.");
+
+  // By clicking: See more, then the last.
+  await endOf(app, "I recite it.");
+  await app.keyboard.type(" I recieve more.");
+  await expect(mark).toHaveCount(1, { timeout: 5000 });
+  await mark.click();
+  await card.locator(".cm-mark-more").click();
+  await card.locator(".cm-mark-suggestion", { hasText: "recite" }).click();
+  await expect.poll(() => textOf(app)).toContain("I recite it. I recite more.");
+});
+
 test("a Mark's Suggestion is accepted by clicking it on the card", async ({ app }) => {
   await app.evaluate(() => (window as any).__fake.mods.Rain.push("dialogue"));
   await app.locator("#works li.work-entry", { hasText: "Rain" }).locator(".entry-name").click({ button: "right" });

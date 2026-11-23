@@ -5,6 +5,7 @@ pub mod colouring;
 pub mod device;
 pub mod docx;
 pub mod folders;
+pub mod grammar;
 pub mod images;
 pub mod library;
 pub mod patch;
@@ -106,6 +107,20 @@ async fn download_dictionary(handle: AppHandle, code: String) -> Result<(), Stri
 fn remove_dictionary(handle: AppHandle, code: String) -> Result<(), String> {
     spelling::remove(&vault_root(&handle)?, &code)?;
     with_spelling(&handle, |s, _| Ok(s.forget()))
+}
+
+/// Harper's rules (grammar.rs), loaded by the first check of a Work with the Grammar checker.
+/// Kept apart from `AppState`, like the Dictionaries: loading takes half a second, and checking
+/// a long Work for the first time much longer.
+struct GrammarState(Mutex<grammar::Grammar>);
+
+/// What Harper finds in each of `paragraphs`, as the text reads, with the rules in `off` switched
+/// off (ADR 0023); None if the Work isn't in English. Off the main thread.
+#[tauri::command]
+async fn grammar_check(handle: AppHandle, language: String, paragraphs: Vec<String>, off: Vec<String>) -> Result<Option<Vec<Vec<grammar::Found>>>, String> {
+    tauri::async_runtime::spawn_blocking(move || guarded(&handle.state::<GrammarState>().0, |g| Ok(g.check(&language, &paragraphs, &off))))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// The update "Check for updates" last found (its App version and this platform's build), kept
@@ -1708,6 +1723,7 @@ pub fn run() {
             app.manage(TypesetState(Mutex::new(typeset::Typesetter::default())));
             app.manage(UpdateState(Mutex::new(None)));
             app.manage(SpellState(Mutex::new(spelling::Spelling::default())));
+            app.manage(GrammarState(Mutex::new(grammar::Grammar::default()))); // empty: Harper loads on the first check
             start_timer(app.handle().clone());
             Ok(())
         })
@@ -1798,6 +1814,7 @@ pub fn run() {
             list_dictionaries,
             download_dictionary,
             remove_dictionary,
+            grammar_check,
             set_shortcuts,
             reset_shortcuts,
             set_shortcuts_here,

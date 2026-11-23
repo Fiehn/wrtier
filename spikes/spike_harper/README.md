@@ -3,12 +3,12 @@
 Throwaway code to see how `harper-core` 3.2.0 behaves before planning spellbook + Harper
 ([ADR 0023](../../docs/adr/0023-grammar-and-word-types-come-from-a-patched-harper.md)).
 
-Harper is patched the way the app will patch it: `patches/harper-core+3.2.0.patch`, applied by
-[`patch-crate`](https://github.com/mokeyish/cargo-patch-crate) (`cargo install patch-crate`).
-Run `cargo patch-crate` once before building, again after `cargo clean`, and with `--force` after
-changing the patch. Without it, Cargo stops with "patch location … does not contain packages
-matching `harper-core`". To measure the published crate, comment out `[package.metadata.patch]` and
-`[patch.crates-io]` in `Cargo.toml`.
+Harper is patched exactly as the app patches it: the spike uses the app's patched copy, the
+repository's `patches/harper-core+3.2.0.patch` applied by
+[`patch-crate`](https://github.com/mokeyish/cargo-patch-crate) (`cargo install patch-crate`) into
+the root's `target/patch/`. Run `cargo patch-crate` in the repository's root before building here.
+Without it, Cargo stops with "patch location … does not contain packages matching `harper-core`".
+To measure the published crate, comment out `[patch.crates-io]` in `Cargo.toml`.
 
 `lean-fst-unpatched.txt` holds the published crate's lints per rule on the novel, with SpellCheck on.
 After an upgrade, `lean <novel> fst` must write an identical `lean-fst.txt`.
@@ -79,7 +79,7 @@ Total in the paragraph-at-a-time run: **308 MB** heap above start.
 
 ## Where the memory goes, and what fixes it
 
-`patches/harper-core+3.2.0.patch` makes two changes, each marked `WRTIER PATCH` in the code. Both were
+The patch makes two changes, each marked `WRTIER PATCH` in the code. Both were
 measured from a full copy of the crate in `vendor/` first. That copy is gone now; the same changes
 applied from the patch file give the same figures and the same lints.
 

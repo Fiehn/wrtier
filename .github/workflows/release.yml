@@ -99,10 +99,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Writes the app's Licenses page (app/scripts/licenses.mjs).
+      # cargo-about writes the app's Licenses page (app/scripts/licenses.mjs); patch-crate patches
+      # Harper before anything is built (app/scripts/patch.mjs, ADR 0023).
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-about
+          tool: cargo-about,patch-crate
 
       - name: Install the editor's packages
         run: npm ci
@@ -174,7 +175,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-about
+          tool: cargo-about,patch-crate
 
       - name: Install the editor's packages
         run: npm ci

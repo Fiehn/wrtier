@@ -30,6 +30,18 @@ typst-pdf = "0.15.1"
 typst-ide = "0.15.1"
 typst-kit = { version = "0.15.1", default-features = false }
 
+# Harper, patched (ADR 0023): `cargo patch-crate`, run here, copies the published harper-core into
+# target/patch/ and applies patches/harper-core+3.2.0.patch to it. That folder must exist before
+# Cargo resolves anything, for every crate in the workspace. The app's `npm run dev` and
+# `npm run build` run it first; after a fresh clone or `cargo clean`, run it by hand before
+# `cargo build` or `cargo test`. To change the patch, edit target/patch/harper-core-3.2.0/ and run
+# `cargo patch-crate harper-core`; after changing the patch file, `cargo patch-crate --force`.
+[package.metadata.patch]
+crates = ["harper-core"]
+
+[patch.crates-io]
+harper-core = { path = "./target/patch/harper-core-3.2.0" }
+
 # Profiles only take effect here at the workspace root; members' profiles are ignored.
 
 # Build libraries optimised even in dev builds, or Typst runs 10–50x slower (Phase 0b).
