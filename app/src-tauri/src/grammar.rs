@@ -11,9 +11,12 @@
 //! rules are kept here, one set per kind of English asked for.
 //!
 //! Harper's `SpellCheck` rule is never on: the Spellchecker spells (ADR 0019). Every other rule
-//! is as Harper ships it, less those the Work has switched off. Nothing about a Work is kept
-//! between calls: the rules' own caches go by the text, and hold 64 entries (the patch).
+//! is as Harper ships it, plus our own `CommaSplice` (comma_splice.rs), less those switched off
+//! (the interface sends which: the Work's, and those off by default, grammarmod.ts). Nothing
+//! about a Work is kept between calls: the rules' own caches go by the text, and hold 64 entries
+//! (the patch).
 
+use crate::comma_splice;
 use harper_core::linting::{LintGroup, Suggestion};
 use harper_core::parsers::PlainEnglish;
 use harper_core::spell::FstDictionary;
@@ -104,6 +107,10 @@ impl Grammar {
             None => {
                 let mut group = LintGroup::new_curated(FstDictionary::curated(), dialect);
                 group.config.set_rule_enabled(SPELLING, false);
+                // Ours, beside Harper's. If Harper ever ships a rule of the same name, the test below says so.
+                if group.add(comma_splice::NAME, comma_splice::CommaSplice) {
+                    group.config.set_rule_enabled(comma_splice::NAME, true);
+                }
                 let shipped_on = group.iter_keys().filter(|k| group.config.is_rule_enabled(k)).map(String::from).collect();
                 self.rules.push(Rules { dialect, group, shipped_on, off: Vec::new() });
                 self.rules.len() - 1
@@ -295,6 +302,31 @@ mod tests {
         assert!(rules(&check(&mut grammar, "en-US", text, &[])).contains(&"AnA"));
         // A name Harper hasn't got (from an older or newer version) changes nothing.
         assert!(rules(&check(&mut grammar, "en-US", text, &["NoSuchRule"])).contains(&"AnA"));
+    }
+
+    #[test]
+    fn comma_splices_are_found_beside_harpers_rules_and_can_be_switched_off() {
+        let mut grammar = Grammar::default();
+        let text = "She reached the door, it was locked.";
+        let found = check(&mut grammar, "en-GB", text, &[]);
+        let splice = found.iter().find(|f| f.rule == comma_splice::NAME).unwrap_or_else(|| panic!("{found:?}"));
+        assert_eq!(&text[splice.from..splice.to], ", it");
+        assert_eq!(splice.kind, "Punctuation");
+        assert_eq!(splice.suggestions, [Fix { kind: "replace", text: ". It".into() }, Fix { kind: "replace", text: "; it".into() }]);
+        assert!(!rules(&check(&mut grammar, "en-GB", text, &[comma_splice::NAME])).contains(&comma_splice::NAME));
+        assert!(rules(&check(&mut grammar, "en-GB", text, &[])).contains(&comma_splice::NAME));
+        // Harper has no rule of its own by that name: ours was added, not dropped as a clash.
+        assert!(grammar.rule_names().iter().any(|(name, on)| name == comma_splice::NAME && *on));
+    }
+
+    #[test]
+    fn the_rules_off_by_default_are_harpers() {
+        // grammarmod.ts OFF_BY_DEFAULT: an upgrade that renames one shows up here.
+        let mut grammar = Grammar::default();
+        let names = grammar.rule_names();
+        for rule in ["LongSentences", "OxfordComma", "BoringWords", "Excellent", "SentenceCapitalization"] {
+            assert!(names.iter().any(|(name, _)| name == rule), "{rule}");
+        }
     }
 
     /// Each word of `text` with its type, as "word/TAG".

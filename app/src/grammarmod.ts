@@ -4,8 +4,9 @@
 //
 // Each look sends Rust only the passages it hasn't asked about yet, a few dozen at a time, and
 // keeps the answers for as long as the Work still has those passages. A rule's Marks follow its
-// setting, as "grammar.rule.<rule>" for one Work (and for new Works): "off" (not checked) or unset.
-// Rules are Harper's own names ("AnA"); Harper's SpellCheck is never on, since the Spellchecker spells.
+// setting, as "grammar.rule.<rule>" for one Work (and for new Works): "off" (not checked), "on"
+// (checked, though off by default), or unset (as by default). Rules are Harper's own names ("AnA"),
+// and our own CommaSplice (comma_splice.rs); Harper's SpellCheck is never on, since the Spellchecker spells.
 
 import { invoke } from "@tauri-apps/api/core";
 import type { Extension } from "@codemirror/state";
@@ -26,9 +27,24 @@ export type Harper = (language: string, paragraphs: string[], off: string[]) => 
 
 const rust: Harper = (language, paragraphs, off) => invoke<Found[][] | null>("grammar_check", { language, paragraphs, off });
 
-/** The rules switched off in `scope` (a Work's settings, or new Works'), by name. */
+/**
+ * Harper's rules that are off unless a Work switches them on, from a run over a whole novel
+ * (docs/v3-plan.md): they mark too much in fiction. SentenceCapitalization fires after "Mr." and "Mrs.".
+ * A test in grammar.rs keeps these Harper's names.
+ */
+export const OFF_BY_DEFAULT = ["LongSentences", "OxfordComma", "BoringWords", "Excellent", "SentenceCapitalization"];
+
+/** The rules off in `settings` (a Work's, or new Works'), by name: those off by default unless switched on, and those switched off. */
 export function rulesOff(settings: Record<string, string>): string[] {
-  return Object.entries(settings).filter(([k, v]) => k.startsWith(RULE) && v === "off").map(([k]) => k.slice(RULE.length)).sort();
+  const value = (rule: string) => settings[`${RULE}${rule}`];
+  const switchedOff = Object.entries(settings).filter(([k, v]) => k.startsWith(RULE) && v === "off").map(([k]) => k.slice(RULE.length));
+  return [...new Set([...OFF_BY_DEFAULT.filter((r) => value(r) !== "on"), ...switchedOff])].sort();
+}
+
+/** The setting that switches `rule` on or off: unset where that's its default. */
+export function ruleSetting(rule: string, on: boolean): [string, string] {
+  const byDefault = !OFF_BY_DEFAULT.includes(rule);
+  return [`${RULE}${rule}`, on === byDefault ? "" : on ? "on" : "off"];
 }
 
 /** The Mod's part in a Work's editor: nothing unless the Work is in English. `harper`: for the tests. */
@@ -97,8 +113,8 @@ function button(label: string, run: () => void, className = ""): HTMLButtonEleme
 
 /**
  * The Grammar checker's part of the Mods dialog (`scope` "work", with the Work's `language`), and
- * of the Mods for new Works ("newWorks"): which kind of English it checks, and the rules switched
- * off, each switched on again by clicking it. Harper has hundreds of rules, so they aren't listed:
+ * of the Mods for new Works ("newWorks"): which kind of English it checks, and the rules off (by
+ * default, or switched off), each switched on by clicking it. Harper has hundreds of rules, so they aren't listed:
  * a rule is switched off from one of its Marks, or here by its name.
  */
 export function grammarSettings(settings: ModSettings, scope: "work" | "newWorks", save: Save, language = ""): HTMLElement {
@@ -114,7 +130,7 @@ export function grammarSettings(settings: ModSettings, scope: "work" | "newWorks
   const off = rulesOff(scope === "work" ? settings.work : settings.newWorks);
   if (off.length === 0) p.append("none");
   for (const rule of off) {
-    const chip = button(`${rule} ×`, () => save(scope, `${RULE}${rule}`, ""), "mod-verb");
+    const chip = button(`${rule} ×`, () => save(scope, ...ruleSetting(rule, true)), "mod-verb");
     chip.title = `Check ${rule} again`;
     p.append(chip);
   }
@@ -124,11 +140,11 @@ export function grammarSettings(settings: ModSettings, scope: "work" | "newWorks
   const row = el("div", "mod-verb-add");
   const input = el("input", "");
   input.type = "text";
-  input.placeholder = "A rule's name: LongSentences";
+  input.placeholder = "A rule's name: CommaSplice";
   input.setAttribute("aria-label", "A rule to switch off");
   row.append(input, button("Switch off", () => {
     const name = input.value.trim();
-    if (isRule(name)) save(scope, `${RULE}${name}`, "off");
+    if (isRule(name)) save(scope, ...ruleSetting(name, false));
   }));
   box.append(row);
   return box;

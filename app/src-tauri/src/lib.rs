@@ -2,6 +2,7 @@
 //! and answers the interface. The interface only displays and captures input (ADR 0005).
 
 pub mod colouring;
+pub mod comma_splice;
 pub mod device;
 pub mod docx;
 pub mod folders;

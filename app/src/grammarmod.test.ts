@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { levelOf, marksFrom, toSend, type Found } from "./grammar";
-import { dialectOf, grammarChecker, rulesOff, type Harper } from "./grammarmod";
+import { dialectOf, grammarChecker, OFF_BY_DEFAULT, ruleSetting, rulesOff, type Harper } from "./grammarmod";
 import { markSources, type Mark } from "./marks";
 import { noSettings, type ModContext, type ModSettings } from "./mods";
 import { readPara } from "./prose";
@@ -98,7 +98,7 @@ describe("the Grammar checker", () => {
     const { harper, asked } = fakeHarper();
     const { marks } = await marksOf("She bought a apple.", harper, { work: { "grammar.rule.AnA": "off" } });
     expect(marks).toEqual([]);
-    expect(asked[0].off).toEqual(["AnA"]);
+    expect(asked[0].off).toEqual(["AnA", ...OFF_BY_DEFAULT].sort());
     const danish = await marksOf("She bought a apple.", harper, {}, "da");
     expect(danish.marks).toEqual([]);
     expect(asked).toHaveLength(1);
@@ -106,7 +106,17 @@ describe("the Grammar checker", () => {
 
   it("knows the rules switched off, and which kind of English a Work is checked as", () => {
     expect(rulesOff({ "grammar.rule.LongSentences": "off", "grammar.rule.AnA": "off", "grammar.rule.Dashes": "", "spellcheck.rule.name": "off" }))
-      .toEqual(["AnA", "LongSentences"]);
+      .toEqual(["AnA", ...OFF_BY_DEFAULT].sort());
+    // Off by default until switched on.
+    expect(rulesOff({})).toEqual([...OFF_BY_DEFAULT].sort());
+    expect(rulesOff({ "grammar.rule.LongSentences": "on", "grammar.rule.CommaSplice": "off" })).toEqual(["BoringWords", "CommaSplice", "Excellent", "OxfordComma", "SentenceCapitalization"]);
     expect(["en-US", "en-gb", "en", "", "en-ZA", "en-AU"].map(dialectOf)).toEqual(["American", "British", "British", "British", "British", "Australian"]);
+  });
+
+  it("switches a rule by setting it only where that differs from its default", () => {
+    expect(ruleSetting("AnA", false)).toEqual(["grammar.rule.AnA", "off"]);
+    expect(ruleSetting("AnA", true)).toEqual(["grammar.rule.AnA", ""]);
+    expect(ruleSetting("LongSentences", true)).toEqual(["grammar.rule.LongSentences", "on"]);
+    expect(ruleSetting("LongSentences", false)).toEqual(["grammar.rule.LongSentences", ""]);
   });
 });
