@@ -81,6 +81,17 @@ Each Reviewer gets one of eight colour slots. Each slot has a colour for names a
 | `--mark-rule` | A Rule break: it breaks a known rule, maybe on purpose. Yellow. |
 | `--mark-query` | A Query: worth a look, depending on what was meant. Blue. |
 
+**Syntax highlighting** (the Mod that colours each word by its type, in the editor only; on the editor's background)
+
+| Variable | |
+|---|---|
+| `--word-noun` | Nouns, and names. |
+| `--word-verb` | Verbs, "was" and "had" among them. |
+| `--word-adjective` | Adjectives. |
+| `--word-adverb` | Adverbs. |
+| `--word-conjunction` | Conjunctions ("and", "because"). |
+| `--word-noun-soft` … `--word-conjunction-soft` | The same five as a block behind the word, when the Vault shows word types that way. See-through, so Comment highlights and Find matches show under it. |
+
 **Find and replace**
 
 | Variable | |

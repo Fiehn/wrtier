@@ -10,6 +10,7 @@ import type { Extension } from "@codemirror/state";
 import { dialogueChecker, dialogueSettings } from "./dialoguemod";
 import { grammarChecker, grammarSettings } from "./grammarmod";
 import { spellcheckSettings, spellchecker } from "./spellmod";
+import { syntaxHighlighting, syntaxSettings } from "./syntaxmod";
 
 export type Mod = {
   /** How it's stored: never change one once it has shipped. */
@@ -84,6 +85,14 @@ export const MODS: Mod[] = [
     editor: (ctx) => grammarChecker(ctx),
     marks: true,
     settings: grammarSettings,
+  },
+  {
+    id: "syntax",
+    name: "Syntax highlighting",
+    about: "Colours nouns, verbs, adjectives, adverbs and conjunctions, each in its own colour, so you can see how your sentences are built. Each word's type is read from the words around it. Only in the editor, never in the Page preview or an Export. English Works only.",
+    caveat: "It isn't perfect: it can take a word for the wrong type, and a word it doesn't know isn't coloured, unless it starts with a capital, when it's taken for a name. It reads with the Grammar checker's English, which loads the first time a Work with either opens, taking a moment and most of the Grammar checker's 80 MB of memory (once, when a Work has both).",
+    editor: (ctx) => syntaxHighlighting(ctx),
+    settings: syntaxSettings,
   },
 ];
 

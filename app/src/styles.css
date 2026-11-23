@@ -59,6 +59,18 @@
     --mark-mistake: #c42b2b;
     --mark-rule: #c99a00;
     --mark-query: #2f6fd0;
+    /* Syntax highlighting (syntaxmod.ts): each word type's colour in the editor. */
+    --word-noun: #b03a2e;
+    --word-verb: #2a62b0;
+    --word-adjective: #8a6400;
+    --word-adverb: #8e3fa8;
+    --word-conjunction: #1d7a5a;
+    /* The same, see-through, as a block behind the word ("A block of colour behind them"). */
+    --word-noun-soft: rgb(176 58 46 / 0.18);
+    --word-verb-soft: rgb(42 98 176 / 0.18);
+    --word-adjective-soft: rgb(138 100 0 / 0.2);
+    --word-adverb-soft: rgb(142 63 168 / 0.18);
+    --word-conjunction-soft: rgb(29 122 90 / 0.2);
     /* Typst colouring in the Raw view and Style library tabs (colouring.ts). */
     --syntax-comment: #8a857b;
     --syntax-keyword: #8a3b6e;
@@ -118,6 +130,16 @@
       --mark-mistake: #f07a7a;
       --mark-rule: #e8c04a;
       --mark-query: #7aa8f0;
+      --word-noun: #f08c7c;
+      --word-verb: #84aef0;
+      --word-adjective: #dcb85c;
+      --word-adverb: #d09ae8;
+      --word-conjunction: #6fcfa6;
+      --word-noun-soft: rgb(240 140 124 / 0.24);
+      --word-verb-soft: rgb(132 174 240 / 0.24);
+      --word-adjective-soft: rgb(220 184 92 / 0.24);
+      --word-adverb-soft: rgb(208 154 232 / 0.24);
+      --word-conjunction-soft: rgb(111 207 166 / 0.22);
       --syntax-comment: #8b867c;
       --syntax-keyword: #d59ac4;
       --syntax-function: #8fc0d8;
@@ -176,6 +198,16 @@
     --mark-mistake: #f07a7a;
     --mark-rule: #e8c04a;
     --mark-query: #7aa8f0;
+    --word-noun: #f08c7c;
+    --word-verb: #84aef0;
+    --word-adjective: #dcb85c;
+    --word-adverb: #d09ae8;
+    --word-conjunction: #6fcfa6;
+    --word-noun-soft: rgb(240 140 124 / 0.24);
+    --word-verb-soft: rgb(132 174 240 / 0.24);
+    --word-adjective-soft: rgb(220 184 92 / 0.24);
+    --word-adverb-soft: rgb(208 154 232 / 0.24);
+    --word-conjunction-soft: rgb(111 207 166 / 0.22);
     --syntax-comment: #8b867c;
     --syntax-keyword: #d59ac4;
     --syntax-function: #8fc0d8;
@@ -3725,6 +3757,20 @@ dialog#licenses {
   /* A Mark on one character (a comma) is hard to hit: give it some room. */
   padding: 0 1px;
 }
+/* Syntax highlighting (syntaxmod.ts): a word's type as its colour. Also the examples in the Mods dialog. */
+.cm-word-noun { color: var(--word-noun); }
+.cm-word-verb { color: var(--word-verb); }
+.cm-word-adjective { color: var(--word-adjective); }
+.cm-word-adverb { color: var(--word-adverb); }
+.cm-word-conjunction { color: var(--word-conjunction); }
+.cm-word-block-noun { background-color: var(--word-noun-soft); }
+.cm-word-block-verb { background-color: var(--word-verb-soft); }
+.cm-word-block-adjective { background-color: var(--word-adjective-soft); }
+.cm-word-block-adverb { background-color: var(--word-adverb-soft); }
+.cm-word-block-conjunction { background-color: var(--word-conjunction-soft); }
+[class*="cm-word-block-"] { border-radius: 2px; }
+.mod-word-styles { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+
 .cm-mark-mistake { text-decoration-color: var(--mark-mistake); }
 .cm-mark-rule { text-decoration-color: var(--mark-rule); }
 .cm-mark-query { text-decoration-color: var(--mark-query); }

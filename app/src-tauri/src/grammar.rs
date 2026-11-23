@@ -1,6 +1,9 @@
 //! The Grammar checker (CONTEXT.md, ADR 0023): Harper's grammar and punctuation rules, run over
 //! the paragraphs the interface sends, as the text reads. The interface reads the text
 //! (grammarmod.ts) and makes the Marks; this side only says what Harper found in each paragraph.
+//! The same parse gives each word's type, for the Syntax highlighting Mod (`word_types`).
+//!
+//! All of it runs on Harper's own thread (harper.rs).
 //!
 //! Nothing of Harper is loaded until a Work with the Grammar checker asks its first question:
 //! its dictionary (about 60 MB, half a second) and a set of rules for the Work's kind of English
@@ -14,7 +17,7 @@
 use harper_core::linting::{LintGroup, Suggestion};
 use harper_core::parsers::PlainEnglish;
 use harper_core::spell::FstDictionary;
-use harper_core::{Dialect, Document};
+use harper_core::{Dialect, Document, TokenKind};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -132,9 +135,9 @@ impl Grammar {
     }
 }
 
-fn lint(group: &mut LintGroup, dictionary: &FstDictionary, text: &str) -> Vec<Found> {
-    let document = Document::new(text, &PlainEnglish, dictionary);
-    // Harper counts characters; JavaScript counts UTF-16 units. Where each character starts, and the end.
+/// Harper counts characters; JavaScript counts UTF-16 units. Where each character of `text`
+/// starts in UTF-16 units, and then where it ends.
+fn utf16_starts(text: &str) -> Vec<usize> {
     let mut utf16 = Vec::with_capacity(text.len() + 1);
     let mut at = 0;
     for c in text.chars() {
@@ -142,6 +145,12 @@ fn lint(group: &mut LintGroup, dictionary: &FstDictionary, text: &str) -> Vec<Fo
         at += c.len_utf16();
     }
     utf16.push(at);
+    utf16
+}
+
+fn lint(group: &mut LintGroup, dictionary: &FstDictionary, text: &str) -> Vec<Found> {
+    let document = Document::new(text, &PlainEnglish, dictionary);
+    let utf16 = utf16_starts(text);
     let last = utf16.len() - 1;
     let mut found = Vec::new();
     for (rule, lints) in group.organized_lints(&document) {
@@ -162,6 +171,55 @@ fn lint(group: &mut LintGroup, dictionary: &FstDictionary, text: &str) -> Vec<Fo
     }
     found.sort_by(|a, b| (a.from, a.to, &a.rule).cmp(&(b.from, b.to, &b.rule)));
     found
+}
+
+// ---- Word types, for the Syntax highlighting Mod ----
+
+/// A word and its type where it stands, as Harper reads it: `from`..`to` in UTF-16 units of the
+/// paragraph as sent.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct Word {
+    pub from: usize,
+    pub to: usize,
+    /// Its Universal POS tag, as Harper names it: "NOUN", "PROPN", "VERB", "AUX", "ADJ", "ADV",
+    /// "CCONJ", "SCONJ", "PRON", "DET", "ADP", "PART", "NUM", "INTJ"…
+    pub tag: String,
+}
+
+/// The type of each word in each of `paragraphs` of a Work in `language`, from the same parse
+/// Harper's rules read (its tagger looks at the words around each one: "record/VERB a
+/// record/NOUN"). None if the Work isn't in English. Only Harper's dictionary is loaded, not its rules.
+///
+/// A word Harper's dictionary doesn't know has no type, except one that starts with a capital,
+/// which is taken for a name (PROPN): a character's or a place's, made up. Others are left out.
+pub fn word_types(language: &str, paragraphs: &[String]) -> Option<Vec<Vec<Word>>> {
+    dialect(language)?;
+    let dictionary = FstDictionary::curated();
+    Some(paragraphs.iter().map(|text| catch_unwind(AssertUnwindSafe(|| words_of(&dictionary, text))).unwrap_or_default()).collect())
+}
+
+fn words_of(dictionary: &FstDictionary, text: &str) -> Vec<Word> {
+    let document = Document::new(text, &PlainEnglish, dictionary);
+    let source = document.get_source();
+    let utf16 = utf16_starts(text);
+    let last = utf16.len() - 1;
+    let mut words = Vec::new();
+    for token in document.tokens() {
+        let TokenKind::Word(meta) = &token.kind else { continue };
+        let tag = match meta {
+            Some(meta) => match meta.pos_tag {
+                Some(tag) => format!("{tag:?}"),
+                None => continue,
+            },
+            None if source.get(token.span.start).is_some_and(|c| c.is_uppercase()) => "PROPN".to_string(),
+            None => continue,
+        };
+        let (start, end) = (token.span.start.min(last), token.span.end.min(last));
+        if start < end {
+            words.push(Word { from: utf16[start], to: utf16[end], tag });
+        }
+    }
+    words
 }
 
 fn fix(s: &Suggestion) -> Fix {
@@ -237,6 +295,41 @@ mod tests {
         assert!(rules(&check(&mut grammar, "en-US", text, &[])).contains(&"AnA"));
         // A name Harper hasn't got (from an older or newer version) changes nothing.
         assert!(rules(&check(&mut grammar, "en-US", text, &["NoSuchRule"])).contains(&"AnA"));
+    }
+
+    /// Each word of `text` with its type, as "word/TAG".
+    fn typed(text: &str) -> Vec<String> {
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        word_types("en-GB", &[text.to_string()]).expect("English").remove(0).iter()
+            .map(|w| format!("{}/{}", String::from_utf16_lossy(&utf16[w.from..w.to]), w.tag))
+            .collect()
+    }
+
+    #[test]
+    fn a_word_gets_its_type_from_where_it_stands() {
+        let words = typed("I will record a record.");
+        assert!(words.contains(&"record/VERB".to_string()), "{words:?}");
+        assert!(words.contains(&"record/NOUN".to_string()), "{words:?}");
+        let words = typed("She walked slowly and quietly to the old house.");
+        for w in ["walked/VERB", "slowly/ADV", "and/CCONJ", "old/ADJ", "house/NOUN"] {
+            assert!(words.contains(&w.to_string()), "{w} in {words:?}");
+        }
+    }
+
+    #[test]
+    fn a_word_it_does_not_know_is_a_name_if_it_has_a_capital_and_nothing_otherwise() {
+        let words = typed("Kvothe smiled at the glimmerous lights.");
+        assert!(words.contains(&"Kvothe/PROPN".to_string()), "{words:?}");
+        assert!(!words.iter().any(|w| w.starts_with("glimmerous/")), "{words:?}");
+    }
+
+    #[test]
+    fn word_types_are_placed_in_utf16_units_and_only_for_english() {
+        // The emoji is two UTF-16 units: "cat" is counted as JavaScript counts.
+        let words = typed("😀 The cat sat.");
+        assert!(words.contains(&"cat/NOUN".to_string()), "{words:?}");
+        assert_eq!(word_types("da", &["Katten sad.".to_string()]), None);
+        assert_eq!(word_types("en", &[String::new()]), Some(vec![vec![]]));
     }
 
     #[test]

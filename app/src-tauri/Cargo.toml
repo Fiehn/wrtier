@@ -53,6 +53,7 @@ sha2 = "0.10"           # a downloaded Dictionary is checked against the app's l
 # per-Work rule switches are kept under. Used patched (the workspace's Cargo.toml). No thesaurus
 # (4.5 MB of binary nothing uses); "concurrent" so its rules can be kept behind a Mutex.
 harper-core = { version = "=3.2.0", default-features = false, features = ["concurrent"] }
+tokio = { version = "1", default-features = false, features = ["sync"] }  # Harper's thread answers through a oneshot (already in the build, through Tauri)
 
 [target.'cfg(windows)'.dependencies]
 self-replace = "1.5"    # the portable exe puts a new version in its own place
