@@ -438,6 +438,11 @@ test("Find in Vault finds in every Work, opens matches in a passing tab, and kee
   await expect(input).toHaveValue("lighthouse");
   await expect(summary).toHaveText("3 matches in 3 Works");
 
+  // The button again, while finding: it closes, as Esc does.
+  await page.locator("#open-find-in-vault").click();
+  await expect(panel).toBeHidden();
+  await expect(page.locator("#works")).toBeVisible();
+
   expect(errors, "errors in the page").toEqual([]);
   expect(await page.evaluate(() => (window as any).__fake.unknown), "commands the fake doesn't know").toEqual([]);
 });

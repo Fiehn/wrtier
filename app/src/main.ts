@@ -1248,7 +1248,8 @@ function openFindInVault() {
   }
   findInVault.show(text);
 }
-$("open-find-in-vault").addEventListener("click", openFindInVault);
+// The button toggles: finding already, it closes, and the Works list is back.
+$("open-find-in-vault").addEventListener("click", () => (findInVault.isOpen ? findInVault.close() : openFindInVault()));
 
 // ---- Quick switcher (Ctrl+O) ----
 
