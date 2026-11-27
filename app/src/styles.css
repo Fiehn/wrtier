@@ -23,6 +23,8 @@
     --editor-font-family: Georgia, "Iowan Old Style", serif;
     --text-width: 44em;
     --editor-line-height: 1.6;
+    /* The writing cursor: the text's colour, light or dark, unless a theme sets its own. */
+    --cursor: var(--text);
     /* Reviewer colour slots (vault/reviewers.rs): the colour itself, for names and swatches, and
        a see-through one for highlighting their Comments' text (overlapping highlights darken). A CSS theme can redefine any of them. */
     --reviewer-teal: #1c7c74;
@@ -1765,6 +1767,17 @@ body.custom-frame #side-panel {
 
 .editor .cm-editor.cm-focused {
   outline: none;
+}
+
+/* The writing cursor, in every editor (a Work's, a Comment's, the Style library's), and where a
+   drag would drop. CodeMirror's own light theme makes it black whatever the app's theme; :root
+   makes this rule outweigh that one. */
+:root .cm-editor .cm-content {
+  caret-color: var(--cursor);
+}
+
+:root .cm-editor .cm-dropCursor {
+  border-left-color: var(--cursor);
 }
 
 .editor .cm-scroller {

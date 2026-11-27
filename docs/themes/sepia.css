@@ -20,6 +20,7 @@
   --editor-font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   --text-width: 40em;
   --editor-line-height: 1.7;
+  --cursor: #8a4b2a; /* in the accent colour; leave it out to follow --text */
 
   /* The Author's Comments, in the accent colour */
   --comment-author: #8a4b2a;

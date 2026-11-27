@@ -465,7 +465,23 @@ test("a Vault theme wins over the built-in colours it starts from", async ({ pag
   expect(text).toBe("#e8e4dc");
   const width = await page.locator(".cm-content").first().evaluate((el) => getComputedStyle(el).maxWidth);
   expect(width).toBe(`${30 * 17}px`);
+  // The cursor follows the text's colour, not CodeMirror's black (issue #4).
+  await expect(page.locator(".cm-content").first()).toHaveCSS("caret-color", "rgb(232, 228, 220)");
 });
+
+for (const [theme, caret] of [["dark", "rgb(232, 228, 220)"], ["vault:ember.css", "rgb(240, 120, 40)"]]) {
+  test(`the writing cursor is the text's colour in dark mode, and a theme can colour it (${theme})`, async ({ page }) => {
+    await page.addInitScript({ path: path.join(import.meta.dirname, "fake-tauri.js") });
+    await page.addInitScript((theme) => {
+      const fake = (window as any).__fake;
+      fake.themes["ember.css"] = { name: "Ember", dark: true, css: "/* Theme: Ember, dark */\n:root { --cursor: rgb(240, 120, 40); }" };
+      fake.settings.theme = theme;
+    }, theme);
+    await page.goto("/");
+    await expect(line(page, "She walked home.")).toBeVisible();
+    await expect(page.locator(".cm-content").first()).toHaveCSS("caret-color", caret);
+  });
+}
 
 test("Settings shows the App version, and an update found is saved for, downloaded and installed", async ({ app }) => {
   await app.evaluate(() => {

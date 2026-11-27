@@ -47,6 +47,7 @@ The variables below are kept stable between versions of the app. Any other CSS i
 | `--editor-font-family` | `Georgia, "Iowan Old Style", serif` | The editor's font. Use fonts installed on the Device; the Vault's `fonts/` folder is only for the pages. |
 | `--text-width` | `44em` | The widest the text column gets |
 | `--editor-line-height` | `1.6` | Line spacing in the editor |
+| `--cursor` | `--text` | The writing cursor. It follows your `--text` unless you set it. |
 
 The editor's font size is a setting of its own (Settings → Editor font size), not part of a theme.
 
