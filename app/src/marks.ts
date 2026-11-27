@@ -12,8 +12,8 @@
 // since is dropped, and the Mods look again once the typing pauses. A Mark's Suggestions may
 // also come later, asked for only when its card shows them.
 
-import { Facet, Prec, StateEffect, StateField, type EditorState, type Extension, type Transaction } from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, hoverTooltip, keymap, showTooltip, ViewPlugin, type Tooltip, type ViewUpdate } from "@codemirror/view";
+import { EditorState, Facet, Prec, StateEffect, StateField, type Extension, type Transaction } from "@codemirror/state";
+import { closeHoverTooltips, Decoration, type DecorationSet, EditorView, hoverTooltip, keymap, showTooltip, ViewPlugin, type Tooltip, type ViewUpdate } from "@codemirror/view";
 import type { DismissedMark } from "./sync";
 
 export type MarkLevel = "mistake" | "rule" | "query";
@@ -349,6 +349,14 @@ const cardField = StateField.define<Card | null>({
   }),
 });
 
+/**
+ * A card opening closes the hover card, so a Mark never shows two. (A hover can come up between a
+ * click's mousedown and its click: the click's card then opens beside it. Issue #3.)
+ */
+const oneCard = EditorState.transactionExtender.of((tr) =>
+  tr.effects.some((e) => e.is(openCard)) ? { effects: closeHoverTooltips } : null,
+);
+
 /** How many Suggestions a card shows: the first few, or all once "See more" was chosen. */
 const shownOn = (mark: Mark, more: boolean) => (more ? mark.suggestions.length : Math.min(mark.suggestions.length, SUGGESTIONS_SHOWN));
 
@@ -543,5 +551,5 @@ const clicks = EditorView.domEventHandlers({
  * `hooks`: what the app does with dismissals and counts.
  */
 export function marks(hooks: MarkHooks): Extension {
-  return [foundField, dismissedField, shownField, cardField, looker, hover, cardKeys, clicks, markHooks.of(hooks)];
+  return [foundField, dismissedField, shownField, cardField, oneCard, looker, hover, cardKeys, clicks, markHooks.of(hooks)];
 }

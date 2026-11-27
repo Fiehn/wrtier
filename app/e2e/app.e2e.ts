@@ -1403,6 +1403,28 @@ test("the Dialogue checker marks dialogue, and a Suggestion is accepted as typin
   await expect(app.locator(".cm-mark")).toHaveCount(0);
 });
 
+test("a click on a Mark that's also hovered long enough shows one card, not two (issue #3)", async ({ app }) => {
+  const rain = app.locator("#works li.work-entry", { hasText: "Rain" });
+  await rain.locator(".entry-name").click({ button: "right" });
+  await app.locator("#menu button", { hasText: "Mods…" }).click();
+  await app.locator("#mods-list label", { hasText: "Dialogue checker" }).locator("input").check();
+  await expect.poll(() => app.evaluate(() => (window as any).__fake.mods.Rain)).toContain("dialogue");
+  await app.locator("#mods button[value=done]").click();
+  await endOf(app, "She walked home.");
+  await app.keyboard.type(' "Hi." she said.');
+  const mark = app.locator(".cm-mark-rule");
+  await expect(mark).toHaveCount(1, { timeout: 5000 });
+
+  // The hover's wait (400 ms) runs out between mousedown and the click: it shows its card first.
+  const box = (await mark.boundingBox())!;
+  await app.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await app.mouse.down();
+  await app.waitForTimeout(700);
+  await app.mouse.up();
+  await app.waitForTimeout(300);
+  await expect(app.locator(".cm-mark-card")).toHaveCount(1);
+});
+
 test("the Spellchecker marks unknown words, suggests when asked, and allows a name in the Work", async ({ app }) => {
   const rain = app.locator("#works li.work-entry", { hasText: "Rain" });
   await rain.locator(".entry-name").click({ button: "right" });
