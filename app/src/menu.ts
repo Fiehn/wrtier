@@ -1,4 +1,4 @@
-// A small right-click menu. It closes on a click elsewhere, Escape, scrolling, or the window
+// A small right-click menu, or a note under a button (`showNote`). It closes on a click elsewhere, Escape, scrolling, or the window
 // losing focus; arrow keys move between its items.
 
 /** One colour to pick in a row of them: `css` null is "no colour". */
@@ -42,7 +42,7 @@ function keys(e: KeyboardEvent) {
   }
 }
 
-/** Shows a menu at (x, y) on the screen. */
+/** Shows a menu at (x, y) on the screen, its first item focused. */
 export function showMenu(x: number, y: number, items: MenuItem[]) {
   close();
   if (items.length === 0) return;
@@ -86,6 +86,24 @@ export function showMenu(x: number, y: number, items: MenuItem[]) {
     });
     menu.append(button);
   }
+  present(menu, x, y);
+  menu.querySelector("button")?.focus();
+}
+
+/** Shows `content` in a small box under `anchor` (a Mod's About), closing as a menu does. */
+export function showNote(anchor: HTMLElement, label: string, content: HTMLElement[]) {
+  close();
+  const note = document.createElement("div");
+  note.id = "menu";
+  note.className = "menu-note";
+  note.setAttribute("role", "note");
+  note.setAttribute("aria-label", label);
+  note.append(...content);
+  const at = anchor.getBoundingClientRect();
+  present(note, at.left, at.bottom + 4);
+}
+
+function present(menu: HTMLElement, x: number, y: number) {
   // Inside the dialog that's open, if one is: everything outside it is inert meanwhile.
   (document.querySelector("dialog:modal") ?? document.body).append(menu);
   // Keep it on the screen.
@@ -93,7 +111,6 @@ export function showMenu(x: number, y: number, items: MenuItem[]) {
   menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - box.width - 4))}px`;
   menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - box.height - 4))}px`;
   open = menu;
-  menu.querySelector("button")?.focus();
   window.addEventListener("pointerdown", outside, true);
   window.addEventListener("keydown", keys, true);
   window.addEventListener("blur", close);

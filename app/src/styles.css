@@ -3546,10 +3546,44 @@ dialog#licenses {
   opacity: 0.6;
 }
 
-/* What a Mod can get wrong: in the Mods dialog and in Settings' Mods for new Works. */
-.mod-list .mod-caveat {
-  margin: 2px 0 0 24px;
+/* A Mod's switch and name, with its About symbol just after. */
+.mod-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.mod-head .mod-about {
+  padding: 2px;
+}
+
+.mod-head .mod-about svg {
+  width: 15px;
+  height: 15px;
+}
+
+.mod-beta {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* A Mod's About, popped up under its symbol: what it does, then what it can get wrong. */
+#menu.menu-note {
+  max-width: min(340px, calc(100vw - 8px));
+  box-sizing: border-box;
+  padding: 8px 12px;
   font-size: 13px;
+  line-height: 1.45;
+}
+
+#menu.menu-note p {
+  margin: 0;
+}
+
+#menu.menu-note .mod-caveat {
+  margin-top: 6px;
+  color: var(--muted);
   font-style: italic;
 }
 
@@ -3651,7 +3685,7 @@ dialog#licenses {
   margin: 18px 0 0;
 }
 
-#new-work-mods label.check {
+#new-work-mods .mod-head {
   margin-top: 6px;
 }
 

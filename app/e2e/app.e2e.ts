@@ -1421,8 +1421,16 @@ test("the Spellchecker says what it can get wrong, and shows five Suggestions wi
   await rain.locator(".entry-name").click({ button: "right" });
   await app.locator("#menu button", { hasText: "Mods…" }).click();
   const row = app.locator("#mods-list li.mod-row", { hasText: "Spellchecker" });
-  await expect(row.locator(".mod-caveat")).toContainText("only been tested on English");
-  await expect(app.locator("#mods-list li.mod-row", { hasText: "Dialogue checker" }).locator(".mod-caveat")).toContainText("isn't perfect");
+  // In its About, which pops up, not in the list itself.
+  await expect(row.locator(".mod-caveat")).toHaveCount(0);
+  await row.locator(".mod-about").click();
+  await expect(app.locator("#menu.menu-note .mod-caveat")).toContainText("only been tested on English");
+  await app.locator("#mods-list li.mod-row", { hasText: "Dialogue checker" }).locator(".mod-about").click();
+  await expect(app.locator("#menu.menu-note .mod-caveat")).toContainText("isn't perfect");
+  await app.keyboard.press("Escape");
+  await expect(app.locator("#menu")).toHaveCount(0);
+  await expect(app.locator("#mods")).toBeVisible(); // Escape closed only the About
+  await expect(app.locator("#mods-list li.mod-row", { hasText: "Grammar checker" }).locator(".mod-beta")).toHaveText("(beta)");
   await row.locator("label", { hasText: "Spellchecker" }).locator("input").check();
   await expect.poll(() => app.evaluate(() => (window as any).__fake.mods.Rain)).toContain("spellcheck");
   await app.locator("#mods button[value=done]").click();

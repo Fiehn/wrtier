@@ -16,10 +16,12 @@ export type Mod = {
   /** How it's stored: never change one once it has shipped. */
   id: string;
   name: string;
-  /** One line saying what it does. */
+  /** What it does, shown in its About. */
   about: string;
-  /** What it can get wrong, said wherever it's offered (the Mods dialog, and Settings). */
+  /** What it can get wrong, said in its About wherever it's offered (the Mods dialog, and Settings). */
   caveat?: string;
+  /** Still being tried out: "(beta)" follows its name wherever it's offered. */
+  beta?: boolean;
   /** What it adds to a Work's editor while the Work has it. */
   editor?: (ctx: ModContext) => Extension;
   /** It makes Marks (marks.ts): the editor asks the Vault where its Dismissed ones are. */
@@ -80,6 +82,7 @@ export const MODS: Mod[] = [
   {
     id: "grammar",
     name: "Grammar checker",
+    beta: true,
     about: "Marks grammar, punctuation and word choice that Harper's rules catch: red for a likely mistake, yellow for a rule broken, blue for one to check. Hover or click a Mark for suggestions, or to stop checking its rule in this Work. Spelling is the Spellchecker's. English Works only.",
     caveat: "It isn't perfect: fiction breaks rules on purpose, in dialogue above all, and it can mark what's right or miss what's wrong. It loads the first time a Work with it opens, which takes a moment and about 80 MB of memory, and checking a long Work the first time can take half a minute.",
     editor: (ctx) => grammarChecker(ctx),

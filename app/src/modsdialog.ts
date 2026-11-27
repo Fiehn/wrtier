@@ -3,7 +3,9 @@
 // The Mods for new Works, and the Vault Mods, are in Settings (`fillNewWorkMods`, `fillVaultMods`).
 
 import { invoke } from "@tauri-apps/api/core";
+import { showNote } from "./menu";
 import { MODS, unknownMods, unknownVaultMods, VAULT_MODS, type Mod, type ModSettings, type ModsState } from "./mods";
+import { SYMBOLS, symbolButton } from "./ui";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -22,8 +24,29 @@ function line(className: string, text: string): HTMLElement {
   return p;
 }
 
-/** What a Mod can get wrong, if it says, as a line under it. */
-const caveatOf = (mod: Mod): HTMLElement[] => (mod.caveat ? [line("muted mod-caveat", mod.caveat)] : []);
+/**
+ * A Mod's switch (`box`, then its name, and "(beta)" if it is), with its About beside it: a
+ * button that pops up what it does and what it can get wrong.
+ */
+function head(mod: Mod, box: HTMLInputElement, className: string): HTMLElement {
+  const label = document.createElement("label");
+  label.className = className;
+  label.append(box, ` ${mod.name}`);
+  if (mod.beta) {
+    const beta = document.createElement("span");
+    beta.className = "mod-beta";
+    beta.textContent = "(beta)";
+    label.append(" ", beta);
+  }
+  const about = symbolButton(`About the ${mod.name}`, SYMBOLS.about, () =>
+    showNote(about, `About the ${mod.name}`, [line("", mod.about), ...(mod.caveat ? [line("mod-caveat", mod.caveat)] : [])]),
+  );
+  about.classList.add("mod-about");
+  const row = document.createElement("div");
+  row.className = "mod-head";
+  row.append(label, about);
+  return row;
+}
 
 /** Mods from a newer version of the app: listed greyed, never switched from here. */
 function unknownRows(ids: string[]): HTMLElement[] {
@@ -88,12 +111,7 @@ export async function openMods(id: string, name: string, language: string, chang
       li.className = "mod-row";
       const on = state.work.includes(mod.id);
       const hidden = state.hidden.includes(mod.id);
-      const main = document.createElement("label");
-      main.className = "check mod-name";
-      main.append(
-        checkbox(on, (v) => run(() => invoke<ModsState>("set_mod", { id, name: mod.id, on: v }))),
-        ` ${mod.name}`,
-      );
+      const main = head(mod, checkbox(on, (v) => run(() => invoke<ModsState>("set_mod", { id, name: mod.id, on: v }))), "check mod-name");
       const hide = document.createElement("label");
       hide.className = "check here";
       hide.title = "This device leaves it out in every Work that has it. Other devices still use it.";
@@ -102,7 +120,7 @@ export async function openMods(id: string, name: string, language: string, chang
         checkbox(hidden, (v) => run(async () => ({ ...(await invoke<ModsState>("set_mod_hidden", { name: mod.id, hidden: v })), work: state.work }))),
         " Hide on this device",
       );
-      li.append(main, line("muted", mod.about), ...caveatOf(mod), hide);
+      li.append(main, hide);
       if (on && hidden) li.append(line("muted", "This Work has it, but this device hides it."));
       if (on && mod.settings) {
         const part = mod.settings(settings, "work", save, language);
@@ -153,24 +171,18 @@ export async function fillNewWorkMods(list: HTMLElement): Promise<void> {
   const render = () => {
     const rows = MODS.map((mod) => {
       const li = document.createElement("li");
-      const label = document.createElement("label");
-      label.className = "check";
-      label.title = mod.about;
-      label.append(
-        checkbox(state.newWorks.includes(mod.id), (on) => {
-          invoke<ModsState>("set_new_work_mod", { name: mod.id, on })
-            .then((next) => {
-              state = next;
-              render();
-            })
-            .catch((e) => {
-              render(); // the box goes back to what's saved
-              list.append(line("dialog-error", String(e)));
-            });
-        }),
-        ` ${mod.name}`,
-      );
-      li.append(label, ...caveatOf(mod));
+      const box = checkbox(state.newWorks.includes(mod.id), (on) => {
+        invoke<ModsState>("set_new_work_mod", { name: mod.id, on })
+          .then((next) => {
+            state = next;
+            render();
+          })
+          .catch((e) => {
+            render(); // the box goes back to what's saved
+            list.append(line("dialog-error", String(e)));
+          });
+      });
+      li.append(head(mod, box, "check"));
       if (mod.settings && state.newWorks.includes(mod.id)) li.append(mod.settings(settings, "newWorks", save));
       return li;
     });
@@ -203,14 +215,12 @@ export async function fillVaultMods(list: HTMLElement, changed: (state: ModsStat
       li.className = "mod-row";
       const on = state.vault.includes(mod.id);
       const hidden = state.hidden.includes(mod.id);
-      const main = document.createElement("label");
-      main.className = "check mod-name";
-      main.append(checkbox(on, (v) => save(invoke<ModsState>("set_vault_mod", { name: mod.id, on: v }))), ` ${mod.name}`);
+      const main = head(mod, checkbox(on, (v) => save(invoke<ModsState>("set_vault_mod", { name: mod.id, on: v }))), "check mod-name");
       const hide = document.createElement("label");
       hide.className = "check here";
       hide.title = "This device leaves it out. Other devices still use it.";
       hide.append(checkbox(hidden, (v) => save(invoke<ModsState>("set_mod_hidden", { name: mod.id, hidden: v }))), " Hide on this device");
-      li.append(main, line("muted", mod.about), hide);
+      li.append(main, hide);
       if (on && hidden) li.append(line("muted", "The Vault has it, but this device hides it."));
       return li;
     });
